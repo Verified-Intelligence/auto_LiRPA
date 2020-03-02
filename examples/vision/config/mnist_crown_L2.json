@@ -1,0 +1,113 @@
+{
+    "model_def": "model_defs.py",
+    "dataset": "mnist",
+    "path_prefix": "",
+    "models_path": "./mnist_crown/",
+    "training_params": {
+        "method": "robust",
+        "epochs": 1000,
+        "lr": 5e-4,
+        "weight_decay": 0.01,
+        "optimizer": "adam",
+        "schedule_start": 200,
+        "starting_epsilon": 0.0,
+        "epsilon": 0,
+        "epsilon_weights": [0.05,0.05,0.05],
+        "schedule_length": 600,
+        "norm": 2,
+        "verbose": false,
+        "loader_params": {"batch_size": 40, "test_batch_size": 64, "shuffle_train": true,
+            "ratio": 0.1
+        },
+        "method_params": {"bounded_input": false, "bound_type": "weights-crown"}
+    },
+    "attack_params": {
+        "batch_size": 128,
+        "eps_start": 0.0,
+        "eps_end": 0.3,
+        "eps_step": 16
+    },
+    "cert_params": {
+        "batch_size": 128,
+        "num_examples": 1000,
+        "epsilon": 0.3,
+        "bounded_input": true,
+        "data_ub": 1.0,
+        "data_lb": 0.0
+    },
+    "eval_params": {
+        "method": "robust",
+        "epsilon": 0,
+        "norm": 2,
+        "verbose": false,
+        "epsilon_weights": [0.01,0.01,0.01],
+        "loader_params": {"batch_size": 32, "test_batch_size": 32, "shuffle_train": true},
+        "method_params": {"bounded_input": false, "bound_type": "weights-crown"}
+    },
+    "models": [
+        {
+            "model_id": "cnn_2layer_width_1",
+            "model_class": "model_cnn_2layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 1, "linear_size": 128}
+        },
+        {
+            "model_id": "cnn_2layer_width_2",
+            "model_class": "model_cnn_2layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 2, "linear_size": 256}
+        },
+
+        {
+            "model_id": "mlp_3layer_64_64",
+            "model_class": "model_mlp_after_flatten",
+            "model_params": {"in_dim": 784, "neurons": [64, 64]}
+        },
+
+        {
+            "model_id": "mlp_2layer_64_10",
+            "model_class": "model_mlp_after_flatten",
+            "model_params": {"in_dim": 784, "neurons": [64]}
+        },
+
+        {
+            "model_id": "cnn_4layer_linear_256_width_1",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 1, "linear_size": 256}
+        },
+        {
+            "model_id": "cnn_4layer_linear_256_width_2",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 2, "linear_size": 256}
+        },
+        {
+            "model_id": "cnn_4layer_linear_512_width_1",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 1, "linear_size": 512}
+        },
+        {
+            "model_id": "cnn_4layer_linear_512_width_2",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 1, "in_dim": 28, "width": 2, "linear_size": 512}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_3_width_1",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 1, "in_dim": 28, "kernel_size": 3, "width": 1}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_3_width_2",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 1, "in_dim": 28, "kernel_size": 3, "width": 2}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_5_width_1",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 1, "in_dim": 28, "kernel_size": 5, "width": 1}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_5_width_2",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 1, "in_dim": 28, "kernel_size": 5, "width": 2}
+        }
+    ]
+}
+

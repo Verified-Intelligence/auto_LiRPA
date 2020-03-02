@@ -1,0 +1,82 @@
+{
+    "model_def": "model_defs.py",
+    "dataset": "cifar",
+    "models_path": "./cifar_8_small/",
+    "training_params": {
+        "method": "robust",
+        "epochs": 200,
+        "lr": 0.001,
+        "weight_decay": 0.0,
+        "optimizer": "adam",
+        "starting_epsilon": 0.0,
+        "epsilon": 0.03137,
+        "schedule_start": 10,
+        "schedule_length":121,
+        "norm": "inf",
+        "verbose": false,
+        "loader_params": {"batch_size": 128, "test_batch_size": 256, "shuffle_train": true, "train_random_transform": true, "normalize_input": true},
+        "method_params": {"bounded_input": false, "bound_type": "crown-interval"}
+    },
+    "attack_params": {
+        "batch_size": 128,
+        "eps_start": 0.0,
+        "eps_end": 0.03137,
+        "eps_step": 9
+    },
+    "eval_params": {
+        "method": "robust",
+        "epsilon": 0.03137,
+        "norm": "inf",
+        "verbose": false,
+        "loader_params": {"batch_size": 128, "test_batch_size": 256, "shuffle_train": true, "normalize_input": true},
+        "method_params": {"bounded_input": false, "bound_type": "interval"}
+    },
+    "models": [
+        {
+            "model_id": "cnn_2layer_width_2",
+            "model_class": "model_cnn_2layer",
+            "model_params": {"in_ch": 3, "in_dim": 32, "width": 2, "linear_size": 256}
+        },
+        {
+            "model_id": "cnn_4layer_linear_256_width_1",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 3, "in_dim": 32, "width": 1, "linear_size": 256}
+        },
+        {
+            "model_id": "cnn_4layer_linear_256_width_2",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 3, "in_dim": 32, "width": 2, "linear_size": 256}
+        },
+        {
+            "model_id": "cnn_4layer_linear_512_width_1",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 3, "in_dim": 32, "width": 1, "linear_size": 512}
+        },
+        {
+            "model_id": "cnn_4layer_linear_512_width_2",
+            "model_class": "model_cnn_4layer",
+            "model_params": {"in_ch": 3, "in_dim": 32, "width": 2, "linear_size": 512}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_3_width_1",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 3, "in_dim": 32, "kernel_size": 3, "width": 8}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_3_width_2",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 3, "in_dim": 32, "kernel_size": 3, "width": 2}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_5_width_1",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 3, "in_dim": 32, "kernel_size": 5, "width": 1}
+        },
+        {
+            "model_id": "cnn_3layer_fixed_kernel_5_width_2",
+            "model_class": "model_cnn_3layer_fixed",
+            "model_params": {"in_ch": 3, "in_dim": 32, "kernel_size": 5, "width": 2}
+        }
+    ]
+}
+
