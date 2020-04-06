@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from auto_LiRPA.utils import logger
-from examples.language.language_utils import build_vocab
+from language_utils import build_vocab
 
 class LSTMFromEmbeddings(nn.Module):
     def __init__(self, args, vocab_size):

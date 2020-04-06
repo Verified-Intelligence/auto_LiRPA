@@ -148,9 +148,9 @@ def svhn_loaders(batch_size, shuffle_train = True, shuffle_test = False, train_r
 
 # when new loaders is added, they must be registered here
 loaders = {
-        "mnist": partial(mnist_loaders, datasets.MNIST),
-        "fashion-mnist": partial(mnist_loaders, datasets.FashionMNIST),
-        "cifar": cifar_loaders,
+        "MNIST": partial(mnist_loaders, datasets.MNIST),
+        "FashionMNIST": partial(mnist_loaders, datasets.FashionMNIST),
+        "CIFAR": cifar_loaders,
         "svhn": svhn_loaders,
         }
 

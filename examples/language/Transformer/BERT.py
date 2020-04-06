@@ -24,7 +24,6 @@ import torch.nn as nn
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm, trange
 from torch.nn import CrossEntropyLoss, MSELoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score
@@ -33,9 +32,9 @@ from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE, WE
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
 
-from examples.language.Transformer.modeling import BertForSequenceClassification, BertConfig
-from examples.language.Transformer.utils import convert_examples_to_features
-from examples.language.language_utils import build_vocab
+from Transformer.modeling import BertForSequenceClassification, BertConfig
+from Transformer.utils import convert_examples_to_features
+from language_utils import build_vocab, load_glove
 from auto_LiRPA.utils import logger
 
 class BERT(nn.Module):
@@ -43,20 +42,25 @@ class BERT(nn.Module):
         super(BERT, self).__init__()
         self.args = args
         self.max_seq_length = args.max_sent_length
-        self.do_lower_case = True
+        self.drop_unk = args.drop_unk        
         self.num_labels = args.num_labels
         self.label_list = range(args.num_labels) 
         self.device = args.device
         self.lr = args.lr
 
         self.dir = args.dir
-        self.vocab = build_vocab(data_train, args.min_word_freq)
+        self.glove = load_glove(args.use_glove, args.glove)
+        include = self.glove.keys() if self.glove is not None else []
+        self.vocab = build_vocab(data_train, args.min_word_freq, include=include)
         if not os.path.exists(self.dir):
             os.makedirs(self.dir)
         self.checkpoint = 0
         if os.path.exists(os.path.join(self.dir, "checkpoint")):
-            with open(os.path.join(self.dir, "checkpoint")) as file:
-                self.checkpoint = int(file.readline())
+            if args.checkpoint is not None:
+                self.checkpoint = args.checkpoint
+            else:
+                with open(os.path.join(self.dir, "checkpoint")) as file:
+                    self.checkpoint = int(file.readline())
             dir_ckpt = os.path.join(self.dir, "ckpt-{}".format(self.checkpoint))
             path = os.path.join(dir_ckpt, "model")
             self.model = torch.load(path)   
@@ -71,7 +75,8 @@ class BERT(nn.Module):
             config.hidden_act = args.hidden_act
             config.num_attention_heads = args.num_attention_heads
             config.layer_norm = args.layer_norm
-            self.model = BertForSequenceClassification(config, self.num_labels).to(self.device)
+            self.model = BertForSequenceClassification(
+                config, self.num_labels, glove=self.glove, vocab=self.vocab).to(self.device)
             logger.info("Model initialized")
 
         self.model_from_embeddings = self.model.model_from_embeddings
@@ -79,7 +84,7 @@ class BERT(nn.Module):
         self.model_from_embeddings.device = self.device
 
     def save(self, epoch):
-        # the BoundGeneral object should be saved
+        # the BoundedModule object should be saved
         self.model.model_from_embeddings = self.model_from_embeddings
         model_to_save = self.model
 
@@ -99,12 +104,9 @@ class BERT(nn.Module):
     def build_optimizer(self):
         # update the original model with the converted model
         self.model.model_from_embeddings = self.model_from_embeddings
-
-        param_group = []
-        for p in self.model.named_parameters():
-            param_group.append(p)
-        param_group = [{"params": [p[1] for p in param_group], "weight_decay": 0.}]    
-
+        param_group = [
+            {"params": [p[1] for p in self.model.named_parameters()], "weight_decay": 0.},
+        ]    
         return torch.optim.Adam(param_group, lr=self.lr)
 
     def train(self):
@@ -117,7 +119,7 @@ class BERT(nn.Module):
 
     def get_input(self, batch):
         features = convert_examples_to_features(
-            batch, self.label_list, self.max_seq_length, self.vocab)
+            batch, self.label_list, self.max_seq_length, self.vocab, drop_unk=self.drop_unk)
 
         input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long).to(self.device)
         input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long).to(self.device)

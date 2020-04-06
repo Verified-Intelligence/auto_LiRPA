@@ -1,20 +1,21 @@
 import torch
-from torchvision import models
 from collections import OrderedDict
 import re
 from collections import namedtuple
 from torch.onnx import OperatorExportTypes
 from packaging import version
+from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
+from auto_LiRPA.utils import logger
 
 Node = namedtuple('Node', (
-    'name', 'inputs', 'attr', 'op', 'param', 'bound_node', 'output_index'))
+    'name', 'ori_name', 'inputs', 'attr', 'op', 'param', 'bound_node', 'output_index', 'perturbation'))
 
 torch_old = version.parse(torch.__version__) < version.parse("1.2.0")
 
 def replace(name, scope):
     return '/'.join([scope[name], name])
 
-def parse(graph, params, num_inputs):
+def parse(graph, params):
     # in what scope is each node used as an input
     scope = {}
 
@@ -52,12 +53,16 @@ def parse(graph, params, num_inputs):
                 uname = out.debugName()  
 
             nodesOP.append(Node(**{'name': replace(uname, scope),
+                                'ori_name': '',
                                 'op': n.kind(),
                                 'inputs': inputs,
                                 'attr': attrs,
                                 'param': None,  # will assign parameters later
                                 'bound_node': None,
-                                'output_index': i}))
+                                'output_index': i, 
+                                'perturbation': None, }))
+
+    assert len(list(graph.inputs())) == len(params)
 
     for i, n in enumerate(graph.inputs()):
         uname = n.uniqueName() if torch_old else n.debugName()
@@ -66,19 +71,28 @@ def parse(graph, params, num_inputs):
             scope[uname] = 'unused'
             continue
 
+        # params[i] is a tuple, ("name", Tensor)
+        if isinstance(params[i][1], BoundedTensor) or isinstance(params[i][1], BoundedParameter):
+            perturbation = params[i][1].ptb
+        else:
+            perturbation = None
+        if n.type().sizes() != list(params[i][1].size()):
+            raise RuntimeError("Input tensor shapes do not much: {} != {}".format(n.type().sizes(), list(params[i][1].size())))
         nodesIO.append(Node(**{'name': replace(uname, scope),
+                             'ori_name': params[i][0],
                              'op': 'Parameter',
                              'inputs': [], 
                              'attr': str(n.type()),
-                             'param': params[0] if i >= num_inputs else None,
+                             'param': params[i][1],
                              'bound_node': None,
-                             'output_index': None}))
-        params = params[(i >= num_inputs):]
+                             'output_index': None,
+                             # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
+                             'perturbation': perturbation, }))
 
     return nodesOP, nodesIO
 
 def _get_jit_params(module, param_exclude, param_include):
-    state_dict = torch.jit._unique_state_dict(module)
+    state_dict = torch.jit._unique_state_dict(module, keep_vars=True)
 
     if param_exclude is not None:
         param_exclude = re.compile(param_exclude)
@@ -97,20 +111,28 @@ def _get_jit_params(module, param_exclude, param_include):
             if "weight" in k or "bias" in k or "running_mean" in k or "running_var" in k:
                 new_state_dict[k] = v
 
-    params = list(new_state_dict.values()) #[::-1]
+    params = zip(new_state_dict.keys(), new_state_dict.values())
 
-    return params, list(new_state_dict.keys()) #[::-1]
+    return params
 
-def get_graph_params(module, input, param_exclude=".*AuxLogits.*", param_include=None):
-    params, weight_names = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
-    trace, out = torch.jit.get_trace_graph(module, input)
-    torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
-    torch_graph = trace.graph()
+def get_graph_params(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
+    params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
+    if version.parse(torch.__version__) < version.parse("1.4.0"):
+        trace, out = torch.jit.get_trace_graph(module, inputs)
+        torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
+        torch_graph = trace.graph()
+    else:
+        # _get_trace_graph becomes an internal function in version >= 1.4.0
+        trace, out = torch.jit._get_trace_graph(module, inputs)
+        torch_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
 
-    if not isinstance(input, tuple):
-        input = (input, )
+    if not isinstance(inputs, tuple):
+        inputs = (inputs, )
+    # Add a name to all inputs
+    inputs = zip(["input_{}".format(i) for i in range(len(inputs))], inputs)
+    params = tuple(inputs) + tuple(params)
 
-    nodesOP, nodesIO = parse(torch_graph, params, len(input))
+    nodesOP, nodesIO = parse(torch_graph, params)
 
     for i in range(len(nodesOP)):
         param_in = OrderedDict()

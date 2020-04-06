@@ -1,43 +1,59 @@
-from examples.utils import logger
+from auto_LiRPA.utils import logger
+import numpy as np
 
-def build_vocab(data_train, min_word_freq, dump=False):
+def build_vocab(data_train, min_word_freq, dump=False, include=[]):
     vocab = {
-        "[PAD]": 0,
-        "[UNK]": 1,
-        "[CLS]": 2,
-        "[SEP]": 3,
-        "[MASK]": 4
+        '[PAD]': 0,
+        '[UNK]': 1,
+        '[CLS]': 2,
+        '[SEP]': 3,
+        '[MASK]': 4
     }
     cnt = {}
     for example in data_train:
-        for token in example["sentence"].strip().lower().split():
+        for token in example['sentence'].strip().lower().split():
             if token in cnt:
                 cnt[token] += 1
             else:
                 cnt[token] = 1
     for w in cnt:
-        if cnt[w] >= min_word_freq:
+        if cnt[w] >= min_word_freq or w in include:
             vocab[w] = len(vocab)
-    logger.info("Vocabulary size: {}".format(len(vocab)))
+    logger.info('Vocabulary size: {}'.format(len(vocab)))
 
     if dump:
-        with open("tmp/vocab.txt", "w") as file:
+        with open('tmp/vocab.txt', 'w') as file:
             for w in vocab.keys():
-                file.write("{}\n".format(w))
+                file.write('{}\n'.format(w))
 
     return vocab
 
-def tokenize(batch, vocab, max_seq_length):
-    tokens = []
+def load_glove(use_glove, glove_path):
+    if not use_glove:
+        return None
+    logger.info('Loading glove {}'.format(glove_path))
+    glove = {}
+    with open(glove_path) as file:
+        for line in file.readlines():
+            t = line.split()
+            glove[t[0]] = np.array(list(map(float, t[1:])), dtype=np.float32)
+    return glove
+
+def tokenize(batch, vocab, max_seq_length, drop_unk=False):
+    res = []
     for example in batch:
-        _tokens = []
-        for token in example["sentence"].strip().lower().split(' ')[:max_seq_length]:
-            if token in vocab:
-                _tokens.append(token)
-            else:
-                _tokens.append("[UNK]")
-        tokens.append(_tokens)    
-    return tokens
+        t = example['sentence'].strip().lower().split(' ')
+        if drop_unk:
+            tokens = [w for w in t if w in vocab][:max_seq_length]
+        else:
+            tokens = []
+            for token in t[:max_seq_length]:
+                if token in vocab:
+                    tokens.append(token)
+                else:
+                    tokens.append('[UNK]')
+        res.append(tokens)    
+    return res
 
 def token_to_id(tokens, vocab):
     ids = []

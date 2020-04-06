@@ -81,10 +81,12 @@ pull request. We welcome contributions in any form from anyone.
 ## Quick Start
 
 First define your computation as a `nn.Module` and wrap it using
-`auto_LiRPA.BoundGeneral()`. Then, you can call the `compute_bounds` function
+`auto_LiRPA.BoundedModule()`. Then, you can call the `compute_bounds` function
 to obtain certified lower and upper bounds under perturbation:
 
 ```python
+from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
+
 # Define computation as a nn.Module
 class MyModel(nn.Module):
     def forward(self, x):
@@ -92,12 +94,16 @@ class MyModel(nn.Module):
 
 model = MyModel()
 my_input = load_a_batch_of_data()
-# Wrap model with auto_LiRPA
-model = auto_LiRPA.BoundGeneral(model, my_input)
+# Wrap the model with auto_LiRPA
+model = BoundedModule(model, my_input)
 # Define perturbation
 ptb = PerturbationLpNorm(norm=np.inf, eps=0.1)
+# Make the input a BoundedTensor with perturbation
+my_input = BoundedTensor(my_input, ptb)
+# Forward propagation using BoundedTensor
+prediction = model(my_input)
 # Compute LiRPA bounds
-lb, ub = model.compute_bounds(ptb=ptb, x=my_input, method="backward")
+lb, ub = model.compute_bounds(method="backward")
 ```
 
 Checkout
@@ -108,7 +114,13 @@ for a complete but very basic example.
 
 We provide many [examples](examples) of using our `auto_LiRPA` library,
 including robustness verification and certified robust training for fairly
-complicated networks and specifications.
+complicated networks and specifications. Please first install required libraries
+to run the examples:
+
+```bash
+cd examples
+pip install -r requirements.txt
+```
 
 ### Basic Bound Computation and Verification
 
@@ -119,7 +131,8 @@ guaranteed lower and upper bounds using LiRPA for each output neuron under a L
 infinity perturbation.
 
 ```bash
-python -m examples.vision.simple_verification
+cd examples/vision
+python simple_verification.py
 ```
 
 ### Basic Certified Training
@@ -137,6 +150,26 @@ python simple_training.py
 The default model is a small model, and you can get around 10%-11% verified
 error (at Linf eps=0.3) after training.
 
+Also, we provide certified training on the same Resnet used in [Scaling
+provable adversarial defenses ](https://arxiv.org/pdf/1805.12514.pdf) with 4
+residual blocks with 16, 16, 32, and 64 filters.  This model can be selected
+with the `--model` parameter (note that we change the epsilon scheduler to a
+"smoothed" scheduler [first proposed in IBP
+training](https://github.com/deepmind/interval-bound-propagation/blob/217a14d12686e08ebb5cfea1f2748cce58a55913/interval_bound_propagation/src/utils.py#L84).
+This smoothed scheduler is crucial for training large models):
+
+```
+python simple_training.py --model resnet --scheduler_name SmoothedScheduler
+```
+
+The script can also be used to train CIFAR-10 (we set epsilon to 8/255=0.03137
+and train 200 epochs. The epsilon schedule begins at epoch 21 and lasts for 100
+epochs before epsilon reaches 0.03137):
+
+```bash
+python simple_training.py --data CIFAR --model cnn_6layer --eps 0.03137 --model cnn_6layer --num_epochs 200 --scheduler_name SmoothedScheduler --scheduler_opts start=21,length=100
+```
+
 ### Certified Training for LSTM on MNIST
 
 In [examples/sequence](examples/sequence), we have an example of training a
@@ -145,7 +178,8 @@ Lp-ball and sliced to several pieces each regarded as an input frame. To run
 the example:
 
 ```bash
-python -m examples.sequence.train
+cd examples/sequence
+python train.py
 ```
 
 ### Certified Training for Word Substitution Perturbation on Transformer and LSTM
@@ -155,16 +189,24 @@ support perturbation specification of word substitution, beyond Lp-ball
 perturbation. We perform certified training for Transformer and LSTM on a
 sentiment classification task. 
 
-To train a robust Transformer:
+First, [download data](http://download.huan-zhang.com/datasets/language/data_language.tar.gz) and extract them to `examples/language/data`:
 
 ```bash
-python -m examples.language.train --model=transformer --robust --ibp --method=backward --train
+cd examples/language
+wget http://download.huan-zhang.com/datasets/language/data_language.tar.gz
+tar xvf data_language.tar.gz
+```
+
+Then, to train a robust Transformer:
+
+```bash
+python train.py --model=transformer --robust --ibp --method=backward --use_crown_ibp --train
 ```
 
 And to train a robust LSTM:
 
 ```bash
-python -m examples.language.train --model=lstm --grad_clip=5.0 --lr=0.001 --robust --ibp --method=backward --train
+python train.py --model=lstm --grad_clip=5.0 --lr=0.001 --robust --ibp --method=backward --use_crown_ibp --train
 ```
 
 ### Certified Training for Weight Perturbation
@@ -176,8 +218,7 @@ change in weight parameters do not change loss too much).
 
 ```bash
 cd examples/vision
-python train_general.py --config config/mnist_crown_L2.json --path_prefix saved_models  --model_subset 2
+python simple_training_weights_perturbation.py
 ```
 
-See more details in [doc/paper.md](doc/paper.md) for this example.
-
+See more details in [doc/paper.md](doc/paper.md) for these examples.

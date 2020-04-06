@@ -3,12 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from examples.sequence.lstm import LSTM
-from examples.sequence.data_utils import load_data
-from examples.language.data_utils import get_batches
+from lstm import LSTM
+from data_utils import load_data, get_batches
+from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
 from auto_LiRPA.utils import AverageMeter, logger
-from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.bound_general import BoundGeneral
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
@@ -28,10 +26,11 @@ parser.add_argument("--log_interval", type=int, default=10, help="interval of pr
 args = parser.parse_args()   
 
 def step(model, ptb, batch, eps=args.eps, train=False):
+    ptb.set_eps(eps)    
     X, y = model.get_input(batch)
+    X = BoundedTensor(X, ptb)
     logits = model.core(X)
-    ptb.set_eps(eps)
-    logits_robust = model.core.compute_worst_logits(ptb=ptb, x=X, y=y, IBP=True)
+    logits_robust = model.core.compute_worst_logits(y=y, IBP=True)
         
     preds = torch.argmax(logits, dim=1)
     acc = torch.sum((preds == y).to(torch.float32)) / len(batch)
@@ -56,8 +55,9 @@ torch.cuda.manual_seed_all(args.seed)
 model = LSTM(args).to(args.device)   
 test_batches = get_batches(data_test, args.batch_size) 
 X, y = model.get_input(test_batches[0])
-model.core = BoundGeneral(model.core, (X,))
 ptb = PerturbationLpNorm(norm=args.norm, eps=args.eps) 
+X = BoundedTensor(X, ptb)
+model.core = BoundedModule(model.core, (X,), device=args.device)
 optimizer = model.build_optimizer()
 
 avg_acc, avg_acc_robust, avg_loss = avg = [AverageMeter() for i in range(3)]

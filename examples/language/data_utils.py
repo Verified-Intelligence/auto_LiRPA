@@ -1,62 +1,31 @@
-import random
+import random, json
 from auto_LiRPA.utils import logger
 
 def load_data_sst():
-    # training data
-    path = "data/sst/train-nodes.tsv"
-    logger.info("Loading data {}".format(path))
-    data_train_warmup = []  
-    with open(path) as file:
-        for line in file.readlines()[1:]:
-            data_train_warmup.append({
-                "sentence": line.split("\t")[0],
-                "label": int(line.split("\t")[1])
-            })   
-     
-    # train/dev/test data
-    for subset in ["train", "dev", "test"]:
-        path = "data/sst/{}.txt".format(subset)
-        logger.info("Loading data {}".format(path))
-        data = []  
-        with open(path) as file:
-            for line in file.readlines():
-                segs = line[:-1].split(" ")
-                tokens, word_labels = [], []
-                label = int(segs[0][1])
-                if label < 2: 
-                    label = 0
-                elif label >= 3: 
-                    label = 1
-                else: 
-                    continue
-                for i in range(len(segs) - 1):
-                    if segs[i][0] == "(" and segs[i][1] in ["0", "1", "2", "3", "4"]\
-                            and segs[i + 1][0] != "(":
-                        tokens.append(segs[i + 1][:segs[i + 1].find(")")])
-                        word_labels.append(int(segs[i][1]))
-                data.append({
-                    "label": label,
-                    "sentence": " ".join(tokens),
-                    "word_labels": word_labels
-                })
-        for example in data:
-            for i, token in enumerate(example["sentence"]):
-                if token == "-LRB-":
-                    example["sentence"][i] = "("
-                if token == "-RRB-":
-                    example["sentence"][i] = ")"
-        if subset == "train":
-            data_train = data
-        elif subset == "dev":
-            data_dev = data
-        else:
-            data_test = data
+    data = []
+    for split in ['train_all_nodes', 'train', 'dev', 'test']:
+        with open('data/sst/{}.json'.format(split)) as file:
+            data.append(json.loads(file.read()))
+    return data
 
-    return data_train_warmup, data_train, data_dev, data_test
+def load_data_imdb():
+    data = []
+    for split in ['train', 'dev', 'test']:
+        with open('data/imdb/{}.json'.format(split)) as file:
+            data.append(json.loads(file.read()))
+    data = [data[0]] + data
+    return data
 
-def load_data(dataset):
+def load_data(dataset):    
     if dataset == "sst":
         return load_data_sst()
+    elif dataset == "imdb":
+        return load_data_imdb()
+    else:
+        raise NotImplementedError('Unknown dataset {}'.format(dataset))
+
+def clean_data(data):
+    return [example for example in data if example['candidates'] is not None]
 
 def get_batches(data, batch_size):
     batches = []

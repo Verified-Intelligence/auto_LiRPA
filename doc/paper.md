@@ -7,7 +7,8 @@ In our paper, we demonstrated the applications of our framework on robustness ve
 Install libraries are needed for running the examples:
 
 ```bash
-pip install -r examples/requirements.txt
+cd examples/language
+pip install -r requirements.txt
 ```
 
 ## Environment Variables
@@ -19,19 +20,7 @@ Here is a list of enrironment variables that need to be set whenever involved:
 
 ## Language Models
 
-For experiments on language models, we use a perburbation specification of synonym-based word substitution, where the synonym list of each word in the examples is constructed following Jia et. al, 2019 and their [code](https://worksheets.codalab.org/worksheets/0x79feda5f1998497db75422eca8fcd689).
-
-Please download the dependencies first:
-
-- `tmp/synonyms.json`: Neighbors of all the words in the counterfitted GloVE space [[Download]](https://worksheets.codalab.org/rest/bundles/0x6ba96d4232c046bc9944965919959d93/contents/blob/)
-- `lm/windweller-l2w`: Language model with parameters to screen the neighbor words, by Holtzman et al., 2018 [[Download]](https://worksheets.codalab.org/rest/bundles/0xb4e6f8f93ef04cfebbfa6a466f4ff578/contents/blob/)
-- `lm/pytorch-torchfile`: Library to load language model parameters [[Download]](https://worksheets.codalab.org/rest/bundles/0x6ba96d4232c046bc9944965919959d93/contents/blob/)
-
-Next, pre-compute language model scores for neighbor words:
-
-```bash
-python -m examples.language.pre_compute_lm_scores.py
-```
+First, [download data](https://drive.google.com/file/d/12DlaHm1rG0g7M2ITHghb_tZvDg7oSQE5/view?usp=sharing) and extract them to `examples/language/data'.
 
 We can then do training or verification for models. We have experiments for Transformer and LSTM in our paper.
 
@@ -40,27 +29,31 @@ We can then do training or verification for models. We have experiments for Tran
 Normal training:
 
 ```bash
-python -m examples.language.train --dir=$DIR --num_epochs=1 --train
+cd examples/language
+python train.py --dir=$DIR --num_epochs=1 --train
 ```
 
 Robustness verification:
 
 ```bash
-python -m examples.language.verify $DIR
+cd examples/language
+python verify.py $DIR
 ```
 
 Certified robust training with IBP:
 
 ```bash
-python -m examples.language.train --dir=$DIR --num_epochs_warmup=5 --robust --ibp --train # train
-python -m examples.language.train --dir=$DIR --robust --ibp --budget=$BUDGET # test
+cd examples/language
+python train.py --dir=$DIR --num_epochs_warmup=5 --robust --ibp --train # train
+python train.py --dir=$DIR --robust --ibp --budget=$BUDGET # test
 ```
 
 Certified robust training with IBP+backward:
 
 ```bash
-python -m examples.language.train --dir=$DIR --robust --ibp --method=backward --train # training
-python -m examples.language.train --dir=$DIR --robust --ibp --method=backward --budget=$BUDGET # test
+cd examples/language
+python train.py --dir=$DIR --robust --ibp --method=backward --train # training
+python train.py --dir=$DIR --robust --ibp --method=backward --budget=$BUDGET # test
 ```
 
 ### LSTM
@@ -68,21 +61,24 @@ python -m examples.language.train --dir=$DIR --robust --ibp --method=backward --
 Normal training:
 
 ```bash
-python -m examples.language.train --dir=$DIR --model=lstm --num_epochs_all_nodes=10 --num_epochs=50 --grad_clip=5.0 --lr=0.001 --train 
+cd examples/language
+python train.py --dir=$DIR --model=lstm --num_epochs_all_nodes=10 --num_epochs=50 --grad_clip=5.0 --lr=0.001 --train 
 ```
 
 Certified robust training with IBP:
 
 ```bash
-python -m examples.language.train --dir=$DIR --model=lstm --num_epochs_warmup=10 --num_epochs_all_nodes=10 --num_epochs=50 --grad_clip=5.0 --lr=0.001 --robust --ibp --train # training
-python -m examples.language.train --dir=$DIR --model=lstm --robust --ibp --budget=$BUDGET # test
+cd examples/language
+python train.py --dir=$DIR --model=lstm --num_epochs_warmup=10 --num_epochs_all_nodes=10 --num_epochs=50 --grad_clip=5.0 --lr=0.001 --robust --ibp --train # training
+python train.py --dir=$DIR --model=lstm --robust --ibp --budget=$BUDGET # test
 ```
 
 Certified robust training with IBP+backward:
 
 ```bash
-python -m examples.language.train --dir=$DIR --model=lstm --grad_clip=5.0 --lr=0.001 --robust --ibp --method=backward --train # training
-python -m examples.language.train --dir=$DIR --model=lstm --robust --ibp --budget=$BUDGET # test
+cd examples/language
+python train.py --dir=$DIR --model=lstm --grad_clip=5.0 --lr=0.001 --robust --ibp --method=backward --train # training
+python train.py --dir=$DIR --model=lstm --robust --ibp --budget=$BUDGET # test
 ```
 
 ## Vision Models
@@ -93,30 +89,30 @@ Certified training with backward mode perturbation analysis for L2 perturbation 
 
 ```bash
 cd examples/vision
-python train_general.py --config config/mnist_crown_L2.json --path_prefix $DIR  --model_subset 2
+python simple_training_weights_perturbation.py --norm 2 --bound_type CROWN --batch_size 64
 ```
 
-You can also change the hyperparameters in `config/mnist_crown_L2.json`.
+You can also change the hyperparameters in arguments, like to speed up the training process we can use CROWN-IBP by:
+```bash
+python simple_training_weights_perturbation.py --norm 2 --bound_type CROWN-IBP --batch_size 256
+```
 
-For example, when training with only 10% data on MNIST, we can set `"training_params:loader_params:ratio=0.1"`in the .json file or just run:
+For example, when training with only 10% data on MNIST, we can set:
 
 ```bash
-python train_general.py "training_params:loader_params:ratio=0.1" --config config/fashion-mnist_crown.json --path_prefix $DIR  --model_subset 2
+python simple_training_weights_perturbation.py --norm 2 --ratio 0.1 --bound_type CROWN --batch_size 64
 ```
-
 Evaluate the certified cross entropy and test accuracy:
 
 ```bash
-python eval_general.py --config config/mnist_crown_L2.json --path_prefix $DIR  --model_subset 2
+python simple_training_weights_perturbation.py --load $DIR --norm 2  --bound_type CROWN --batch_size 64 --verify
 ```
 
 ### FashionMNIST
-
-Similarly for FashionMNIST with a different .json file:
-
+Similarly for FashionMNIST with a different dataset argument:
 ```bash
 cd examples/vision
-python train_general.py --config config/fashion-mnist_crown.json --path_prefix $DIR  --model_subset 2
+python simple_training_weights_perturbation.py --data FashionMNIST --norm 2 --bound_type CROWN --batch_size 64 --eps 0.01
 ```
 
 ## References

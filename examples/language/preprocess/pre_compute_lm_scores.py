@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from data_utils import load_data
 
-sys.path.insert(0, 'lm/windweller-l2w/adaptive_softmax')
+sys.path.insert(0, 'tmp/windweller-l2w/adaptive_softmax')
 import query as lmquery
 
 OPTS = None

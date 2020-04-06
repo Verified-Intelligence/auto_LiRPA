@@ -45,19 +45,13 @@ class InputFeatures(object):
         self.tokens = tokens
 
 def convert_examples_to_features(examples, label_list, max_seq_length,
-                                vocab):
+                                vocab, drop_unk=False):
                                 #tokenizer):
     """Loads a data file into a list of `InputBatch`s."""
-
-    # examples = [
-    #     InputExample(0, example["sentence"], None, int(example["label"])) \
-    #     for example in examples
-    # ]
-
     label_map = {label : i for i, label in enumerate(label_list)}
 
     features = []
-    all_tokens = tokenize(examples, vocab, max_seq_length - 2)
+    all_tokens = tokenize(examples, vocab, max_seq_length - 2, drop_unk=drop_unk)
     for i in range(len(all_tokens)):
         all_tokens[i] = ["[CLS]"] + all_tokens[i] + ["[SEP]"]
     all_ids = token_to_id(all_tokens, vocab)
@@ -65,17 +59,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
     max_seq_length = min(max_seq_length, max([len(tokens) for tokens in all_tokens]))
     for (ex_index, example) in enumerate(examples):
         tokens = all_tokens[ex_index]
-
         segment_ids = [0] * len(tokens)
-
-        #input_ids = tokenizer.convert_tokens_to_ids(tokens)
         input_ids = all_ids[ex_index]
-
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
         input_mask = [1] * len(input_ids)
-
-        # Zero-pad up to the sequence length.
         padding = [0] * (max_seq_length - len(input_ids))
         input_ids += padding
         input_mask += padding
@@ -85,12 +71,11 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
 
-        # label_id = label_map[example.label]
-
-        features.append(
-                InputFeatures(input_ids=input_ids,
-                            input_mask=input_mask,
-                            segment_ids=segment_ids,
-                            label_id=example["label"],
-                            tokens=tokens))
+        features.append(InputFeatures(
+            input_ids=input_ids,
+            input_mask=input_mask,
+            segment_ids=segment_ids,
+            label_id=example["label"],
+            tokens=tokens))
+            
     return features

@@ -1,6 +1,5 @@
 from setuptools import setup
 
-
 setup(
     name='auto_LiRPA',
     version='0.1',
@@ -10,8 +9,7 @@ setup(
     author_email='xu.kaid@husky.neu.edu, zhouxingshichn@gmail.com, huan@huan-zhang.com',
     packages=['auto_LiRPA'],
     install_requires=[
-        'torch>=1.0',
-        'torchvision>=0.4',
+        'torch>=1.1',
         'numpy>=1.16',
         'packaging>=20.0',
     ],

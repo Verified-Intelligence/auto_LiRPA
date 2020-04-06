@@ -1,5 +1,7 @@
 import logging
 import pickle
+import time
+import torch
 from collections import defaultdict
 
 logging.basicConfig(
@@ -48,6 +50,40 @@ class MultiAverageMeter(object):
         for k in self.sum_meter:
             s += "{}={:.4f} ".format(k, self.avg(k))
         return s.strip()
+
+class MultiTimer(object):
+    """Count the time for each part of training."""
+    def __init__(self):
+        self.reset()
+    def reset(self):
+        self.timer_starts = defaultdict(float)
+        self.timer_total = defaultdict(float)
+    def start(self, key):
+        if self.timer_starts[key] != 0:
+            raise RuntimeError("start() is called more than once")
+        self.timer_starts[key] = time.time()
+    def stop(self, key):
+        if key not in self.timer_starts:
+            raise RuntimeError("Key does not exist; please call start() before stop()")
+        self.timer_total[key] += time.time() - self.timer_starts[key]
+        self.timer_starts[key] = 0
+    def total(self, key):
+        return self.timer_total[key]
+    def __repr__(self):
+        s = ""
+        for k in self.timer_total:
+            s += "{}_time={:.3f} ".format(k, self.timer_total[k])
+        return s.strip()
+
+def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):    
+    parameters = []
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            parameters.append(param)
+            if param.grad is not None:
+                param.grad.data /= gradient_accumulation_steps
+    if grad_clip is not None:
+        torch.nn.utils.clip_grad_norm_(parameters, grad_clip)                
 
 def dump_results(filename, lb, ub):
     with open(filename, 'wb') as file:
