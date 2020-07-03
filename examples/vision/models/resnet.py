@@ -1,3 +1,7 @@
+'''
+ResNet used in https://arxiv.org/pdf/1805.12514.pdf
+https://github.com/locuslab/convex_adversarial/blob/0d11e671ad9318745a2439afce513c82dc6bf5ce/examples/problems.py
+'''
 import torch
 import torch.nn as nn
 import math
@@ -32,7 +36,7 @@ class Flatten(nn.Module):
         return x.view(x.size(0), -1)
 
 
-def model_resnet(in_ch, in_dim, width=1, N=1):
+def model_resnet(in_ch=3, in_dim=32, width=1, N=1):
     def block(in_filters, out_filters, k, downsample):
         if not downsample:
             k_first = 3
@@ -87,4 +91,5 @@ def model_resnet(in_ch, in_dim, width=1, N=1):
 if __name__ == "__main__":
     model = model_resnet(in_ch=1, in_dim=28)
     dummy = torch.randn(8, 1, 28, 28)
+    print(model)
     print(model(dummy).shape)

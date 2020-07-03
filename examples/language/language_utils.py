@@ -28,17 +28,6 @@ def build_vocab(data_train, min_word_freq, dump=False, include=[]):
 
     return vocab
 
-def load_glove(use_glove, glove_path):
-    if not use_glove:
-        return None
-    logger.info('Loading glove {}'.format(glove_path))
-    glove = {}
-    with open(glove_path) as file:
-        for line in file.readlines():
-            t = line.split()
-            glove[t[0]] = np.array(list(map(float, t[1:])), dtype=np.float32)
-    return glove
-
 def tokenize(batch, vocab, max_seq_length, drop_unk=False):
     res = []
     for example in batch:

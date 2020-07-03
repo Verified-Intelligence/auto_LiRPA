@@ -1,18 +1,55 @@
 import random
 import sys
 import time
-import multiprocessing
 import argparse
 import multiprocessing
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
+
+from torch.utils.tensorboard import SummaryWriter
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter
-from auto_LiRPA.eps_scheduler import LinearScheduler, AdaptiveScheduler, SmoothedScheduler, FixedScheduler
+from autoLiRPA.eps_scheduler import LinearScheduler, AdaptiveScheduler, SmoothedScheduler, FixedScheduler
 import models
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+
+torch.cuda.set_device(2)
+
+# class ensemble_MNIST(nn.Module):
+#     def __init__(self):
+#         super(ensemble_MNIST, self).__init__()
+#         self.model_1 = models.cnn_6layer(1, 28)
+#         self.model_2 = models.cnn_4layer(1, 28)
+#         # self.fc1 = nn.Linear(784, 64, bias=True)
+#         # self.fc2 = nn.Linear(64, 64, bias=True)
+#         # self.fc3 = nn.Linear(64, 10, bias=True)
+
+#         # # Add perturbation on the weights/bias of fc1/fc2
+#         # self.ptb_w = PerturbationLpNorm(norm=np.inf, eps=0.)
+#         # self.fc1.weight = BoundedParameter(self.fc1.weight.data, self.ptb_w)
+#         # # self.fc1.bias = BoundedParameter(self.fc1.bias.data, ptb)
+#         # self.fc2.weight = BoundedParameter(self.fc2.weight.data, self.ptb_w)
+#         # self.fc3.weight = BoundedParameter(self.fc3.weight.data, self.ptb_w)
+    
+#     def load(self, path1, path2):
+#         state_dict = torch.load(path1)['state_dict']
+#         self.model_1.load_state_dict(state_dict)
+
+#         state_dict = torch.load(path2)['state_dict']
+#         self.model_2.load_state_dict(state_dict)
+
+#     def forward(self, x):
+#         # x_flatten = x.view(-1, 784)
+
+#         x1 = self.model_1(x)
+#         x2 = self.model_2(x)
+#         # x = F.relu(self.fc1(x))
+#         # x = F.relu(self.fc2(x))
+#         # x = self.fc3(x)
+#         multi = torch.full_like(x1, 0.5)
+#         return (x1 + x2) * multi
 
 parser = argparse.ArgumentParser()
 
@@ -25,20 +62,31 @@ parser.add_argument("--eps", type=float, default=0.3, help='Target training epsi
 parser.add_argument("--norm", type=float, default='inf', help='p norm for epsilon perturbation')
 parser.add_argument("--bound_type", type=str, default="CROWN-IBP",
                     choices=["IBP", "CROWN-IBP", "CROWN"], help='method of bound analysis')
-parser.add_argument("--model", type=str, default="resnet", help='model name (mlp_3layer, cnn_4layer, cnn_6layer, cnn_7layer, resnet)')
+parser.add_argument("--model", type=str, default="cnn_4layer", help='model name (mlp_3layer, cnn_4layer, cnn_6layer, cnn_7layer, resnet)')
 parser.add_argument("--num_epochs", type=int, default=100, help='number of total epochs')
 parser.add_argument("--batch_size", type=int, default=256, help='batch size')
 parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
-parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
+parser.add_argument("--eps_scheduler_name", type=str, default="LinearScheduler",
                     choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
-parser.add_argument("--scheduler_opts", type=str, default="start=3,length=60", help='options for epsilon scheduler')
+parser.add_argument("--crown_scheduler_name", type=str, default="LinearScheduler",
+                    choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='crown-ibp scheduler')
+parser.add_argument("--eps_scheduler_opts", type=str, default="start=2,length=60", help='options for epsilon scheduler')
+parser.add_argument("--crown_scheduler_opts", type=str, default="start=2,length=20", help='options for crown-ibp scheduler')
 parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope", "zero-lb", "one-lb"],
                     help='bound options')
+parser.add_argument("--dir", type=str, default="exp_inv/")
+parser.add_argument("--eval_bound_type", type=str, default="same",
+                    choices=["IBP", "CROWN-IBP", "CROWN", "same"])
 
 args = parser.parse_args()
 
+# path of tensorboard statistics: exp_inv/cnn_6layer-CROWN/log
+writer = SummaryWriter(os.path.join(args.dir, os.path.join(args.model + "-" + args.bound_type + "/log")), flush_secs=10)
 
-def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust'):
+# path of checkpoints
+ckp_path = os.path.join(args.dir, os.path.join(args.model + "-" + args.bound_type + "/ckp"))
+
+def Train(model, t, loader, eps_scheduler, crown_scheduler, norm, train, opt, bound_type, epoch, method='robust'):
     num_class = 10
     meter = MultiAverageMeter()
     if train:
@@ -46,9 +94,18 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
         eps_scheduler.train()
         eps_scheduler.step_epoch()
         eps_scheduler.set_epoch_length(int((len(loader.dataset) + loader.batch_size - 1) / loader.batch_size))
+
+        if crown_scheduler is not None:
+            crown_scheduler.train()
+            crown_scheduler.step_epoch()
+            crown_scheduler.set_epoch_length(int((len(loader.dataset) + loader.batch_size - 1) / loader.batch_size)) # the number of batches in an epoch
+
     else:
         model.eval()
         eps_scheduler.eval()
+        
+        if crown_scheduler is not None:
+            crown_scheduler.eval()
 
     for i, (data, labels) in enumerate(loader):
         start = time.time()
@@ -56,7 +113,7 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
         eps = eps_scheduler.get_eps()
         # For small eps just use natural training, no need to compute LiRPA bounds
         batch_method = method
-        if eps < 1e-20:
+        if eps < 1e-12:
             batch_method = "natural"
         if train:
             opt.zero_grad()
@@ -92,11 +149,17 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             if bound_type == "IBP":
                 lb, ub = model.compute_bounds(IBP=True, C=c, method=None)
             elif bound_type == "CROWN":
+                ilb, iub = model.compute_bounds(IBP=True, C=c, method=None)
                 lb, ub = model.compute_bounds(IBP=False, C=c, method="backward", bound_upper=False)
             elif bound_type == "CROWN-IBP":
                 # lb, ub = model.compute_bounds(ptb=ptb, IBP=True, x=data, C=c, method="backward")  # pure IBP bound
                 # we use a mixed IBP and CROWN-IBP bounds, leading to better performance (Zhang et al., ICLR 2020)
-                factor = (eps_scheduler.get_max_eps() - eps) / eps_scheduler.get_max_eps()
+                # factor = (eps_scheduler.get_max_eps() - eps) / eps_scheduler.get_max_eps()
+                if crown_scheduler is not None:
+                    crown_scheduler.step_batch()
+                    factor = 1 - crown_scheduler.get_eps()
+                else:
+                    factor = (eps_scheduler.get_max_eps() - eps) / eps_scheduler.get_max_eps()
                 ilb, iub = model.compute_bounds(IBP=True, C=c, method=None)
                 if factor < 1e-5:
                     lb = ilb
@@ -123,9 +186,32 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             # If any margin is < 0 this example is counted as an error
             meter.update('Verified_Err', torch.sum((lb < 0).any(dim=1)).item() / data.size(0), data.size(0))
         meter.update('Time', time.time() - start)
+
+        if train:
+            writer.add_scalar('loss_train_{}'.format(epoch), meter.avg("CE"), i + 1)
+            writer.add_scalar('acc_train_{}'.format(epoch), 1.0 - meter.avg("Err"), i + 1)
+
+            if batch_method != "natural":
+                writer.add_scalar('loss_robust_train_{}'.format(epoch), meter.avg("Robust_CE"), i + 1)
+                writer.add_scalar('acc_robust_train_{}'.format(epoch), 1.0 - meter.avg("Verified_Err"), i + 1)
         if i % 50 == 0 and train:
             print('[{:2d}:{:4d}]: eps={:.8f} {}'.format(t, i, eps, meter))
     print('[{:2d}:{:4d}]: eps={:.8f} {}'.format(t, i, eps, meter))
+
+    if train:
+        writer.add_scalar('loss/train', meter.avg("CE"), epoch)
+        writer.add_scalar('acc/train', 1.0 - meter.avg("Err"), epoch)
+
+        if batch_method != "natural":
+            writer.add_scalar('loss/robust_train', meter.avg("Robust_CE"), epoch)
+            writer.add_scalar('acc/robust_train', 1.0 - meter.avg("Verified_Err"), epoch)
+    else:
+        writer.add_scalar('loss/test', meter.avg("CE"), epoch)
+        writer.add_scalar('acc/test', 1.0 - meter.avg("Err"), epoch)
+
+        if batch_method != "natural":
+            writer.add_scalar('loss/robust_test', meter.avg("Robust_CE"), epoch)
+            writer.add_scalar('acc/robust_test', 1.0 - meter.avg("Verified_Err"), epoch)
 
 def main(args):
     torch.manual_seed(args.seed)
@@ -133,7 +219,7 @@ def main(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    ## Step 1: Initial original model as usual, see model details in models/example_feedforward.py and models/example_resnet.py
+    # Step 1: Initial original model as usual, see model details in models/example_feedforward.py and models/example_resnet.py
     if args.data == 'MNIST':
         model_ori = models.Models[args.model](in_ch=1, in_dim=28)
     else:
@@ -141,6 +227,8 @@ def main(args):
     if args.load:
         state_dict = torch.load(args.load)['state_dict']
         model_ori.load_state_dict(state_dict)
+    # model_ori = ensemble_MNIST()
+    # model_ori.load("./cnn_6layer", "./cnn_4layer")
 
     ## Step 2: Prepare dataset as usual
     if args.data == 'MNIST':
@@ -155,7 +243,7 @@ def main(args):
                     transforms.RandomHorizontalFlip(),
                     transforms.RandomCrop(32, 4),
                     transforms.ToTensor(),
-                    normalize]))
+                    normalize])) 
         test_data = datasets.CIFAR10("./data", train=False, download=True, 
                 transform=transforms.Compose([transforms.ToTensor(), normalize]))
 
@@ -176,14 +264,17 @@ def main(args):
     opt = optim.Adam(model.parameters(), lr=args.lr)
     norm = float(args.norm)
     lr_scheduler = optim.lr_scheduler.StepLR(opt, step_size=10, gamma=0.5)
-    eps_scheduler = eval(args.scheduler_name)(args.eps, args.scheduler_opts)
+    eps_scheduler = eval(args.eps_scheduler_name)(args.eps, args.eps_scheduler_opts)
+
+    if args.crown_scheduler_name is not None:
+        crown_scheduler = eval(args.crown_scheduler_name)(1.0, args.crown_scheduler_opts)
     print("Model structure: \n", str(model_ori))
 
     ## Step 5: start training
     if args.verify:
         eps_scheduler = FixedScheduler(args.eps)
         with torch.no_grad():
-            Train(model, 1, test_data, eps_scheduler, norm, False, None, args.bound_type)
+            Train(model, 1, test_data, eps_scheduler, None, norm, False, None, args.bound_type, 0)
     else:
         timer = 0.0
         for t in range(1, args.num_epochs+1):
@@ -192,14 +283,20 @@ def main(args):
                 lr_scheduler.step()
             print("Epoch {}, learning rate {}".format(t, lr_scheduler.get_lr()))
             start_time = time.time()
-            Train(model, t, train_data, eps_scheduler, norm, True, opt, args.bound_type)
+            Train(model, t, train_data, eps_scheduler, crown_scheduler, norm, True, opt, args.bound_type, t)
             epoch_time = time.time() - start_time
             timer += epoch_time
             print('Epoch time: {:.4f}, Total time: {:.4f}'.format(epoch_time, timer))
             print("Evaluating...")
+
+            eval_bound_type = args.bound_type if args.eval_bound_type == "same" else args.eval_bound_type
             with torch.no_grad():
-                Train(model, t, test_data, eps_scheduler, norm, False, None, args.bound_type)
-            torch.save({'state_dict': model.state_dict(), 'epoch': t}, args.model)
+                Train(model, t, test_data, eps_scheduler, crown_scheduler, norm, False, None, eval_bound_type, t)
+            
+            if not os.path.exists(ckp_path):
+                os.mkdir(ckp_path)
+
+            torch.save({'state_dict': model.state_dict(), 'epoch': t}, os.path.join(ckp_path, "epoch_{}".format(t)))
 
 
 if __name__ == "__main__":

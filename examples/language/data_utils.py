@@ -1,4 +1,5 @@
-import random, json
+import random
+import json
 from auto_LiRPA.utils import logger
 
 def load_data_sst():
@@ -8,19 +9,9 @@ def load_data_sst():
             data.append(json.loads(file.read()))
     return data
 
-def load_data_imdb():
-    data = []
-    for split in ['train', 'dev', 'test']:
-        with open('data/imdb/{}.json'.format(split)) as file:
-            data.append(json.loads(file.read()))
-    data = [data[0]] + data
-    return data
-
 def load_data(dataset):    
     if dataset == "sst":
         return load_data_sst()
-    elif dataset == "imdb":
-        return load_data_imdb()
     else:
         raise NotImplementedError('Unknown dataset {}'.format(dataset))
 

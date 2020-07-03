@@ -4,7 +4,6 @@ import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 
-
 ## Step 1: Define computational graph by implementing forward()
 class cnn_MNIST(nn.Module):
     def __init__(self):

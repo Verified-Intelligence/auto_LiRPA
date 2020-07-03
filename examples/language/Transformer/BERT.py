@@ -34,7 +34,7 @@ from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
 
 from Transformer.modeling import BertForSequenceClassification, BertConfig
 from Transformer.utils import convert_examples_to_features
-from language_utils import build_vocab, load_glove
+from language_utils import build_vocab
 from auto_LiRPA.utils import logger
 
 class BERT(nn.Module):
@@ -43,15 +43,13 @@ class BERT(nn.Module):
         self.args = args
         self.max_seq_length = args.max_sent_length
         self.drop_unk = args.drop_unk        
-        self.num_labels = args.num_labels
-        self.label_list = range(args.num_labels) 
+        self.num_labels = args.num_classes
+        self.label_list = range(args.num_classes) 
         self.device = args.device
         self.lr = args.lr
 
         self.dir = args.dir
-        self.glove = load_glove(args.use_glove, args.glove)
-        include = self.glove.keys() if self.glove is not None else []
-        self.vocab = build_vocab(data_train, args.min_word_freq, include=include)
+        self.vocab = build_vocab(data_train, args.min_word_freq)
         if not os.path.exists(self.dir):
             os.makedirs(self.dir)
         self.checkpoint = 0
@@ -75,8 +73,9 @@ class BERT(nn.Module):
             config.hidden_act = args.hidden_act
             config.num_attention_heads = args.num_attention_heads
             config.layer_norm = args.layer_norm
+            config.hidden_dropout_prob = args.dropout
             self.model = BertForSequenceClassification(
-                config, self.num_labels, glove=self.glove, vocab=self.vocab).to(self.device)
+                config, self.num_labels, vocab=self.vocab).to(self.device)
             logger.info("Model initialized")
 
         self.model_from_embeddings = self.model.model_from_embeddings

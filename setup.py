@@ -9,7 +9,7 @@ setup(
     author_email='xu.kaid@husky.neu.edu, zhouxingshichn@gmail.com, huan@huan-zhang.com',
     packages=['auto_LiRPA'],
     install_requires=[
-        'torch>=1.1',
+        'torch>=1.5',
         'numpy>=1.16',
         'packaging>=20.0',
     ],

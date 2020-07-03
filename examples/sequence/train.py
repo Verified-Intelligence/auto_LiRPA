@@ -1,4 +1,10 @@
-import argparse, random, pickle, os, pdb, time, math
+import argparse
+import random
+import pickle
+import os
+import pdb
+import time
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,7 +23,7 @@ parser.add_argument("--num_epochs", type=int, default=20)
 parser.add_argument("--batch_size", type=int, default=128)
 parser.add_argument("--num_slices", type=int, default=8)
 parser.add_argument("--hidden_size", type=int, default=64)
-parser.add_argument("--num_labels", type=int, default=10) 
+parser.add_argument("--num_classes", type=int, default=10) 
 parser.add_argument("--input_size", type=int, default=784)
 parser.add_argument("--lr", type=float, default=5e-3)
 parser.add_argument("--dir", type=str, default="model", help="directory to load or save the model")
@@ -30,14 +36,20 @@ def step(model, ptb, batch, eps=args.eps, train=False):
     X, y = model.get_input(batch)
     X = BoundedTensor(X, ptb)
     logits = model.core(X)
-    logits_robust = model.core.compute_worst_logits(y=y, IBP=True)
-        
-    preds = torch.argmax(logits, dim=1)
-    acc = torch.sum((preds == y).to(torch.float32)) / len(batch)
-    preds_robust = torch.argmax(logits_robust, dim=1)
-    acc_robust = torch.sum((preds_robust == y).to(torch.float32)) / len(batch)
-    loss_fct = nn.CrossEntropyLoss()
-    loss = 0.8 * loss_fct(logits_robust, y) + 0.2 * loss_fct(logits, y)
+
+    num_class = args.num_classes
+    c = torch.eye(num_class).type_as(X)[y].unsqueeze(1) - \
+        torch.eye(num_class).type_as(X).unsqueeze(0)
+    I = (~(y.data.unsqueeze(1) == torch.arange(num_class).type_as(y.data).unsqueeze(0)))
+    c = (c[I].view(X.size(0), num_class - 1, num_class))
+
+    lb, ub = model.core.compute_bounds(IBP=True, C=c, method='backward', bound_upper=False)
+
+    lb_padded = torch.cat((torch.zeros(size=(lb.size(0),1), dtype=lb.dtype, device=lb.device), lb), dim=1)
+    fake_labels = torch.zeros(size=(lb.size(0),), dtype=torch.int64, device=lb.device)
+    acc = (torch.argmax(logits, dim=-1) == y).float().mean()
+    acc_robust = 1 - torch.mean((lb < 0).any(dim=1).float())    
+    loss = nn.CrossEntropyLoss()(-lb_padded, fake_labels)
 
     if train:
         loss.backward()

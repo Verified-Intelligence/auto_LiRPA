@@ -2,7 +2,12 @@ import logging
 import pickle
 import time
 import torch
-from collections import defaultdict
+from collections import defaultdict, Sequence, namedtuple
+
+# Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
+eyeC = namedtuple('eyeC', 'shape device')
+# Linear bounds with coefficients. Used for forward bound propagation.
+LinearBound = namedtuple('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper'))
 
 logging.basicConfig(
     format='%(levelname)-8s %(asctime)-12s %(message)s',
@@ -38,13 +43,18 @@ class MultiAverageMeter(object):
         self.lasts = defaultdict(float)
         self.counts_meter = defaultdict(int)
     def update(self, key, val, n=1):
+        if isinstance(val, torch.Tensor):
+            val = val.item()
         self.lasts[key] = val
         self.sum_meter[key] += val * n
         self.counts_meter[key] += n
     def last(self, key):
         return self.lasts[key]
     def avg(self, key):
-        return self.sum_meter[key] / self.counts_meter[key]
+        if self.counts_meter[key] == 0:
+            return 0.0
+        else:
+            return self.sum_meter[key] / self.counts_meter[key]
     def __repr__(self):
         s = ""
         for k in self.sum_meter:
@@ -88,3 +98,10 @@ def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
 def dump_results(filename, lb, ub):
     with open(filename, 'wb') as file:
         pickle.dump((lb, ub), file)
+
+def recursive_map (seq, func):
+    for item in seq:
+        if isinstance(item, Sequence):
+            yield type(item)(recursive_map(item, func))
+        else:
+            yield func(item)

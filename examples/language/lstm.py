@@ -1,4 +1,5 @@
-import os, shutil
+import os
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,16 +12,21 @@ class LSTMFromEmbeddings(nn.Module):
 
         self.embedding_size = args.embedding_size
         self.hidden_size = args.hidden_size
-        self.num_labels = args.num_labels
+        self.num_classes = args.num_classes
         self.device = args.device
 
-        self.linear_in = nn.Linear(self.embedding_size, self.embedding_size)
         self.cell_f = nn.LSTMCell(self.embedding_size, self.hidden_size)
         self.cell_b = nn.LSTMCell(self.embedding_size, self.hidden_size)
-        self.linear = nn.Linear(self.hidden_size * 2, self.num_labels)
+        self.linear = nn.Linear(self.hidden_size * 2, self.num_classes)
+        if args.dropout is not None:
+            self.dropout = nn.Dropout(p=args.dropout)
+            logger.info('LSTM dropout: {}'.format(args.dropout))
+        else:
+            self.dropout = None
 
     def forward(self, embeddings, mask):
-        embeddings = self.linear_in(embeddings)
+        if self.dropout is not None:
+            embeddings = self.dropout(embeddings)
         embeddings = embeddings * mask.unsqueeze(-1)
         batch_size = embeddings.shape[0]
         length = embeddings.shape[1]
@@ -28,7 +34,6 @@ class LSTMFromEmbeddings(nn.Module):
         c_f = h_f.clone()
         h_b, c_b = h_f.clone(), c_f.clone()
         h_f_sum, h_b_sum = h_f.clone(), h_b.clone()
-
         for i in range(length):
             h_f, c_f = self.cell_f(embeddings[:, i], (h_f, c_f))
             h_b, c_b = self.cell_b(embeddings[:, length - i - 1], (h_b, c_b))
@@ -53,54 +58,33 @@ class LSTM(nn.Module):
             os.makedirs(self.dir)
         self.vocab = self.vocab_actual = build_vocab(data_train, args.min_word_freq)
         self.checkpoint = 0
-        if os.path.exists(os.path.join(self.dir, "checkpoint")):
-            with open(os.path.join(self.dir, "checkpoint")) as file:
-                self.checkpoint = int(file.readline())
-            dir_ckpt = os.path.join(self.dir, "ckpt-{}".format(self.checkpoint))
-            path = os.path.join(dir_ckpt, "model")
-            self.model = torch.load(path)
-            logger.info("Model loaded: {}".format(dir_ckpt))
+
+
+        if args.load:
+            ckpt = torch.load(args.load)
+            self.embedding = torch.nn.Embedding(len(self.vocab), self.embedding_size)
+            self.model_from_embeddings = LSTMFromEmbeddings(args, len(self.vocab))
+            self.model = self.embedding, LSTMFromEmbeddings(args, len(self.vocab))
+            self.embedding.load_state_dict(ckpt['state_dict_embedding'])
+            self.model_from_embeddings.load_state_dict(ckpt['state_dict_model_from_embeddings'])
+            self.checkpoint = ckpt['epoch']                
         else:
             self.embedding = torch.nn.Embedding(len(self.vocab), self.embedding_size)
+            self.model_from_embeddings = LSTMFromEmbeddings(args, len(self.vocab))
             self.model = self.embedding, LSTMFromEmbeddings(args, len(self.vocab))
             logger.info("Model initialized")
-        self.embedding, self.model_from_embeddings = self.model
         self.embedding = self.embedding.to(self.device)
         self.model_from_embeddings = self.model_from_embeddings.to(self.device)
         self.word_embeddings = self.embedding
 
     def save(self, epoch):
-        self.model = (self.model[0], self.model_from_embeddings)        
-
-        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model  # Only save the model it-self
-
-        output_dir = os.path.join(self.dir, "ckpt-%d" % epoch)
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
-        os.mkdir(output_dir)
-
-        path = os.path.join(output_dir, "model")
-        torch.save(self.model, path)
-
-        with open(os.path.join(self.dir, "checkpoint"), "w") as file: 
-            file.write(str(epoch))
-
-        logger.info("LSTM saved: %s" % output_dir)
-
-    def _build_actual_vocab(self, args, vocab, data_train):
-        vocab_actual = {}
-        for example in data_train:
-            for token in example["sentence"].strip().lower().split():
-                if token in vocab:
-                    if not token in vocab_actual:
-                        vocab_actual[token] = 1
-                    else:
-                        vocab_actual[token] += 1
-        for w in list(vocab_actual.keys()):
-            if vocab_actual[w] < self.min_word_freq:
-                del(vocab_actual[w])
-        logger.info("Size of the vocabulary for perturbation: {}".format(len(vocab_actual)))
-        return vocab_actual
+        path = os.path.join(self.dir, 'ckpt_{}'.format(epoch))
+        torch.save({
+            'state_dict_embedding': self.embedding.state_dict(), 
+            'state_dict_model_from_embeddings': self.model_from_embeddings.state_dict(),
+            'epoch': epoch
+        }, path)
+        logger.info('LSTM saved: {}'.format(path))
 
     def build_optimizer(self):
         self.model = (self.model[0], self.model_from_embeddings)

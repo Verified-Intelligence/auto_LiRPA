@@ -146,6 +146,34 @@ def svhn_loaders(batch_size, shuffle_train = True, shuffle_test = False, train_r
     print('dataset mean = ', mean.numpy(), 'std = ', std.numpy())
     return train_loader, test_loader
 
+def load_data(data, batch_size):
+    if data == 'MNIST':
+        dummy_input = torch.randn(1, 1, 28, 28)
+        train_data = datasets.MNIST('./data', train=True, download=True, transform=transforms.ToTensor())
+        test_data = datasets.MNIST('./data', train=False, download=True, transform=transforms.ToTensor())
+    elif data == 'CIFAR':
+        dummy_input = torch.randn(1, 3, 32, 32)
+        normalize = transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
+        train_data = datasets.CIFAR10('./data', train=True, download=True,
+                transform=transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomCrop(32, 4, padding_mode='edge'),
+                    transforms.ToTensor(),
+                    normalize]))
+        test_data = datasets.CIFAR10('./data', train=False, download=True, 
+                transform=transforms.Compose([transforms.ToTensor(), normalize]))
+
+    train_data = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=min(multiprocessing.cpu_count(),4))
+    test_data = torch.utils.data.DataLoader(test_data, batch_size=batch_size, pin_memory=True, num_workers=min(multiprocessing.cpu_count(),4))
+    if data == 'MNIST':
+        train_data.mean = test_data.mean = torch.tensor([0.0])
+        train_data.std = test_data.std = torch.tensor([1.0])
+    elif data == 'CIFAR':
+        train_data.mean = test_data.mean = torch.tensor([0.4914, 0.4822, 0.4465])
+        train_data.std = test_data.std = torch.tensor([0.2023, 0.1994, 0.2010])
+
+    return dummy_input, train_data, test_data
+
 # when new loaders is added, they must be registered here
 loaders = {
         "MNIST": partial(mnist_loaders, datasets.MNIST),

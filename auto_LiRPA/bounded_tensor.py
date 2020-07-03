@@ -23,28 +23,31 @@ class BoundedTensor(torch.Tensor):
     def clone(self, *args, **kwargs):
         return BoundedTensor(super().clone(*args, **kwargs), self.ptb)
 
-    # Copy to other devices with perturbation
-    def to(self, *args, **kwargs):
-        temp = super().to(*args, **kwargs)
+    def _func(self, func, *args, **kwargs):
+        temp = func(*args, **kwargs)
         new_obj = BoundedTensor([], self.ptb)
         new_obj.data = temp.data
         new_obj.requires_grad = temp.requires_grad
         return new_obj
+
+    # Copy to other devices with perturbation
+    def to(self, *args, **kwargs):
+        return self._func(super().to, *args, **kwargs)
 
 
 class BoundedParameter(nn.Parameter):
     def __new__(cls, data, ptb, requires_grad=True):
         return BoundedTensor._make_subclass(cls, data, requires_grad)
     
-    def __init__(self, data, ptb):
+    def __init__(self, data, ptb, requires_grad=True):
         self.ptb = ptb
+        self.requires_grad = requires_grad
 
     def __deepcopy__(self, memo):
-        raise NotImplementedError
         if id(self) in memo:
             return memo[id(self)]
         else:
-            result = type(self)(self.data.clone(memory_format=torch.preserve_format), self.ptb, self.requires_grad)
+            result = type(self)(self.data.clone(), self.ptb, self.requires_grad)
             memo[id(self)] = result
             return result
 
@@ -54,3 +57,4 @@ class BoundedParameter(nn.Parameter):
 
     def __reduce_ex__(self, proto):
         raise NotImplementedError
+

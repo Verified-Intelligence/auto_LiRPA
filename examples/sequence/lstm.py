@@ -1,4 +1,6 @@
-import os, shutil, pdb
+import os
+import shutil
+import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,11 +12,11 @@ class LSTMCore(nn.Module):
 
         self.input_size = args.input_size // args.num_slices
         self.hidden_size = args.hidden_size
-        self.num_labels = args.num_labels
+        self.num_classes = args.num_classes
         self.device = args.device
 
         self.cell_f = nn.LSTMCell(self.input_size, self.hidden_size)
-        self.linear = nn.Linear(self.hidden_size, self.num_labels)
+        self.linear = nn.Linear(self.hidden_size, self.num_classes)
 
     def forward(self, X):
         batch_size, length = X.shape[0], X.shape[1]

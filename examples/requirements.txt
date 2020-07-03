@@ -8,3 +8,5 @@ query>=0.1
 scikit_learn>=0.21
 tqdm>=4.43
 tensorboard>=1.14
+matplotlib>=3.2
+thop>=0.0.31.post2004101309

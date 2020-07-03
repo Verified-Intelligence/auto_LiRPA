@@ -12,6 +12,7 @@ bound_op_map = {
     'onnx::Sub': BoundSub,
     'onnx::Mul': BoundMul,
     'onnx::Div': BoundDiv,
+    'onnx::Neg': BoundNeg,
     # 'onnx::GlobalAveragePool': AdaptiveAvgPool2d,
     'onnx::AveragePool': BoundAvgPool2d,
     'onnx::Reshape': BoundReshape,
@@ -24,6 +25,8 @@ bound_op_map = {
     'onnx::Constant': BoundConstant,
     'onnx::Shape': BoundShape,
     'onnx::Gather': BoundGather,
+    'aten::gather': BoundGatherAten,
+    'onnx::GatherElements': BoundGatherElements,
     'prim::Constant': BoundPrimConstant,
     'onnx::RNN': BoundRNN,
     'onnx::Transpose': BoundTranspose,
@@ -33,5 +36,6 @@ bound_op_map = {
     'onnx::ReduceMean': BoundReduceMean,
     'onnx::ReduceSum': BoundReduceSum,
     'onnx::Dropout': BoundDropout,
-    'onnx::Split': BoundSplit
+    'onnx::Split': BoundSplit,
+    'onnx::LeakyRelu': BoundLeakyRelu
 }

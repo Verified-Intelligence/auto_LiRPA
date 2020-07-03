@@ -1,3 +1,4 @@
+import os
 import torch
 from collections import OrderedDict
 import re
@@ -61,37 +62,44 @@ def parse(graph, params):
                                 'bound_node': None,
                                 'output_index': i, 
                                 'perturbation': None, }))
+            if n.kind() == 'onnx::BatchNormalization': break  # bn layer has some redundant outputs
 
-    assert len(list(graph.inputs())) == len(params)
-
+    # assert len(list(graph.inputs())) == len(params)
+    _c = 0
     for i, n in enumerate(graph.inputs()):
         uname = n.uniqueName() if torch_old else n.debugName()
 
         if uname not in scope.keys():
             scope[uname] = 'unused'
+            _c += 1
             continue
-
+            
         # params[i] is a tuple, ("name", Tensor)
-        if isinstance(params[i][1], BoundedTensor) or isinstance(params[i][1], BoundedParameter):
-            perturbation = params[i][1].ptb
+        if isinstance(params[i-_c][1], BoundedTensor) or isinstance(params[i-_c][1], BoundedParameter):
+            perturbation = params[i-_c][1].ptb
         else:
             perturbation = None
-        if n.type().sizes() != list(params[i][1].size()):
+        # print(uname, n.type().sizes(), params[i-_c][0], list(params[i-_c][1].size()))
+
+        if n.type().sizes() != list(params[i-_c][1].size()):
             raise RuntimeError("Input tensor shapes do not much: {} != {}".format(n.type().sizes(), list(params[i][1].size())))
         nodesIO.append(Node(**{'name': replace(uname, scope),
-                             'ori_name': params[i][0],
+                             'ori_name': params[i-_c][0],
                              'op': 'Parameter',
                              'inputs': [], 
                              'attr': str(n.type()),
-                             'param': params[i][1],
+                             'param': params[i-_c][1],
                              'bound_node': None,
                              'output_index': None,
                              # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
                              'perturbation': perturbation, }))
 
+    assert len(list(graph.inputs())) == len(params) + _c
+
     return nodesOP, nodesIO
 
 def _get_jit_params(module, param_exclude, param_include):
+    # TODO: May get some nodes not used in forward()
     state_dict = torch.jit._unique_state_dict(module, keep_vars=True)
 
     if param_exclude is not None:
@@ -124,7 +132,19 @@ def get_graph_params(module, inputs, param_exclude=".*AuxLogits.*", param_includ
     else:
         # _get_trace_graph becomes an internal function in version >= 1.4.0
         trace, out = torch.jit._get_trace_graph(module, inputs)
+        # this is not present in older torch
+        from torch.onnx.symbolic_helper import _set_opset_version
+        if version.parse(torch.__version__) < version.parse("1.5.0"):
+            _set_opset_version(11)
+        else:
+            _set_opset_version(12)
         torch_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
+
+    if int(os.environ.get('AUTOLIRPA_DEBUG_GRAPH', 0)) > 0:
+        print("Graph before ONNX convertion:")
+        print(trace)
+        print("ONNX graph:")
+        print(torch_graph)
 
     if not isinstance(inputs, tuple):
         inputs = (inputs, )

@@ -1,4 +1,5 @@
 import random
+from auto_LiRPA.utils import logger
 
 class BaseScheduler(object):
     def __init__(self, max_eps, opt_str):
@@ -9,6 +10,9 @@ class BaseScheduler(object):
         self.is_training = True
         self.epoch = 0
         self.batch = 0
+
+    def __repr__(self):
+        return '<BaseScheduler: eps {}, max_eps {}>'.format(self.eps, self.max_eps)
 
     def parse_opts(self, s):
         opts = s.split(',')
@@ -27,12 +31,12 @@ class BaseScheduler(object):
     def reached_max_eps(self):
         return abs(self.eps - self.max_eps) < 1e-3
 
-    def step_batch(self):
+    def step_batch(self, verbose=False):
         if self.is_training:
             self.batch += 1
         return
 
-    def step_epoch(self):
+    def step_epoch(self, verbose=False):
         if self.is_training:
             self.epoch += 1
         return
@@ -64,8 +68,13 @@ class LinearScheduler(BaseScheduler):
         super(LinearScheduler, self).__init__(max_eps, opt_str)
         self.schedule_start = int(self.params['start'])
         self.schedule_length = int(self.params['length'])
-    
-    def step_epoch(self):
+        self.epoch_start_eps = self.epoch_end_eps = 0
+
+    def __repr__(self):
+        return '<LinearScheduler: start_eps {:.3f}, end_eps {:.3f}>'.format(
+            self.epoch_start_eps, self.epoch_end_eps)
+
+    def step_epoch(self, verbose = True):
         self.epoch += 1
         self.batch = 0
         if self.epoch < self.schedule_start:
@@ -77,7 +86,8 @@ class LinearScheduler(BaseScheduler):
             self.epoch_start_eps = min(eps_epoch * eps_epoch_step, self.max_eps)
             self.epoch_end_eps = min((eps_epoch + 1) * eps_epoch_step, self.max_eps)
         self.eps = self.epoch_start_eps
-        print("Epoch {:3d} eps start {:7.5f} end {:7.5f}".format(self.epoch, self.epoch_start_eps, self.epoch_end_eps))
+        if verbose:
+            logger.info("Epoch {:3d} eps start {:7.5f} end {:7.5f}".format(self.epoch, self.epoch_start_eps, self.epoch_end_eps))
 
     def step_batch(self):
         if self.is_training:
@@ -85,8 +95,62 @@ class LinearScheduler(BaseScheduler):
             eps_batch_step = (self.epoch_end_eps - self.epoch_start_eps) / self.epoch_length
             self.eps = self.epoch_start_eps + eps_batch_step * (self.batch - 1)
             if self.batch > self.epoch_length:
-                print('Warning: we expect {} batches in this epoch but this is batch'.format(self.epoch_length, self.batch))
+                logger.warning('Warning: we expect {} batches in this epoch but this is batch {}'.format(self.epoch_length, self.batch))
                 self.eps = self.epoch_end_eps
+
+class RangeScheduler(BaseScheduler):
+
+    def __init__(self, max_eps, opt_str):
+        super(RangeScheduler, self).__init__(max_eps, opt_str)
+        self.schedule_start = int(self.params['start'])
+        self.schedule_length = int(self.params['length'])
+
+    def __repr__(self):
+        return '<RangeScheduler: epoch [{}, {}]>'.format(
+            self.schedule_start, self.schedule_start + self.schedule_length)
+
+    def step_epoch(self, verbose = True):
+        self.epoch += 1
+        if self.epoch >= self.schedule_start and self.epoch < self.schedule_start + self.schedule_length:
+            self.eps = self.max_eps
+        else:
+            self.eps = 0
+
+    def step_batch(self):
+        pass
+
+class BiLinearScheduler(LinearScheduler):
+
+    def __init__(self, max_eps, opt_str):
+        super(BiLinearScheduler, self).__init__(max_eps, opt_str)
+        self.schedule_start = int(self.params['start'])
+        self.schedule_length = int(self.params['length'])
+        self.schedule_length_half = self.schedule_length / 2
+        self.epoch_start_eps = self.epoch_end_eps = 0
+
+    def __repr__(self):
+        return '<BiLinearScheduler: start_eps {:.5f}, end_eps {:.5f}>'.format(
+            self.epoch_start_eps, self.epoch_end_eps)        
+    
+    def step_epoch(self, verbose = True):
+        self.epoch += 1
+        self.batch = 0
+        if self.epoch < self.schedule_start:
+            self.epoch_start_eps = 0
+            self.epoch_end_eps = 0
+        else:
+            eps_epoch = self.epoch - self.schedule_start
+            eps_epoch_step = self.max_eps / self.schedule_length_half
+            if eps_epoch < self.schedule_length_half:
+                self.epoch_start_eps = min(eps_epoch * eps_epoch_step, self.max_eps)
+                self.epoch_end_eps = min((eps_epoch + 1) * eps_epoch_step, self.max_eps)
+            else:
+                self.epoch_start_eps = max(0, 
+                    self.max_eps - ((eps_epoch - self.schedule_length_half) * eps_epoch_step))
+                self.epoch_end_eps = max(0, self.epoch_start_eps - eps_epoch_step)
+        self.eps = self.epoch_start_eps
+        if verbose:
+            logger.info("Epoch {:3d} eps start {:7.5f} end {:7.5f}".format(self.epoch, self.epoch_start_eps, self.epoch_end_eps))
 
 
 class SmoothedScheduler(BaseScheduler):
@@ -114,10 +178,17 @@ class SmoothedScheduler(BaseScheduler):
             if self.epoch_length != epoch_length:
                 raise ValueError("epoch_length must stay the same for SmoothedScheduler")
 
+    def step_epoch(self, verbose = True):
+        super(SmoothedScheduler, self).step_epoch()
+        # FIXME 
+        if verbose == False:
+            for i in range(self.epoch_length):
+                self.step_batch()
+            
     # Smooth schedule that slowly morphs into a linear schedule.
     # Code is based on DeepMind's IBP implementation:
     # https://github.com/deepmind/interval-bound-propagation/blob/2c1a56cb0497d6f34514044877a8507c22c1bd85/interval_bound_propagation/src/utils.py#L84
-    def step_batch(self):
+    def step_batch(self, verbose=False):
         if self.is_training:
             self.batch += 1
             init_value = 0.0
@@ -173,6 +244,7 @@ class AdaptiveScheduler(BaseScheduler):
                 # print("loss {:7.5f} prev_loss {:7.5f} eps_step {:7.5g}".format(self.loss, self.prev_loss, self.eps_step))
                 # increase eps according to loss
                 self.eps = min(self.eps + self.eps_step, self.max_eps)
+            # print("eps step size {:7.5f}, eps {:7.5f}".format(self.eps_step, self.eps))
 
 
 if __name__ == "__main__":
