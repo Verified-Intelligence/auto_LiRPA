@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationSynonym, CrossEntropyWrapperMultiInput
 from auto_LiRPA.utils import MultiAverageMeter, AverageMeter, logger, scale_gradients
 from auto_LiRPA.eps_scheduler import *
-from Transformer.BERT import BERT
+from Transformer.Transformer import Transformer
 from lstm import LSTM
 from data_utils import load_data, clean_data, get_batches
 from oracle import oracle
@@ -30,6 +30,8 @@ parser.add_argument('--data', type=str, default='sst', choices=['sst'])
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])
 parser.add_argument('--load', type=str, default=None)
+parser.add_argument('--legacy_loading', action='store_true', help='use a deprecated way of loading checkpoints for previously saved models')
+parser.add_argument('--auto_test', action='store_true')
 
 parser.add_argument('--eps', type=float, default=1.0)
 parser.add_argument('--budget', type=int, default=6)
@@ -77,6 +79,11 @@ logger.addHandler(file_handler)
 data_train_all_nodes, data_train, data_dev, data_test = load_data(args.data)
 if args.robust:
     data_dev, data_test = clean_data(data_dev), clean_data(data_test)
+if args.auto_test:
+    random.seed(args.seed)
+    random.shuffle(data_test)
+    data_test = data_test[:10]
+    assert args.batch_size >= 10
 logger.info('Dataset sizes: {}/{}/{}/{}'.format(
     len(data_train_all_nodes), len(data_train), len(data_dev), len(data_test)))
 
@@ -90,7 +97,7 @@ dummy_labels = torch.zeros(1, dtype=torch.long, device=args.device)
 
 if args.model == 'transformer':
     dummy_mask = torch.zeros(1, 1, 1, args.max_sent_length, device=args.device)
-    model = BERT(args, data_train)
+    model = Transformer(args, data_train)
 elif args.model == 'lstm':
     dummy_mask = torch.zeros(1, args.max_sent_length, device=args.device)
     model = LSTM(args, data_train)
@@ -127,7 +134,7 @@ if args.lr_decay < 1:
 else:
     lr_scheduler = None
 if args.robust:
-    eps_scheduler = LinearScheduler(1.0, 'start={},length={}'.format(args.eps_start, args.eps_length))
+    eps_scheduler = LinearScheduler(args.eps, 'start={},length={}'.format(args.eps_start, args.eps_length))
     for i in range(model.checkpoint):
         eps_scheduler.step_epoch(verbose=False)
 else:
@@ -146,6 +153,8 @@ def step(model, ptb, batch, eps=1.0, train=False):
         model.eval()
         model_bound.eval()
         grad = torch.no_grad()
+    if args.auto_test:
+        grad = torch.enable_grad()
 
     with grad:
         ptb.set_eps(eps)
@@ -205,7 +214,7 @@ def step(model, ptb, batch, eps=1.0, train=False):
             else:
                 acc_robust, loss_robust = acc, loss
                 
-    if train:
+    if train or args.auto_test:
         loss_robust.backward()
         grad_embed = torch.autograd.grad(
             embeddings_unbounded, model.word_embeddings.weight, 
@@ -214,6 +223,12 @@ def step(model, ptb, batch, eps=1.0, train=False):
             model.word_embeddings.weight.grad = grad_embed
         else:
             model.word_embeddings.weight.grad += grad_embed
+
+    if args.auto_test:
+        with open('res_test.pkl', 'wb') as file:
+            pickle.dump((
+                float(acc), float(loss), float(acc_robust), float(loss_robust), 
+                grad_embed.detach().numpy()), file)
 
     return acc, loss, acc_robust, loss_robust
 
@@ -300,7 +315,7 @@ def main():
             logger.info('Verification results:')
             for i in range(len(res)):
                 logger.info('budget {} acc_rob {:.3f}'.format(i + 1, res[i]))                
-            print(res)
+            logger.info(res)
         else:
             train(None, test_batches, 'test')
 

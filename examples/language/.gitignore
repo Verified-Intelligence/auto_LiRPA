@@ -1,2 +1,6 @@
 model*
 log*
+res_test.pkl
+ckpt_*
+data_language.tar.gz
+

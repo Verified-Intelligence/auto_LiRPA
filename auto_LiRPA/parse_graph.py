@@ -1,3 +1,4 @@
+import pdb
 import os
 import torch
 from collections import OrderedDict
@@ -6,100 +7,114 @@ from collections import namedtuple
 from torch.onnx import OperatorExportTypes
 from packaging import version
 from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
-from auto_LiRPA.utils import logger
+from auto_LiRPA.utils import logger, unpack_inputs
 
 Node = namedtuple('Node', (
-    'name', 'ori_name', 'inputs', 'attr', 'op', 'param', 'bound_node', 'output_index', 'perturbation'))
-
-torch_old = version.parse(torch.__version__) < version.parse("1.2.0")
+    'name', 'ori_name', 'inputs', 'attr', 'op', 'param', 'input_index', 
+    'bound_node', 'output_index', 'perturbation'))
 
 def replace(name, scope):
     return '/'.join([scope[name], name])
 
-def parse(graph, params):
+torch_old = version.parse(torch.__version__) < version.parse("1.2.0")
+
+def get_node_name(node):
+    return node.uniqueName() if torch_old else node.debugName()
+
+def parse_graph(graph, inputs, params):
     # in what scope is each node used as an input
     scope = {}
 
     for n in graph.nodes():
-        if torch_old:
-            inputs = [i.uniqueName() for i in n.inputs()]
-        else:
-            inputs = [i.debugName() for i in n.inputs()]
+        n_inputs = [get_node_name(i) for i in n.inputs()]
 
-        for i in range(0, len(inputs)):
-            if not inputs[i] in scope:
-                scope[inputs[i]] = n.scopeName()
+        for inp in n_inputs:
+            if not inp in scope:
+                scope[inp] = n.scopeName()
 
-        outputs = list(n.outputs())
-        for out in outputs:
-            uname = out.uniqueName() if torch_old else out.debugName()
-            scope[uname] = n.scopeName()
+        for out in n.outputs():
+            name = out.uniqueName() if torch_old else out.debugName()
+            scope[name] = n.scopeName()
 
     nodesOP = []
-    nodesIO = []
-
     for n in graph.nodes():
         attrs = {k: n[k] for k in n.attributeNames()}
 
-        if torch_old:
-            inputs = [replace(i.uniqueName(), scope) for i in n.inputs()]
-        else:
-            inputs = [replace(i.debugName(), scope) for i in n.inputs()]
+        n_inputs = [replace(get_node_name(i), scope) for i in n.inputs()]
 
-        outputs = list(n.outputs())
-        for i, out in enumerate(outputs):
-            if torch_old:
-                uname = out.uniqueName()
-            else:
-                uname = out.debugName()  
-
-            nodesOP.append(Node(**{'name': replace(uname, scope),
+        for i, out in enumerate(list(n.outputs())):
+            name = get_node_name(out)
+            nodesOP.append(Node(**{'name': replace(name, scope),
                                 'ori_name': '',
                                 'op': n.kind(),
-                                'inputs': inputs,
+                                'inputs': n_inputs,
                                 'attr': attrs,
                                 'param': None,  # will assign parameters later
-                                'bound_node': None,
+                                'input_index': None, # for input nodes only
+                                'bound_node': None, 
                                 'output_index': i, 
                                 'perturbation': None, }))
-            if n.kind() == 'onnx::BatchNormalization': break  # bn layer has some redundant outputs
+            if n.kind() == 'onnx::BatchNormalization': 
+                break  # bn layer has some redundant outputs
+    nodesOP_dict = {}
+    for n in nodesOP:
+        nodesOP_dict[n.name] = n
 
-    # assert len(list(graph.inputs())) == len(params)
-    _c = 0
+    # filter out input nodes in `graph.inputs()` that are actually used
+    nodesIn = []
+    used_index = []
     for i, n in enumerate(graph.inputs()):
-        uname = n.uniqueName() if torch_old else n.debugName()
+        name = get_node_name(n)
+        used = name in scope.keys()
+        used_index.append(used)
+        if used:
+            nodesIn.append(n)
 
-        if uname not in scope.keys():
-            scope[uname] = 'unused'
-            _c += 1
-            continue
-            
-        # params[i] is a tuple, ("name", Tensor)
-        if isinstance(params[i-_c][1], BoundedTensor) or isinstance(params[i-_c][1], BoundedParameter):
-            perturbation = params[i-_c][1].ptb
+    # filter out input nodes in `inputs` that are actually used
+    inputs_unpacked = unpack_inputs(inputs)
+    assert len(list(graph.inputs())) == len(inputs_unpacked) + len(params)
+    inputs = [inputs_unpacked[i] for i in range(len(inputs_unpacked)) if used_index[i]]  
+    # index of the used inputs among all the inputs
+    input_index = [i for i in range(len(inputs_unpacked)) if used_index[i]]
+    # Add a name to all inputs
+    inputs = list(zip(["input_{}".format(input_index[i]) for i in range(len(inputs))], inputs))
+    # filter out params that are actually used
+    params = [params[i] for i in range(len(params)) if used_index[i + len(inputs_unpacked)]]
+    inputs_and_params = inputs + params
+    assert len(nodesIn) == len(inputs_and_params) 
+
+    # output nodes of the module
+    nodesOut = []
+    for n in graph.outputs():
+        # we only record names
+        nodesOut.append(replace(get_node_name(n), scope))
+
+    for i, n in enumerate(nodesIn):
+        name = get_node_name(n)
+        if isinstance(inputs_and_params[i][1], BoundedTensor) or \
+                isinstance(inputs_and_params[i][1], BoundedParameter):
+            perturbation = inputs_and_params[i][1].ptb
         else:
             perturbation = None
-        # print(uname, n.type().sizes(), params[i-_c][0], list(params[i-_c][1].size()))
-
-        if n.type().sizes() != list(params[i-_c][1].size()):
-            raise RuntimeError("Input tensor shapes do not much: {} != {}".format(n.type().sizes(), list(params[i][1].size())))
-        nodesIO.append(Node(**{'name': replace(uname, scope),
-                             'ori_name': params[i-_c][0],
+        if n.type().sizes() != list(inputs_and_params[i][1].size()):
+            raise RuntimeError("Input tensor shapes do not much: {} != {}".format(
+                n.type().sizes(), list(inputs_and_params[i][1].size())))
+        nodesIn[i] = Node(**{'name': replace(name, scope),
+                             'ori_name': inputs_and_params[i][0],
                              'op': 'Parameter',
                              'inputs': [], 
                              'attr': str(n.type()),
-                             'param': params[i-_c][1],
+                             'param': inputs_and_params[i][1] if i >= len(inputs) else None,
+                             # index among all the inputs including unused ones 
+                             'input_index': input_index[i] if i < len(inputs) else None,
                              'bound_node': None,
                              'output_index': None,
                              # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
-                             'perturbation': perturbation, }))
+                             'perturbation': perturbation, })
 
-    assert len(list(graph.inputs())) == len(params) + _c
-
-    return nodesOP, nodesIO
+    return nodesOP, nodesIn, nodesOut
 
 def _get_jit_params(module, param_exclude, param_include):
-    # TODO: May get some nodes not used in forward()
     state_dict = torch.jit._unique_state_dict(module, keep_vars=True)
 
     if param_exclude is not None:
@@ -110,25 +125,39 @@ def _get_jit_params(module, param_exclude, param_include):
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if param_exclude is not None and param_exclude.match(k) is not None:
-            print('\nremove input element {} from NodesIO\n'.format(k))
+            print('\nremove input element {} from nodesIn\n'.format(k))
             continue
         if param_include is not None and param_include.match(k) is None:
             continue
-
-        if "num_batches_tracked" not in k:
-            if "weight" in k or "bias" in k or "running_mean" in k or "running_var" in k:
-                new_state_dict[k] = v
+        new_state_dict[k] = v
 
     params = zip(new_state_dict.keys(), new_state_dict.values())
 
     return params
 
-def get_graph_params(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
+"""Construct a template for the module output with `None` representing places 
+to be filled with tensor results"""
+def get_output_template(out):
+    if isinstance(out, torch.Tensor):
+        return None
+    elif isinstance(out, list):
+        return list([get_output_template(o) for o in out])
+    elif isinstance(out, tuple):
+        return tuple([get_output_template(o) for o in out])
+    elif isinstance(out, dict):
+        template = {}
+        for key in out:
+            template[key] = get_output_template(out[key])
+        return template
+    else:
+        raise NotImplementedError
+
+def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
     params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
     if version.parse(torch.__version__) < version.parse("1.4.0"):
         trace, out = torch.jit.get_trace_graph(module, inputs)
         torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
-        torch_graph = trace.graph()
+        trace_graph = trace.graph()
     else:
         # _get_trace_graph becomes an internal function in version >= 1.4.0
         trace, out = torch.jit._get_trace_graph(module, inputs)
@@ -138,28 +167,29 @@ def get_graph_params(module, inputs, param_exclude=".*AuxLogits.*", param_includ
             _set_opset_version(11)
         else:
             _set_opset_version(12)
-        torch_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
+        trace_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
+
+    logger.debug('trace_graph: {}'.format(trace_graph))
 
     if int(os.environ.get('AUTOLIRPA_DEBUG_GRAPH', 0)) > 0:
         print("Graph before ONNX convertion:")
         print(trace)
         print("ONNX graph:")
-        print(torch_graph)
+        print(trace_graph)
 
     if not isinstance(inputs, tuple):
         inputs = (inputs, )
-    # Add a name to all inputs
-    inputs = zip(["input_{}".format(i) for i in range(len(inputs))], inputs)
-    params = tuple(inputs) + tuple(params)
-
-    nodesOP, nodesIO = parse(torch_graph, params)
+    
+    nodesOP, nodesIn, nodesOut = parse_graph(trace_graph, tuple(inputs), tuple(params))
 
     for i in range(len(nodesOP)):
         param_in = OrderedDict()
         for inp in nodesOP[i].inputs:
-            for nIO in nodesIO:
-                if inp == nIO.name:
-                    param_in.update({inp:nIO.param})
+            for n in nodesIn:
+                if inp == n.name:
+                    param_in.update({inp:n.param})
         nodesOP[i] = nodesOP[i]._replace(param=param_in)
 
-    return nodesOP, nodesIO
+    template = get_output_template(out)
+
+    return nodesOP, nodesIn, nodesOut, template

@@ -1,16 +1,24 @@
 # auto_LiRPA: Automatic Linear Relaxation based Perturbation Analysis for Neural Networks
 
+![](https://travis-ci.com/KaidiXu/CROWN-GENERAL.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
+
 <p align="center">
 <img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa.png" width="50%" height="50%">
 </p>
 
 ## What's New?
 
+Aug 20, 2020: 
+
+- We released our certified defense models for downscaled
+[ImageNet](#imagenet-pretrained), [TinyImageNet](#imagenet-pretrained), [CIFAR-10](#cifar10-pretrained),
+and [LSTM/Transformers](#language-pretrained).
+
 June 30, 2020:
 - Adding support to **complex vision models** including DenseNet, ResNeXt and WideResNet.
 - **Loss fusion**, a technique that reduces training cost of tight LiRPA bounds 
 (e.g. CROWN-IBP) to the same asympototic complexity of IBP, making LiRPA based certified 
-defense scalable to large datasets (e.g., TinyImageNet with 200 labels).
+defense scalable to large datasets (e.g., TinyImageNet, downscaled ImageNet).
 - **Multi-GPU** support to scale LiRPA based training to large models and datasets.
 
 ## Introduction
@@ -33,6 +41,11 @@ PyTorch, without manual derivation. Our implementation is also automatically
 **differentiable**, allowing optimizing network parameters to shape the bounds
 into certain specifications (e.g., certified defense).
 
+**Supported Features:** We support **backward/forward mode perturbation analysis** 
+and interval bound propagation (**IBP**, which can be seen as a degenerate case 
+of LiRPA) on general computational graphs, as well as hybrid approaches such as 
+IBP+Backward, Forward+Backward.
+
 **Why we need auto_LiRPA?** We aim to facilitate the application of efficient
 linear relaxation based perturbation analysis (LiRPA).  Existing works have
 extended LiRPA from feed-forward networks to a few more network structures like
@@ -53,8 +66,8 @@ Examples](#more-examples) below.  The main algorithm of `auto_LiRPA` is
 discussed in [our paper](https://arxiv.org/abs/2002.12920).  Please refer to
 the [the guide](doc/paper.md) for reproducing paper results. 
 
-*Automatic Perturbation Analysis on General Computational Graphs*. Kaidi Xu\*,
-Zhouxing Shi\*, Huan Zhang\*, Yihan Wang, Minlie Huang, Kai-Wei Chang, Bhavya Kailkhura, Xue
+*Provable, Scalable and Automatic Perturbation Analysis on General Computational Graphs*. Kaidi Xu\*,
+Zhouxing Shi\*, Huan Zhang\*, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya Kailkhura, Xue
 Lin, Cho-Jui Hsieh (\* equal contribution). https://arxiv.org/pdf/2002.12920
 
 Please cite our paper if you use the `auto_LiRPA` library.  If you encounter
@@ -63,6 +76,7 @@ welcome contributions in any form from anyone.
 
 ## Installation
 
+Python 3.7+ is required. 
 Before you run any examples, please install `auto_LiRPA` first:
 
 ```
@@ -107,7 +121,9 @@ lb, ub = model.compute_bounds(method="backward")
 
 Checkout
 [examples/vision/simple_verification.py](examples/vision/simple_verification.py)
-for a complete but very basic example.
+for a complete but very basic example. 
+
+
 
 ## More Examples
 
@@ -150,6 +166,18 @@ The default model is a small ResNet model for MNIST, used in [Scaling provable
 adversarial defenses ](https://arxiv.org/pdf/1805.12514.pdf). You should get
 less than 10% verified error (at Linf eps=0.3) after training.
 
+We also provide an L0-norm option in `simple_training.py` and an example to use
+L0-norm certified training to train an MLP model.  The IBP bounds for L0-norm
+is provided in [Chiang et
+al.](https://openreview.net/forum?id=HyeaSkrYPH&noteId=HyeaSkrYPH), but here we
+also use the tighter backward mode perturbation analysis for L0-norm which is
+the first time in literature.
+
+```bash
+cd examples/vision
+python simple_training.py --model mlp_3layer --norm 0 --eps 1
+```
+
 For CIFAR-10, we provided some sample models in `examples/vision/models`:
 e.g., [cnn_7layer_bn](./examples/vision/models/feedforward.py),
 [DenseNet](./examples/vision/models/densenet.py),
@@ -165,33 +193,70 @@ See a list of supported models [here](./examples/vision/models/__init__.py).
 This command uses multi-GPUs by default. You probably need to reduce batch size
 if you have only 1 GPU. The CIFAR training implementation includes **loss
 fusion**, a technique that can greatly reduce training time and memory usage of
-LiRPA based certified defense.  More example of CIFAR-10 training can be found
+LiRPA based certified defense.
+
+<a id="cifar10-pretrained"></a>
+**Pretrained models for CIFAR-10:** We released our CIFAR-10 certified defense models
+[here](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/cifar/).  To compute
+verified error, please run:
+
+```bash
+python cifar_training.py --verify  --model cnn_7layer_bn --load saved_models/cnn_7layer_bn_cifar --eps 0.03137254901961
+```
+
+More example of CIFAR-10 training can be found
 in [doc/paper.md](doc/paper.md).
 
-### Certified Training on Tiny-ImageNet with Loss Fusion
 
-Loss fusion is essential for certified training on Tiny-ImageNet using LiRPA
-based bounds (e.g., CROWN-IBP).  This technique leads to ~50X speeding up on
-training time and also greatly reduces memory usage.
+### Certified Training on Downscaled ImageNet and TinyImageNet with Loss Fusion
 
-First, we need to prepare the data:
+Loss fusion is essential for certified training on Tiny-ImageNet (200 classes)
+or downscaled ImageNet (1000 classes) using LiRPA based bounds (e.g.,
+CROWN-IBP).  This technique leads to ~50X speeding up on training time and also
+greatly reduces memory usage.
+
+First, we need to prepare the data, for Tiny-ImageNet:
 
 ```bash
 cd examples/vision/data/tinyImageNet
 bash tinyimagenet_download.sh
 ```
 
-To train WideResNet model on TinyImagenet:
+To train the WideResNet model on Tiny-Imagenet:
+
 ```bash
 cd examples/vision
 python tinyimagenet_training.py --batch_size 100 --model wide_resnet_imagenet64
 ```
-To evaluate the clean error and verified error:
+
+For downscaled ImageNet, please download raw images (Train and Val, 64x64, npz format) from 
+[Image-Net.org](http://image-net.org/download-images) to `example/vision/data/ImageNet64/raw_data`,
+decompress them and then run data preprocessing:
+
 ```bash
-# This is the model saved by the previous command.
-MODEL=saved_models/wide_resnet_imagenet64_b100CROWN-IBP_epoch600_start=100,length=400,mid=0.4_ImageNet_0.0039
+cd examples/vision/data/ImageNet64
+python imagenet_data_loader.py
+```
+
+To train the WideResNet model on downscaled Imagenet:
+
+```bash
+cd examples/vision
+python imagenet_training.py --batch_size 100 --model wide_resnet_imagenet64_1000class
+```
+
+<a id="imagenet-pretrained"></a> 
+**Pretrained models for ImageNet:** We released our certified defense models (trained with loss fusion) for
+[Tiny-Imagenet](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/imagenet-200/)
+and
+[downscaled Imagenet](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/imagenet-1000/).
+To evaluate the clean error and verified error:
+
+```bash
+# This is the model saved path.
+MODEL=saved_models/wide_resnet_imagenet64_1000	
 # Run evaluation.
-python tinyimagenet_training.py --verify --model wide_resnet_imagenet64 --load $MODEL --eps 0.003921568627451
+python imagenet_training.py --verify --model wide_resnet_imagenet64_1000class --load $MODEL --eps 0.003921568627451
 ```
 
 See more details in [doc/paper.md](doc/paper.md) for these examples.
@@ -224,19 +289,34 @@ wget http://download.huan-zhang.com/datasets/language/data_language.tar.gz
 tar xvf data_language.tar.gz
 ```
 
-We use `$DIR$` to represent the directory for storing checkpoints. Then, to train a robust Transformer:
+We use `$DIR` to represent the directory for storing checkpoints. Then, to train a robust Transformer:
 
 ```bash
 python train.py --dir=$DIR --robust --method=IBP+backward_train --train
-python train.py --dir=$DIR --robust --method=IBP+backward # for verification
+python train.py --load=$DIR/ckpt_25 --robust --method=IBP+backward # for verification
 ```
 
 And to train a robust LSTM:
 
 ```bash
 python train.py --dir=$DIR --model=lstm --lr=1e-3 --robust --method=IBP+backward_train --dropout=0.5 --train
-python train.py --dir=$DIR --model=lstm --load=$DIR/ckpt_25 --robust --method=IBP+backward # for verification
+python train.py --model=lstm --load=$DIR/ckpt_25 --robust --method=IBP+backward # for verification
 ```
+
+<a id="language-pretrained"></a> 
+**Pretrained models for Transformer/LSTM:** We provide our certified defense models for
+[Transformer](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_transformer)
+and [LSTM](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_lstm). 
+To directly evaluate them:
+
+```bash
+# Download and evaluate our trained Transformer
+wget http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_transformer
+python train.py --load=ckpt_transformer --robust --method=IBP+backward
+# Download and evaluate our trained LSTM
+wget http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_lstm
+python train.py --model=lstm --load=ckpt_lstm --robust --method=IBP+backward
+``` 
 
 ### Certified Training for Weight Perturbation
 

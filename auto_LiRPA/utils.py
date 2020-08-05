@@ -2,12 +2,15 @@ import logging
 import pickle
 import time
 import torch
+import os
+import appdirs
+from oslo_concurrency import lockutils, processutils
 from collections import defaultdict, Sequence, namedtuple
 
 # Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
 eyeC = namedtuple('eyeC', 'shape device')
 # Linear bounds with coefficients. Used for forward bound propagation.
-LinearBound = namedtuple('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper'))
+LinearBound = namedtuple('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper', 'from_input'), defaults=(None,) * 7)
 
 logging.basicConfig(
     format='%(levelname)-8s %(asctime)-12s %(message)s',
@@ -15,6 +18,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# for debugging
+if False:
+    file_handler = logging.FileHandler('debug.log')
+    file_handler.setFormatter(logging.Formatter('%(levelname)-8s %(asctime)-12s %(message)s'))
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG)
+
+user_data_dir = appdirs.user_data_dir('auto_LiRPA')
+if not os.path.exists(user_data_dir):
+    os.makedirs(user_data_dir)
+lockutils.set_defaults(os.path.join(user_data_dir, '.lock'))
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -95,13 +110,25 @@ def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
     if grad_clip is not None:
         torch.nn.utils.clip_grad_norm_(parameters, grad_clip)                
 
-def dump_results(filename, lb, ub):
-    with open(filename, 'wb') as file:
-        pickle.dump((lb, ub), file)
-
 def recursive_map (seq, func):
     for item in seq:
         if isinstance(item, Sequence):
             yield type(item)(recursive_map(item, func))
         else:
             yield func(item)
+
+# unpack tuple, dict, list into one single list
+# TODO: not sure if the order matches graph.inputs()
+def unpack_inputs(inputs):
+    if isinstance(inputs, dict):
+        inputs = list(inputs.values())
+    if isinstance(inputs, tuple) or isinstance(inputs, list):
+        res = []
+        for item in inputs: 
+            res += unpack_inputs(item)
+        return res
+    else:
+        return [inputs]
+
+def isnan(x):
+    return torch.isnan(x).any()

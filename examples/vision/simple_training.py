@@ -24,16 +24,17 @@ parser.add_argument("--seed", type=int, default=100, help='random seed')
 parser.add_argument("--eps", type=float, default=0.3, help='Target training epsilon')
 parser.add_argument("--norm", type=float, default='inf', help='p norm for epsilon perturbation')
 parser.add_argument("--bound_type", type=str, default="CROWN-IBP",
-                    choices=["IBP", "CROWN-IBP", "CROWN"], help='method of bound analysis')
+                    choices=["IBP", "CROWN-IBP", "CROWN", "CROWN-FAST"], help='method of bound analysis')
 parser.add_argument("--model", type=str, default="resnet", help='model name (mlp_3layer, cnn_4layer, cnn_6layer, cnn_7layer, resnet)')
 parser.add_argument("--num_epochs", type=int, default=100, help='number of total epochs')
 parser.add_argument("--batch_size", type=int, default=256, help='batch size')
 parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
 parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
-                    choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
+                    choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler", "FixedScheduler"], help='epsilon scheduler')
 parser.add_argument("--scheduler_opts", type=str, default="start=3,length=60", help='options for epsilon scheduler')
 parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope", "zero-lb", "one-lb"],
                     help='bound options')
+parser.add_argument("--save_model", type=str, default='')
 
 args = parser.parse_args()
 
@@ -80,7 +81,10 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
 
         # Specify Lp norm perturbation.
         # When using Linf perturbation, we manually set element-wise bound x_L and x_U. eps is not used for Linf norm.
-        ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
+        if norm > 0:
+            ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
+        elif norm == 0:
+            ptb = PerturbationL0Norm(eps = eps_scheduler.get_max_eps(), ratio = eps_scheduler.get_eps()/eps_scheduler.get_max_eps())
         x = BoundedTensor(data, ptb)
 
         output = model(x)
@@ -103,6 +107,11 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
                 else:
                     clb, cub = model.compute_bounds(IBP=False, C=c, method="backward", bound_upper=False)
                     lb = clb * factor + ilb * (1 - factor)
+            elif bound_type == "CROWN-FAST":
+                # model.compute_bounds(IBP=True, C=c, method=None)
+                lb, ub = model.compute_bounds(IBP=True, C=c, method=None)
+                lb, ub = model.compute_bounds(IBP=False, C=c, method="backward", bound_upper=False)
+
 
             # Pad zero at the beginning for each example, and use fake label "0" for all examples
             lb_padded = torch.cat((torch.zeros(size=(lb.size(0),1), dtype=lb.dtype, device=lb.device), lb), dim=1)
@@ -199,7 +208,7 @@ def main(args):
             print("Evaluating...")
             with torch.no_grad():
                 Train(model, t, test_data, eps_scheduler, norm, False, None, args.bound_type)
-            torch.save({'state_dict': model.state_dict(), 'epoch': t}, args.model)
+            torch.save({'state_dict': model_ori.state_dict(), 'epoch': t}, args.save_model if args.save_model != "" else args.model)
 
 
 if __name__ == "__main__":

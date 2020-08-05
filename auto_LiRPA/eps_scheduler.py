@@ -214,7 +214,6 @@ class SmoothedScheduler(BaseScheduler):
             linear_value = min(mid_value + (final_value - mid_value) * (step - mid_step) / (final_step - mid_step), final_value)
             self.eps = is_ramp * ((1.0 - is_linear) * exp_value + is_linear * linear_value) + (1.0 - is_ramp) * init_value
 
-
 class AdaptiveScheduler(BaseScheduler):
     def __init__(self, max_eps, opt_str):
         super(AdaptiveScheduler, self).__init__(max_eps, opt_str)

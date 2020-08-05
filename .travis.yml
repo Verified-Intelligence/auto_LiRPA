@@ -1,0 +1,16 @@
+language: python
+python:
+  - "3.7"
+install:
+  # fix torch's version for result check
+  - pip install torch==1.5.0 
+  - pip install --editable .
+  - cd examples 
+  - pip install -r requirements.txt
+  # fix torchvision's version to make it compatible with the torch
+  - pip install torchvision==0.6.0 
+  - cd ..
+script:
+  - cd tests
+  - python utils/download_models.py
+  - pytest 

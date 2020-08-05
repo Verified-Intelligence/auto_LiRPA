@@ -7,7 +7,7 @@ import multiprocessing
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from auto_LiRPA import BoundedModule, BoundedTensor, BoundDataParallel, CrossEntropyWrapper
-from auto_LiRPA.bound_ops import BoundReLU, BoundExp
+from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter
 import models
@@ -168,11 +168,11 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             # remove specifications to self
             I = (~(labels.data.unsqueeze(1) == torch.arange(num_class).type_as(labels.data).unsqueeze(0)))
             c = (c[I].view(data.size(0), num_class - 1, num_class))
+            x = (x, labels)
             output = model(x, final_node_name=final_node_name)
             regular_ce = CrossEntropyLoss()(output, labels)  # regular CrossEntropyLoss used for warming up
-            meter.update('CE', regular_ce.item(), x.size(0))
-            meter.update('Err', torch.sum(torch.argmax(output, dim=1) != labels).item() / x.size(0), x.size(0))
-            x = (x,)
+            meter.update('CE', regular_ce.item(), x[0].size(0))
+            meter.update('Err', torch.sum(torch.argmax(output, dim=1) != labels).item() / x[0].size(0), x[0].size(0))
 
         if batch_method == 'robust':
             # print(data.sum())

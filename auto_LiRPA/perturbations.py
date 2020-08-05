@@ -1,10 +1,11 @@
 import os
 import json
+import pdb
 import numpy as np
 import torch
 import torch.nn as nn
 from auto_LiRPA.utils import logger, eyeC, LinearBound
-from auto_LiRPA.bound_ops import LinearBound
+import math
 
 class Perturbation:
     def __init__(self):
@@ -18,6 +19,63 @@ class Perturbation:
 
     def init(self, x, aux=None, forward=False):
         raise NotImplementedError
+
+
+class PerturbationL0Norm(Perturbation):
+    def __init__(self, eps, x_L = None, x_U = None, ratio = 1.0):
+        self.eps = eps
+        self.x_U = x_U
+        self.x_L = x_L
+        self.ratio = ratio
+
+    def concretize(self, x, A, sign = -1, aux = None):
+        if A is None:
+            return None
+        
+        eps = math.ceil(self.eps)
+        x = x.reshape(x.shape[0], -1, 1)
+        center = A.matmul(x)
+
+        x = x.reshape(x.shape[0], 1, -1)
+
+        original = A * x.expand(x.shape[0], A.shape[-2], x.shape[2])
+        neg_mask = A < 0
+        pos_mask = A >= 0
+
+        
+        # print(A.shape)
+        if sign == 1:
+            A_diff = torch.zeros_like(A)
+            A_diff[pos_mask] = A[pos_mask] - original[pos_mask]# changes that one weight can contribute to the value
+            A_diff[neg_mask] = - original[neg_mask]
+        else:
+            A_diff = torch.zeros_like(A)
+            A_diff[pos_mask] = original[pos_mask]
+            A_diff[neg_mask] = original[neg_mask] - A[neg_mask]
+
+        A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
+
+        bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
+
+        return bound.squeeze(2)
+
+    def init(self, x, aux=None, forward=False):
+        # For other norms, we pass in the BoundedTensor objects directly.
+        x_L = x
+        x_U = x
+        if not forward:
+            return LinearBound(None, None, None, None, x_L, x_U), x, None
+        batch_size = x.shape[0]
+        dim = x.reshape(batch_size, -1).shape[-1]
+        eye = torch.eye(dim).to(x.device).unsqueeze(0).repeat(batch_size, 1, 1)
+        lw = eye.reshape(batch_size, dim, *x.shape[1:])
+        lb = torch.zeros_like(x).to(x.device)
+        uw, ub = lw.clone(), lb.clone()       
+        return LinearBound(lw, lb, uw, ub, x_L, x_U), x, None
+
+    
+    def __repr__(self):
+        return 'PerturbationLpNorm(norm=0, eps={})'.format(self.eps)
 
 """Perturbation constrained by the L_p norm."""
 class PerturbationLpNorm(Perturbation):
@@ -59,6 +117,7 @@ class PerturbationLpNorm(Perturbation):
                 # A is an identity matrix. Its norm is all 1.
                 bound = x + sign * self.eps
         bound = bound.squeeze(-1)
+        # print(bound.shape)
         return bound
 
     def init(self, x, aux=None, forward=False):

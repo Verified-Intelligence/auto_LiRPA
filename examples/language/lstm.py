@@ -59,9 +59,8 @@ class LSTM(nn.Module):
         self.vocab = self.vocab_actual = build_vocab(data_train, args.min_word_freq)
         self.checkpoint = 0
 
-
         if args.load:
-            ckpt = torch.load(args.load)
+            ckpt = torch.load(args.load, map_location=torch.device(self.device))  
             self.embedding = torch.nn.Embedding(len(self.vocab), self.embedding_size)
             self.model_from_embeddings = LSTMFromEmbeddings(args, len(self.vocab))
             self.model = self.embedding, LSTMFromEmbeddings(args, len(self.vocab))

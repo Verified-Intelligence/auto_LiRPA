@@ -105,7 +105,7 @@ python cifar_training.py --batch_size 256 --lr_decay_milestones 1400 1700 --mode
 
 To evaluate the clean error and verified error of our CNN-7+BN model:
 ```bash
-python cifar_training.py --verify  --model cnn_7layer_bn --load saved_models/cnn_7layer_bn_best_66.62 --eps 0.03137254901961
+python cifar_training.py --verify  --model cnn_7layer_bn --load saved_models/cnn_7layer_bn_cifar --eps 0.03137254901961
 ```
 
 Or you can evaluate your models by specific $DIR  in --load

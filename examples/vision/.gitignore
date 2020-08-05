@@ -3,3 +3,5 @@ exp_inv
 __pycache__
 model_*
 saved_models
+config
+

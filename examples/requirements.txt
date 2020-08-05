@@ -1,12 +1,9 @@
+thop>=0.0.31.post2004101309
+tensorboard>=1.14
+scikit_learn>=0.21
 torchvision>=0.3
 scipy>=1.3
-numpy>=1.16
-torch>=1.1.0
-packaging>=20.1
 pytorch_pretrained_bert>=0.6
 query>=0.1
-scikit_learn>=0.21
 tqdm>=4.43
-tensorboard>=1.14
 matplotlib>=3.2
-thop>=0.0.31.post2004101309
