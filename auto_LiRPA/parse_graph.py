@@ -1,4 +1,3 @@
-import pdb
 import os
 import torch
 from collections import OrderedDict
@@ -16,10 +15,8 @@ Node = namedtuple('Node', (
 def replace(name, scope):
     return '/'.join([scope[name], name])
 
-torch_old = version.parse(torch.__version__) < version.parse("1.2.0")
-
 def get_node_name(node):
-    return node.uniqueName() if torch_old else node.debugName()
+    return node.debugName()
 
 def parse_graph(graph, inputs, params):
     # in what scope is each node used as an input
@@ -33,7 +30,7 @@ def parse_graph(graph, inputs, params):
                 scope[inp] = n.scopeName()
 
         for out in n.outputs():
-            name = out.uniqueName() if torch_old else out.debugName()
+            name = out.debugName()
             scope[name] = n.scopeName()
 
     nodesOP = []

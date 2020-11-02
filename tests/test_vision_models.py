@@ -32,10 +32,12 @@ class cnn_4layer_test(nn.Module):
 
 def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
-    assert torch.allclose(lb, data[lb_name], 1e-4)
-    assert torch.allclose(ub, data[ub_name], 1e-4)
-    assert ((lb - data[lb_name]).pow(2).sum() < 1e-12)
-    assert ((ub - data[ub_name]).pow(2).sum() < 1e-12)
+    # data[lb_name] = lb.detach().data.clone()
+    # data[ub_name] = ub.detach().data.clone()
+    assert torch.allclose(lb, data[lb_name], 1e-4), (lb - data[lb_name]).abs().sum()
+    assert torch.allclose(ub, data[ub_name], 1e-4), (ub - data[ub_name]).abs().sum()
+    assert ((lb - data[lb_name]).pow(2).sum() < 1e-12), (lb - data[lb_name]).pow(2).sum()
+    assert ((ub - data[ub_name]).pow(2).sum() < 1e-12), (ub - data[ub_name]).pow(2).sum()
 
     # test gradient backward propagation
     loss = (ub - lb).abs().sum()
@@ -45,8 +47,9 @@ def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     # gradient w.r.t input only
     grad = x.grad
     # data[lb_name[:-2]+'grad'] = grad.detach().data.clone()
-    assert torch.allclose(grad, data[lb_name[:-2] + 'grad'], 1e-4)
-    assert ((grad - data[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-12)
+    # print(grad.sum(), data[lb_name[:-2] + 'grad'].sum(),)
+    assert torch.allclose(grad, data[lb_name[:-2] + 'grad'], 1e-4), (grad - data[lb_name[:-2] + 'grad']).abs().sum()
+    assert ((grad - data[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-12), (grad - data[lb_name[:-2] + 'grad']).pow(2).sum()
 
 
 def test():

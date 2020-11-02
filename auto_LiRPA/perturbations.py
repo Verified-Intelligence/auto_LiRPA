@@ -1,11 +1,11 @@
 import os
 import json
-import pdb
 import numpy as np
 import torch
 import torch.nn as nn
-from auto_LiRPA.utils import logger, eyeC, LinearBound
+from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList
 import math
+import torch.nn.functional as F
 
 class Perturbation:
     def __init__(self):
@@ -42,8 +42,7 @@ class PerturbationL0Norm(Perturbation):
         neg_mask = A < 0
         pos_mask = A >= 0
 
-        
-        # print(A.shape)
+
         if sign == 1:
             A_diff = torch.zeros_like(A)
             A_diff[pos_mask] = A[pos_mask] - original[pos_mask]# changes that one weight can contribute to the value
@@ -91,34 +90,82 @@ class PerturbationLpNorm(Perturbation):
         if A is None:
             return None
         # If A is an identity matrix, we will handle specially.
-        if not isinstance(A, eyeC):
-            A = A.reshape(A.shape[0], A.shape[1], -1)
-        if self.norm == np.inf:
-            # For Linfinity distortion, when an upper and lower bound is given, we use them instead of eps.
-            x_L = x - self.eps if self.x_L is None else self.x_L
-            x_U = x + self.eps if self.x_U is None else self.x_U
-            x_ub = x_U.reshape(x_U.shape[0], -1, 1)
-            x_lb = x_L.reshape(x_L.shape[0], -1, 1)
-            # Find the uppwer and lower bound similarly to IBP.
-            center = (x_ub + x_lb) / 2.0
-            diff = (x_ub - x_lb) / 2.0
+        def concretize_matrix(A):
+            nonlocal x
             if not isinstance(A, eyeC):
-                bound = A.matmul(center) + sign * A.abs().matmul(diff)
+                A = A.reshape(A.shape[0], A.shape[1], -1)
+            if self.norm == np.inf:
+                # For Linfinity distortion, when an upper and lower bound is given, we use them instead of eps.
+                x_L = x - self.eps if self.x_L is None else self.x_L
+                x_U = x + self.eps if self.x_U is None else self.x_U
+                x_ub = x_U.reshape(x_U.shape[0], -1, 1)
+                x_lb = x_L.reshape(x_L.shape[0], -1, 1)
+                # Find the uppwer and lower bound similarly to IBP.
+                center = (x_ub + x_lb) / 2.0
+                diff = (x_ub - x_lb) / 2.0
+                if not isinstance(A, eyeC):
+                    bound = A.matmul(center) + sign * A.abs().matmul(diff)
+                else:
+                    # A is an identity matrix. No need to do this matmul.
+                    bound = center + sign * diff
             else:
-                # A is an identity matrix. No need to do this matmul.
-                bound = center + sign * diff
+                x = x.reshape(x.shape[0], -1, 1)
+                if not isinstance(A, eyeC):
+                    # Find the upper and lower bounds via dual norm.
+                    deviation = A.norm(self.dual_norm, -1) * self.eps
+                    bound = A.matmul(x) + sign * deviation.unsqueeze(-1)
+                else:
+                    # A is an identity matrix. Its norm is all 1.
+                    bound = x + sign * self.eps
+            bound = bound.squeeze(-1)
+            return bound
+
+        def concretize_patches(A):
+            nonlocal x
+            if self.norm == np.inf:
+                # For Linfinity distortion, when an upper and lower bound is given, we use them instead of eps.
+                x_L = x - self.eps if self.x_L is None else self.x_L
+                x_U = x + self.eps if self.x_U is None else self.x_U
+
+                # Here we should not reshape
+                # Find the uppwer and lower bound similarly to IBP.
+                center = (x_U + x_L) / 2.0
+                diff = (x_U - x_L) / 2.0
+                if not A.identity == 1:
+                    # unfold the input as [batch_size, L, in_c * H * W]
+                    unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    # reshape the input as [batch_size, L, 1, in_c, H, W]
+                    unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
+                    prod = unfold_input * A.patches
+                    prod = prod.sum((-1, -2, -3)).transpose(-2, -1)
+                    # size of prod: [batch_size, out_c, L], and then reshape it to [batch_size, out_c, M, M]
+                    bound = prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
+ 
+                    unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
+                    prod = unfold_input * A.patches.abs()
+                    prod = prod.sum((-1, -2, -3)).transpose(-2, -1)
+                    bound += sign * prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
+                else:
+                    # A is an identity matrix. No need to do this matmul.
+                    bound = center + sign * diff
+                return bound
+            else:# Lp norm
+                x_L = x - self.eps if self.x_L is None else self.x_L
+                x_U = x + self.eps if self.x_U is None else self.x_U
+                
+                raise NotImplementedError()
+
+        if isinstance(A, eyeC) or isinstance(A, torch.Tensor):
+            return concretize_matrix(A)
+        elif isinstance(A, Patches):
+            return concretize_patches(A)
+        elif isinstance(A, BoundList):
+            for b in A.bound_list:
+                if isinstance(b, eyeC) or isinstance(b, torch.Tensor):
+                    pass
         else:
-            x = x.reshape(x.shape[0], -1, 1)
-            if not isinstance(A, eyeC):
-                # Find the upper and lower bounds via dual norm.
-                deviation = A.norm(self.dual_norm, -1) * self.eps
-                bound = A.matmul(x) + sign * deviation.unsqueeze(-1)
-            else:
-                # A is an identity matrix. Its norm is all 1.
-                bound = x + sign * self.eps
-        bound = bound.squeeze(-1)
-        # print(bound.shape)
-        return bound
+            raise NotImplementedError()
 
     def init(self, x, aux=None, forward=False):
         if self.norm == np.inf:
@@ -300,18 +347,20 @@ class PerturbationSynonym(Perturbation):
             for i in range(length):
                 if can_be_replaced[t][i]:
                     word_embed = word_embeddings[vocab[tokens[t][i]]]
+                    # positional embedding and token type embedding
+                    other_embed = x[t, i] - word_embed
                     if forward:
                         lw[t, (cnt * dim_word):((cnt + 1) * dim_word), i, :] = eye
-                        lb[t, i, :] = x[t, i, :] - word_embed
+                        lb[t, i, :] = torch.zeros_like(word_embed)
                     for w in candidates[i][1:]:
                         if w in self.model.vocab:
                             x_rep[t][i].append(
-                                word_embeddings[self.model.vocab[w]])
+                                word_embeddings[self.model.vocab[w]] + other_embed)
                     max_num_cand = max(max_num_cand, len(x_rep[t][i]))
                     cnt += 1
                 else:
                     if forward:
-                        lb[t, i, :] = x[t, i, :]
+                        lb[t, i, :] = x[t, i, :]        
         if forward:
             uw, ub = lw, lb
         else:

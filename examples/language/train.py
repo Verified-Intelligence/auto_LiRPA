@@ -65,7 +65,6 @@ parser.add_argument('--hidden_act', type=str, default='relu')
 parser.add_argument('--layer_norm', type=str, default='no_var',
                     choices=['standard', 'no', 'no_var'])
 parser.add_argument('--loss_fusion', action='store_true')
-parser.add_argument('--no_lm', action='store_true', help='no language model constraint')
 parser.add_argument('--dropout', type=float, default=0.1)
 parser.add_argument('--bound_opts_relu', type=str, default='zero-lb')
 
@@ -101,11 +100,6 @@ if args.model == 'transformer':
 elif args.model == 'lstm':
     dummy_mask = torch.zeros(1, args.max_sent_length, device=args.device)
     model = LSTM(args, data_train)
-
-if args.no_lm:
-    # no language model constraint for test data
-    for i in range(len(data_test)):
-        data_test[i]['candidates'] = None
     
 dev_batches = get_batches(data_dev, args.batch_size)
 test_batches = get_batches(data_test, args.batch_size)
@@ -318,7 +312,6 @@ def main():
             logger.info(res)
         else:
             train(None, test_batches, 'test')
-
 
 if __name__ == '__main__':
     main()

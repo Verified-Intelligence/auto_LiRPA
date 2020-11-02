@@ -47,7 +47,7 @@ def test():
         input_name=[None, None, None], 
         name=None, ori_name=None, attr=None, 
         inputs=[dummy_in, dummy_weight, dummy_bias],
-        output_index=0, options=None, device=device)
+        output_index=0, options={}, device=device)
 
     # test `forward`
     data_out = op(data_in, weight, bias)

@@ -5,5 +5,4 @@ bound_op_map = {
     # 'onnx::GlobalAveragePool': AdaptiveAvgPool2d,
     'onnx::Gemm': BoundLinear,
     'prim::Constant': BoundPrimConstant,
-    'aten::gather': BoundGatherAten,
 }

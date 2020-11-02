@@ -82,9 +82,12 @@ class LinearScheduler(BaseScheduler):
             self.epoch_end_eps = 0
         else:
             eps_epoch = self.epoch - self.schedule_start
-            eps_epoch_step = self.max_eps / self.schedule_length
-            self.epoch_start_eps = min(eps_epoch * eps_epoch_step, self.max_eps)
-            self.epoch_end_eps = min((eps_epoch + 1) * eps_epoch_step, self.max_eps)
+            if self.schedule_length == 0:
+                self.epoch_start_eps = self.epoch_end_eps = self.max_eps
+            else:
+                eps_epoch_step = self.max_eps / self.schedule_length
+                self.epoch_start_eps = min(eps_epoch * eps_epoch_step, self.max_eps)
+                self.epoch_end_eps = min((eps_epoch + 1) * eps_epoch_step, self.max_eps)
         self.eps = self.epoch_start_eps
         if verbose:
             logger.info("Epoch {:3d} eps start {:7.5f} end {:7.5f}".format(self.epoch, self.epoch_start_eps, self.epoch_end_eps))
@@ -247,8 +250,6 @@ class AdaptiveScheduler(BaseScheduler):
 
 
 if __name__ == "__main__":
-    # s = LinearScheduler(0.1, "start=3,length=10")
-    # s = AdaptiveScheduler(0.1, "start=1,min_step=0.0001,max_step=0.01")
     s = SmoothedScheduler(0.1, "start=2,length=10,mid=0.3")
     epochs = 20
     batches = 10

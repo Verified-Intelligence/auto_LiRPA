@@ -34,6 +34,7 @@ parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
 parser.add_argument("--scheduler_opts", type=str, default="start=3,length=60", help='options for epsilon scheduler')
 parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope", "zero-lb", "one-lb"],
                     help='bound options')
+parser.add_argument("--conv_mode", type=str, choices=["matrix", "patches"], default="patches")
 parser.add_argument("--save_model", type=str, default='')
 
 args = parser.parse_args()
@@ -179,7 +180,7 @@ def main(args):
 
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
-    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts, 'conv_mode': args.conv_mode}, device=args.device)
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model.parameters(), lr=args.lr)

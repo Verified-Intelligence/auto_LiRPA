@@ -3,23 +3,24 @@
 ![](https://travis-ci.com/KaidiXu/CROWN-GENERAL.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
 
 <p align="center">
-<img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa.png" width="50%" height="50%">
+<img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_2.png" width="45%" height="45%" float="left">
+<img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa.png" width="45%" height="45%" float="right">
 </p>
 
 ## What's New?
 
-Aug 20, 2020: 
-
+- A **memory efficient** GPU implementation of backward (CROWN) bounds for 
+**convolutional layers**. See [examples/vision/patch_convolution.py](examples/vision/patch_convolution.py)
+for a comparison. (10/31/2020)
 - We released our certified defense models for downscaled
 [ImageNet](#imagenet-pretrained), [TinyImageNet](#imagenet-pretrained), [CIFAR-10](#cifar10-pretrained),
-and [LSTM/Transformers](#language-pretrained).
-
-June 30, 2020:
-- Adding support to **complex vision models** including DenseNet, ResNeXt and WideResNet.
+and [LSTM/Transformers](#language-pretrained). (08/20/2020)
+- Adding support to **complex vision models** including DenseNet, ResNeXt and WideResNet. (06/30/2020)
 - **Loss fusion**, a technique that reduces training cost of tight LiRPA bounds 
 (e.g. CROWN-IBP) to the same asympototic complexity of IBP, making LiRPA based certified 
-defense scalable to large datasets (e.g., TinyImageNet, downscaled ImageNet).
-- **Multi-GPU** support to scale LiRPA based training to large models and datasets.
+defense scalable to large datasets (e.g., TinyImageNet, downscaled ImageNet). (06/30/2020)
+- **Multi-GPU** support to scale LiRPA based training to large models and datasets. (06/30/2020)
+- Initial release. (02/28/2020)
 
 ## Introduction
 
@@ -44,7 +45,7 @@ into certain specifications (e.g., certified defense).
 **Supported Features:** We support **backward/forward mode perturbation analysis** 
 and interval bound propagation (**IBP**, which can be seen as a degenerate case 
 of LiRPA) on general computational graphs, as well as hybrid approaches such as 
-IBP+Backward, Forward+Backward.
+IBP+Backward (CROWN-IBP), Forward+Backward.
 
 **Why we need auto_LiRPA?** We aim to facilitate the application of efficient
 linear relaxation based perturbation analysis (LiRPA).  Existing works have
@@ -63,12 +64,13 @@ backpropagation).
 
 We provide a wide range of examples of using `auto_LiRPA`.  See [More
 Examples](#more-examples) below.  The main algorithm of `auto_LiRPA` is
-discussed in [our paper](https://arxiv.org/abs/2002.12920).  Please refer to
+discussed in [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920).  Please refer to
 the [the guide](doc/paper.md) for reproducing paper results. 
 
-*Provable, Scalable and Automatic Perturbation Analysis on General Computational Graphs*. Kaidi Xu\*,
-Zhouxing Shi\*, Huan Zhang\*, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya Kailkhura, Xue
-Lin, Cho-Jui Hsieh (\* equal contribution). https://arxiv.org/pdf/2002.12920
+[Automatic Perturbation Analysis for Scalable Certified Robustness and
+Beyond](https://arxiv.org/pdf/2002.12920). Kaidi Xu\*, Zhouxing Shi\*, Huan
+Zhang\*, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya Kailkhura, Xue Lin,
+Cho-Jui Hsieh (\* equal contribution). NeurIPS 2020.
 
 Please cite our paper if you use the `auto_LiRPA` library.  If you encounter
 any problems with this library, feel free create an issue or pull request. We
@@ -76,7 +78,7 @@ welcome contributions in any form from anyone.
 
 ## Installation
 
-Python 3.7+ is required. 
+Python 3.7+ is required. Pytorch 1.4, 1.5 and 1.6 are supported.
 Before you run any examples, please install `auto_LiRPA` first:
 
 ```

@@ -41,8 +41,10 @@ class mlp_3layer(nn.Module):
 
 def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
-    assert torch.allclose(lb, data[lb_name], 1e-3)
-    assert torch.allclose(ub, data[ub_name], 1e-3)
+    # data[lb_name] = lb.detach().data.clone()
+    # data[ub_name] = ub.detach().data.clone()
+    assert torch.allclose(lb, data[lb_name], 1e-4)
+    assert torch.allclose(ub, data[ub_name], 1e-4)
     assert ((lb - data[lb_name]).pow(2).sum() < 1e-9)
     assert ((ub - data[ub_name]).pow(2).sum() < 1e-9)
 
@@ -54,7 +56,7 @@ def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     # gradient w.r.t input only
     grad = x.grad
     # data[lb_name+'_grad'] = grad.detach().data.clone()
-    assert torch.allclose(grad, data[lb_name + '_grad'], 1e-3)
+    assert torch.allclose(grad, data[lb_name + '_grad'], 1e-4)
     assert ((grad - data[lb_name + '_grad']).pow(2).sum() < 1e-9)
 
 

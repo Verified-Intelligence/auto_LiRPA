@@ -54,11 +54,11 @@ def compute_and_compare_bounds(eps, norm, IBP, method):
     expected_ub = eps * norm + expected_pred
     expected_lb = -eps * norm + expected_pred
     # Check equivalence.
-    torch.allclose(expected_pred, pred)
-    torch.allclose(expected_ub, ub)
-    torch.allclose(expected_lb, lb)
+    if method == 'backward' or method == 'forward':
+        assert torch.allclose(expected_pred, pred, 1e-4)
+        assert torch.allclose(expected_ub, ub, 1e-4)
+        assert torch.allclose(expected_lb, lb, 1e-4)
 
-@pytest.mark.skip(reason="Not Implemented")
 def test_Linf_forward():
     with np.errstate(divide='ignore'):
         compute_and_compare_bounds(eps=0.3, norm=np.inf, IBP=False, method='forward')
@@ -75,7 +75,6 @@ def test_Linf_backward_IBP():
     with np.errstate(divide='ignore'):
         compute_and_compare_bounds(eps=0.3, norm=np.inf, IBP=True, method='backward')
 
-@pytest.mark.skip(reason="Not Implemented")
 def test_L2_forward():
     with np.errstate(divide='ignore'):
         compute_and_compare_bounds(eps=1.0, norm=2, IBP=False, method='forward')
@@ -92,7 +91,6 @@ def test_L2_backward_IBP():
     with np.errstate(divide='ignore'):
         compute_and_compare_bounds(eps=1.0, norm=2, IBP=True, method='backward')
 
-@pytest.mark.skip(reason="Not Implemented")
 def test_L1_forward():
     with np.errstate(divide='ignore'):
         compute_and_compare_bounds(eps=3.0, norm=1, IBP=False, method='forward')

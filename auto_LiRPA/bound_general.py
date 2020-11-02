@@ -1,15 +1,16 @@
-import os
 import time
 from collections import OrderedDict, deque
-from itertools import chain
+
+import torch.optim as optim
 from torch.nn import DataParallel, Parameter
 
-from auto_LiRPA.bound_ops import *
-from auto_LiRPA.perturbations import *
-from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
 from auto_LiRPA.bound_op_map import bound_op_map
+from auto_LiRPA.bound_ops import *
+from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
 from auto_LiRPA.parse_graph import parse_module
-from auto_LiRPA.utils import LinearBound, logger, recursive_map, eyeC, unpack_inputs
+from auto_LiRPA.perturbations import *
+from auto_LiRPA.utils import LinearBound, logger, eyeC, unpack_inputs, Patches, BoundList
+
 
 class BoundedModule(nn.Module):
     def __init__(self, model, global_input, bound_opts={}, auto_batch_dim=True, device='cpu', 
@@ -23,12 +24,10 @@ class BoundedModule(nn.Module):
         self.bound_opts = bound_opts
         self.auto_batch_dim = auto_batch_dim
         self.device = device
+        self.global_input = global_input
         if auto_batch_dim:
             # logger.warning('Using automatic batch dimension inferring, which may not be correct')
             self.init_batch_size = -1
-        if device == 'cpu':
-            # in case that the device argument is missed
-            logger.info('Using CPU for the BoundedModule')
 
         state_dict_copy = copy.deepcopy(model.state_dict())
         object.__setattr__(self, 'ori_state_dict', state_dict_copy)
@@ -42,7 +41,6 @@ class BoundedModule(nn.Module):
             kwargs.pop("method_opt")
         else:
             opt = "forward" 
-            # raise ValueError("Please specify the 'method_opt' as the last argument.")
         if "disable_multi_gpu" in kwargs:
             kwargs.pop("disable_multi_gpu")
         if "no_replicas" in kwargs:
@@ -69,8 +67,6 @@ class BoundedModule(nn.Module):
         elif not isinstance(name, torch._six.string_classes):
             raise TypeError("parameter name should be a string. "
                             "Got {}".format(torch.typename(name)))
-        # elif '.' in name:
-        #     raise KeyError("parameter name can't contain \".\"")
         elif name == '':
             raise KeyError("parameter name can't be empty string \"\"")
         elif hasattr(self, name) and name not in self._parameters:
@@ -134,7 +130,7 @@ class BoundedModule(nn.Module):
             l = self._modules[key]
             degree_in[l.name] = len(l.input_name)
             if degree_in[l.name] == 0:
-                queue.append(l) #in_degree ==0 -> root node
+                queue.append(l)
         forward_values = {}
 
         final_output = None
@@ -148,6 +144,7 @@ class BoundedModule(nn.Module):
             if isinstance(fv, torch.Size):
                 fv = torch.tensor(fv, device=self.device)
             object.__setattr__(l, 'forward_value', fv)
+            object.__setattr__(l, 'fv', fv)
             # infer batch dimension
             if not hasattr(l, 'batch_dim'):
                 inp_batch_dim = [self._modules[l_pre].batch_dim for l_pre in l.input_name]
@@ -222,7 +219,7 @@ class BoundedModule(nn.Module):
                     queue.append(node_next)
         return
 
-    def _clear(self):
+    def _clear_and_set_new(self, new_interval):
         for l in self._modules.values():
             if hasattr(l, 'linear'):
                 if isinstance(l.linear, tuple):
@@ -232,12 +229,17 @@ class BoundedModule(nn.Module):
             for attr in ['forward_value', 'lower', 'upper', 'interval']:
                 if hasattr(l, attr):
                     delattr(l, attr)
+            # Given an interval here to make IBP/CROWN start from this node
+            if new_interval is not None and l.name in new_interval.keys():
+                l.interval = tuple(new_interval[l.name][:2])
+                l.lower = new_interval[l.name][0]
+                l.upper = new_interval[l.name][1]
             # Mark all nodes as non-perturbed except for weights.
             if not hasattr(l, 'perturbation') or l.perturbation is None:
                 l.perturbed = False
 
-    def _set_input(self, *x):
-        self._clear()
+    def _set_input(self, *x, new_interval=None):
+        self._clear_and_set_new(new_interval=new_interval)
         inputs_unpacked = unpack_inputs(x)
         for name, index in zip(self.input_name, self.input_index):
             node = self._modules[name]
@@ -316,14 +318,10 @@ class BoundedModule(nn.Module):
                     value=global_input_unpacked[nodesIn[i].input_index], 
                     perturbation=nodesIn[i].perturbation))
             else:
-                if n.name in bn_nodes:
-                    nodesIn[i] = nodesIn[i]._replace(bound_node=BoundBuffers(
-                        nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
-                        value=nodesIn[i].param, perturbation=nodesIn[i].perturbation))
-                else:
-                    nodesIn[i] = nodesIn[i]._replace(bound_node=BoundParams(
-                        nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
-                        value=nodesIn[i].param, perturbation=nodesIn[i].perturbation))
+                bound_class = BoundBuffers if n.name in bn_nodes else BoundParams                    
+                nodesIn[i] = nodesIn[i]._replace(bound_node=bound_class(
+                    nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
+                    value=nodesIn[i].param, perturbation=nodesIn[i].perturbation))
 
         unsupported_ops = []
 
@@ -370,10 +368,10 @@ class BoundedModule(nn.Module):
         for node in nodesOP + nodesIn:
             assert (node.bound_node is not None)
             nodes.append(node.bound_node)
-        # NOTE  We were assuming that the original model had only one output node.
-        #       When there are multiple output nodes, this seems to be the first output element.
-        #       In this case, we are assuming that we always aim to compute the bounds for the first
-        #       output element.
+        # We were assuming that the original model had only one output node.
+        # When there are multiple output nodes, this seems to be the first output element.
+        # In this case, we are assuming that we always aim to compute the bounds for the first
+        # output element.
         self.final_name = nodesOP[-1].name 
         assert self.final_name == nodesOut[0]
         self.input_name, self.input_index, self.root_name = [], [], []
@@ -476,20 +474,59 @@ class BoundedModule(nn.Module):
         logger.debug('NodesOP:')
         for node in nodesOP:
             logger.debug('{}'.format(node._replace(param=None)))
-        logger.debug('nodesIn')
+        logger.debug('NodesIn')
         for node in nodesIn:
             logger.debug('{}'.format(node._replace(param=None)))
 
         if self.verbose:
             logger.info('Model converted to support bounds')
 
+    def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
+                       bound_upper=True, reuse_ibp=False, return_A=False, final_node_name=None, average_A=False, new_interval=None, iteration=10):
+        if x is None:
+            output = self.forward(self.global_input)
+        else:
+            output = self.forward(x)
+
+        parameters = []
+        for model in self._modules.values():
+            if isinstance(model, BoundRelu):
+                parameters.append(model.slope)
+
+        lr = 10
+        opt = optim.SGD(parameters, lr=lr)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=5, eta_min=0.1)
+        last_l = 1e8
+
+        for i in range(iteration):
+            l, u = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
+                                       return_A=False, final_node_name=final_node_name, average_A=average_A, new_interval=new_interval)
+            assert l.shape[1] == 1
+            if i == 0 or i == iteration - 1:
+                print('optimal slope:', l.flatten(), scheduler.get_last_lr())
+
+            l = l.sum()
+            opt.zero_grad()
+            l = -1 * l
+            # early stop
+            if last_l <= l and iteration < 100:
+                break
+            l.backward(retain_graph=True)
+            opt.step()
+            # record.append(l.detach().item())
+            if i > 5 or iteration < 100: scheduler.step()
+
+            last_l = l.detach().clone()
+        # np.save('solve_slope.npy', np.array(record))
+        return self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp, return_A, final_node_name, average_A, new_interval)
+
     def compute_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
-                       bound_upper=True, reuse_ibp=False, return_A=False, final_node_name=None, average_A=False):
+                       bound_upper=True, reuse_ibp=False, return_A=False, final_node_name=None, average_A=False, new_interval=None):
         if not bound_lower and not bound_upper:
             raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
-
+        A_dict = {} if return_A else None
         if x is not None:
-            self._set_input(*x)
+            self._set_input(*x, new_interval=new_interval)
         if IBP and method is None and reuse_ibp:
             # directly return the previously saved ibp bounds
             return self.ibp_lower, self.ibp_upper
@@ -542,12 +579,6 @@ class BoundedModule(nn.Module):
         if method is None:
             return self.ibp_lower, self.ibp_upper
 
-        # FIXME What does this mean? It looks like `final_node_name` is not actually used?
-        if method == 'backward' and final_node_name is not None:
-            # backward from final_node_name, avoid check CE nodes
-            return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
-                                          return_A=return_A)
-
         # check whether weights are perturbed and set nonlinear for the BoundMatMul operation
         for n in self._modules.values():
             if isinstance(n, (BoundLinear, BoundConv, BoundBatchNormalization)):
@@ -571,9 +602,6 @@ class BoundedModule(nn.Module):
                         if not node.from_input and hasattr(node, 'forward_value'):
                             node.lower = node.upper = node.forward_value
                             continue
-                        # if not hasattr(node, 'default_shape') or  node.default_shapelen(node.forward_value.shape) == 0:                             
-                        #     node.lower = node.upper = node.forward_value 
-                        #     continue     
                         if forward:
                             l, u = self._forward_general(
                                 node=node, root=root, dim_in=dim_in, concretize=True)
@@ -591,18 +619,39 @@ class BoundedModule(nn.Module):
                                 node.lower = node.forward(val_input.lower, arg_input.value)
                                 node.upper = node.forward(val_input.upper, arg_input.value)
                             else:
-                                dim = int(np.prod(node.default_shape[1:]))
-                                # FIXME: C matrix shape incorrect for BoundParams.
-                                if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
-                                    newC = eyeC([batch_size, dim, *node.default_shape[1:]], self.device)
-                                else:
-                                    newC = torch.eye(dim, device=self.device)\
-                                        .unsqueeze(0).repeat(batch_size, 1, 1)\
-                                        .view(batch_size, dim, *node.default_shape[1:])
-                                l, u = self._backward_general(C=newC, node=node, root=root)
+                                # Here we avoid creating a big C matrix in the first linear layer
+                                flag = False
+                                if type(node) == BoundLinear or type(node) == BoundConv:
+                                    for l_pre in node.input_name:
+                                        if type(self._modules[l_pre]) == BoundInput:
+                                            self._IBP_general(node)
+                                            flag = True
+                                            break
+                                if not flag:
+                                    dim = int(np.prod(node.default_shape[1:]))
+                                    # FIXME: C matrix shape incorrect for BoundParams.
+                                    if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
+                                        newC = eyeC([batch_size, dim, *node.default_shape[1:]], self.device)
+                                    elif (isinstance(node, BoundConv) or isinstance(node, BoundBatchNormalization)) and node.mode == "patches":
+                                        # Here we create an Identity Patches object 
+                                        newC = Patches(None, 1, 0, [batch_size, node.default_shape[-2] * node.default_shape[-1], node.default_shape[-3], node.default_shape[-3], 1, 1], 1)
+                                    elif isinstance(node, BoundAdd) and node.mode == "patches":
+                                        num_channel = node.default_shape[-3]
+                                        patches = (torch.eye(num_channel)).unsqueeze(0).unsqueeze(0).unsqueeze(4).unsqueeze(5) # now [1 * 1 * in_C * in_C * 1 * 1]
+                                        newC = Patches(patches, 1, 0, [batch_size] + list(patches.shape[1:]))
+                                    else:
+                                        newC = torch.eye(dim, device=self.device)\
+                                            .unsqueeze(0).repeat(batch_size, 1, 1)\
+                                            .view(batch_size, dim, *node.default_shape[1:])
+                                    if return_A:
+                                        _, _, A_dict = self._backward_general(C=newC, node=node, root=root,
+                                                                              return_A=return_A, A_dict=A_dict)
+                                    else:
+                                        self._backward_general(C=newC, node=node, root=root, return_A=return_A)
 
         if method == 'backward':
-            return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A, average_A=average_A)
+            return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
+                                          return_A=return_A, average_A=average_A, A_dict=A_dict)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -628,10 +677,7 @@ class BoundedModule(nn.Module):
                 if isinstance(node_linear, BoundLinear):
                     w = self._modules[node_linear.input_name[1]].forward_value
                     b = self._modules[node_linear.input_name[2]].forward_value
-                    if isinstance(node_gather, BoundGatherAten):
-                        labels = self._modules[node_gather.input_name[2]]
-                    else: # isinstance(node_gather, BoundGatherElements)
-                        labels = self._modules[node_gather.input_name[1]]
+                    labels = self._modules[node_gather.input_name[1]]
                     if not hasattr(node_start, 'interval'):
                         self._IBP_general(node_start)
                     for inp in node_gather.input_name:
@@ -695,7 +741,7 @@ class BoundedModule(nn.Module):
 
         return node.interval
 
-    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True, return_A=False, average_A=False):
+    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True, return_A=False, average_A=False, A_dict=None):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
 
         _print_time = False
@@ -715,13 +761,16 @@ class BoundedModule(nn.Module):
                     queue.append(self._modules[l_pre])
         node.bounded = True
         batch_size, output_dim = C.shape[:2]
-        if not isinstance(C, eyeC):
+
+
+        if not isinstance(C, eyeC) and not isinstance(C, Patches):
             C = C.transpose(0, 1)
-        else:
+        elif isinstance(C, eyeC):
             C = C._replace(shape=(C.shape[1], C.shape[0], C.shape[2]))
+
         node.lA = C if bound_lower else None
         node.uA = C if bound_upper else None
-        lb = ub = torch.tensor(0.).to(C.device)
+        lb = ub = torch.tensor(0.).to(self.device)
 
         def _get_A_shape(node):
             shape_A = ''
@@ -747,11 +796,30 @@ class BoundedModule(nn.Module):
                     queue.append(_l)
 
             if l.lA is not None or l.uA is not None:
+                def bound_add(A, B):
+                    if type(A) == torch.Tensor and type(A) == torch.Tensor:
+                        return A + B
+                    elif type(A) == Patches and type(B) == Patches:
+                        # Here we have to merge two patches, and if A.stride != B.stride, the patches will become a matrix, 
+                        # in this case, we will avoid using this mode
+                        assert A.stride == B.stride, "A.stride should be the same as B.stride, otherwise, please use the matrix mode"
+
+                        # change paddings to merge the two patches
+                        if A.padding != B.padding:
+                            if A.padding > B.padding:
+                                B = B._replace(patches = F.pad(B.patches, (A.padding - B.padding, A.padding - B.padding, A.padding - B.padding, A.padding - B.padding)))
+                            else:
+                                A = A._replace(patches = F.pad(A.patches, (B.padding - A.padding, B.padding - A.padding, B.padding - A.padding, B.padding - A.padding)))
+                        return Patches(A.patches + B.patches, B.stride, max(A.padding, B.padding), (A.patches + B.patches).shape)
+                    elif type(A) == BoundList:
+                        A.bound_list.append(B)
+                        return A
+
                 def add_bound(node, lA, uA):
                     if lA is not None:
-                        node.lA = lA if node.lA is None else (node.lA + lA)
+                        node.lA = lA if node.lA is None else bound_add(node.lA, lA)
                     if uA is not None:
-                        node.uA = uA if node.uA is None else (node.uA + uA)
+                        node.uA = uA if node.uA is None else bound_add(node.uA, uA)
 
                 # TODO can we just use l.inputs?
                 input_nodes = [self._modules[l_name] for l_name in l.input_name]
@@ -764,11 +832,20 @@ class BoundedModule(nn.Module):
                     ub = ub + l.get_bias(l.uA, l.forward_value)
                     continue
 
-                if l.lA is not None and not isinstance(l.lA, eyeC) and torch.norm(l.lA, p=1) < epsilon:
-                    l.lA = None
-                if l.uA is not None and not isinstance(l.uA, eyeC) and torch.norm(l.uA, p=1) < epsilon:
-                    l.uA = None
-                if l.lA is None and l.uA is None:
+                small_A = 0
+                if l.lA is not None and not isinstance(l.lA, eyeC) and not isinstance(l.lA, Patches) and torch.norm(l.lA, p=1) < epsilon:
+                    small_A += 1
+                if l.uA is not None and not isinstance(l.uA, eyeC) and not isinstance(l.uA, Patches) and torch.norm(l.uA, p=1) < epsilon:
+                    small_A += 1
+                if small_A == 2:
+                    continue
+
+                small_A = 0
+                if isinstance(l.lA, Patches) and l.lA.identity == 0 and torch.norm(l.lA.patches, p=1) < epsilon:
+                    small_A += 1
+                if isinstance(l.lA, Patches) and l.uA.identity == 0 and torch.norm(l.uA.patches, p=1) < epsilon:
+                    small_A += 1
+                if small_A == 2:
                     continue
                 
                 try:
@@ -776,7 +853,7 @@ class BoundedModule(nn.Module):
                         # TODO automatically check A shape
                         logger.debug('Backward at {}[{}], fv shape {}, {}'.format(
                             l, l.name, l.forward_value.shape, _get_A_shape(l)))
-                    except: pass                
+                    except: pass            
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)       
                 except:
                     raise Exception('Error at bound_backward of {}, {}'.format(l, l.name))
@@ -796,20 +873,21 @@ class BoundedModule(nn.Module):
                     _l = self._modules[l_pre]
                     add_bound(_l, lA=A[i][0], uA=A[i][1])
 
-        if len(lb.shape) >= 2:
+        if lb.ndim >= 2:
             lb = lb.transpose(0, 1)
-        if len(ub.shape) >= 2:
+        if ub.ndim >= 2:
             ub = ub.transpose(0, 1)
         output_shape = node.default_shape[1:]
-        if np.prod(node.default_shape[1:]) != output_dim:
+        if np.prod(node.default_shape[1:]) != output_dim and type(C) != Patches:
             output_shape = [-1]
 
         if return_A:
             # return A matrix as a dict: {node.name: [A_lower, A_upper]}
-            A_dict = {'bias': [lb, ub]}
+            this_A_dict = {'bias': [lb, ub]}
             for i in range(len(root)):
                 if root[i].lA is None and root[i].uA is None: continue
-                A_dict.update({root[i].name: [root[i].lA, root[i].uA]})
+                this_A_dict.update({root[i].name: [root[i].lA, root[i].uA]})
+            A_dict.update({node.name: this_A_dict})
 
         for i in range(len(root)): 
             if root[i].lA is None and root[i].uA is None: continue
@@ -821,9 +899,10 @@ class BoundedModule(nn.Module):
             else:
                 lA = root[i].lA
                 uA = root[i].uA
-            if not isinstance(root[i].lA, eyeC):
+            
+            if not isinstance(root[i].lA, eyeC) and not isinstance(root[i].lA, Patches):
                 lA = root[i].lA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_lower else None
-            if not isinstance(root[i].uA, eyeC):
+            if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].lA, Patches):
                 uA = root[i].uA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_upper else None
             if root[i].perturbation is not None:
                 logger.debug('Concretize {}[{}], fv shape {}, {}'.format(
@@ -867,7 +946,6 @@ class BoundedModule(nn.Module):
         if return_A: return node.lower, node.upper, A_dict
         return node.lower, node.upper
 
-    # TODO hasn't changed the dimension for batches
     def _forward_general(self, C=None, node=None, root=None, dim_in=None, concretize=False):
         if hasattr(node, 'lower'):
             return node.lower, node.upper
@@ -887,26 +965,39 @@ class BoundedModule(nn.Module):
                     self._forward_general(node=l, root=root, dim_in=dim_in)
 
             inp = [self._modules[l_pre].linear for l_pre in node.input_name]
-            node.linear = node.bound_forward(dim_in, *inp)
 
-        lw, uw = node.linear.lw, node.linear.uw
-        lower, upper = node.linear.lb, node.linear.ub
-        if C is not None:
-            C_pos, C_neg = C.clamp(min=0), C.clamp(max=0)
-            _lw = torch.matmul(lw, C_pos.transpose(-1, -2)) + torch.matmul(uw, C_neg.transpose(-1, -2))
-            _uw = torch.matmul(uw, C_pos.transpose(-1, -2)) + torch.matmul(lw, C_neg.transpose(-1, -2))
-            lw, uw = _lw, _uw
-            _lower = torch.matmul(lower.unsqueeze(1), C_pos.transpose(-1, -2)) + \
-                torch.matmul(upper.unsqueeze(1), C_neg.transpose(-1, -2))
-            _upper = torch.matmul(upper.unsqueeze(1), C_pos.transpose(-1, -2)) + \
-                torch.matmul(lower.unsqueeze(1), C_neg.transpose(-1, -2))        
-            lower, upper = _lower.squeeze(-1), _upper.squeeze(-1)
+            if C is not None and isinstance(node, BoundLinear) and not node.is_input_perturbed(1):
+                node.linear = node.bound_forward(dim_in, *inp, C=C)
+                C_merged = True
+            else:
+                node.linear = node.bound_forward(dim_in, *inp)
+                C_merged = False
+            
+            lw, uw = node.linear.lw, node.linear.uw
+            lower, upper = node.linear.lb, node.linear.ub
+
+            if C is not None and not C_merged:
+                # FIXME use bound_forward of BoundLinear
+                C_pos, C_neg = C.clamp(min=0), C.clamp(max=0)
+                _lw = torch.matmul(lw, C_pos.transpose(-1, -2)) + torch.matmul(uw, C_neg.transpose(-1, -2))
+                _uw = torch.matmul(uw, C_pos.transpose(-1, -2)) + torch.matmul(lw, C_neg.transpose(-1, -2))
+                lw, uw = _lw, _uw
+                _lower = torch.matmul(lower.unsqueeze(1), C_pos.transpose(-1, -2)) + \
+                    torch.matmul(upper.unsqueeze(1), C_neg.transpose(-1, -2))
+                _upper = torch.matmul(upper.unsqueeze(1), C_pos.transpose(-1, -2)) + \
+                    torch.matmul(lower.unsqueeze(1), C_neg.transpose(-1, -2))        
+                lower, upper = _lower.squeeze(1), _upper.squeeze(1)  
+            else:
+                lower, upper = lower.squeeze(1), upper.squeeze(1)  
+        else:
+            lw, uw = node.linear.lw, node.linear.uw
+            lower, upper = node.linear.lb, node.linear.ub          
 
         if concretize:
             if node.linear.lw is not None:
                 prev_dim_in = 0
                 batch_size = lw.shape[0]
-                assert (len(lw.shape) > 1)
+                assert (lw.ndim > 1)
                 lA = lw.reshape(batch_size, dim_in, -1).transpose(1, 2)
                 uA = uw.reshape(batch_size, dim_in, -1).transpose(1, 2)
                 for i in range(len(root)):
@@ -924,7 +1015,6 @@ class BoundedModule(nn.Module):
                 node.lower, node.upper = lower, upper
             return lower, upper
 
-    # TODO
     def _init_forward(self, root, dim_in):
         if dim_in == 0:
             raise ValueError("At least one node should have a specified perturbation")
@@ -948,7 +1038,7 @@ class BoundedModule(nn.Module):
                 )
                 if i >= self.num_global_inputs:
                     root[i].forward_value = root[i].forward_value.unsqueeze(0).repeat(
-                        *([batch_size] + [1] * len(self.forward_value.shape)))
+                        *([batch_size] + [1] * self.forward_value.ndim))
                 prev_dim_in += shape[1]
             else:
                 fv = root[i].forward_value
@@ -999,7 +1089,6 @@ class BoundDataParallel(DataParallel):
                 assert 0, 'please call IBP/CROWN before get_property'
             if len(self.device_ids) == 1:
                 return self.get_property(self.module, **kwargs)
-            # self._get_property = self.replicate(self.get_property, self.device_ids)
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
             kwargs = list(kwargs)
             for i in range(len(kwargs)):
@@ -1015,10 +1104,8 @@ class BoundDataParallel(DataParallel):
                 self._replicas = self.replicate(self.module, self.device_ids)
             elif kwargs.get("method_opt", "forward") == "forward":
                 self._replicas = self.replicate(self.module, self.device_ids)
-                # self.forwarded = True
             elif kwargs.get("x") is not None and kwargs.get("IBP") is True:  #
                 self._replicas = self.replicate(self.module, self.device_ids)
-                # self.forwarded = False
 
         for t in chain(self.module.parameters(), self.module.buffers()):
             if t.device != self.src_device_obj:

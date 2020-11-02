@@ -9,6 +9,15 @@ from collections import defaultdict, Sequence, namedtuple
 
 # Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
 eyeC = namedtuple('eyeC', 'shape device')
+
+# A special class which denotes a convoluntional operator as a group of patches
+# the shape of Patches.patches is [batch_size, num_of_patches, out_channel, in_channel, M, M]
+# M is the size of a single patch
+# Assume that we have a conv2D layer with w.weight(out_channel, in_channel, M, M), stride and padding applied on an image (N * N)
+# num_of_patches = ((N + padding * 2 - M)//stride + 1) ** 2
+# Here we only consider kernels with the same H and W
+Patches = namedtuple('Patches', ('patches', 'stride', 'padding', 'shape', 'identity'), defaults=(None, 1, 0, None, 0))
+BoundList = namedtuple('BoundList', ('bound_list'), defaults=([]))
 # Linear bounds with coefficients. Used for forward bound propagation.
 LinearBound = namedtuple('LinearBound', ('lw', 'lb', 'uw', 'ub', 'lower', 'upper', 'from_input'), defaults=(None,) * 7)
 
@@ -131,4 +140,6 @@ def unpack_inputs(inputs):
         return [inputs]
 
 def isnan(x):
+    if isinstance(x, Patches):
+        return False
     return torch.isnan(x).any()

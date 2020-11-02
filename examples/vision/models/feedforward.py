@@ -187,6 +187,21 @@ def cnn_7layer_bn_imagenet(in_ch=3, in_dim=32, width=64, linear_size=512):
     )
     return model
 
+def cnn_5layer(in_ch, in_dim, width=2, linear_size=256):
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, width, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(width, width, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(width, 2 * width, 3, stride=2, padding=1),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,10)
+    )
+    return model
+    
 def cnn_6layer(in_ch, in_dim, width=32, linear_size=256):
     model = nn.Sequential(
         nn.Conv2d(in_ch, width, 3, stride=1, padding=1),

@@ -16,6 +16,7 @@ Models = {
     'mlp_3layer': mlp_3layer,
     'mlp_5layer': mlp_5layer,
     'cnn_4layer': cnn_4layer,
+    'cnn_5layer': cnn_5layer,
     'cnn_6layer': cnn_6layer,
     'cnn_6layer_': cnn_6layer_,
     'cnn_7layer': cnn_7layer,
