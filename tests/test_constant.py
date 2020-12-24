@@ -57,8 +57,8 @@ def test():
         torch.save((lb, ub), path)
     else:
         lb_ref, ub_ref = torch.load(path)
-        print(lb)
-        print(lb_ref)
+        print(lb, lb_ref, (lb - lb_ref).abs().max())
+        print(ub, ub_ref, (ub - ub_ref).abs().max())
         assert torch.allclose(lb, lb_ref)
         assert torch.allclose(ub, ub_ref)
 

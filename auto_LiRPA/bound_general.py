@@ -141,7 +141,7 @@ class BoundedModule(nn.Module):
             for l_pre in l.input_name:
                 l.from_input = l.from_input or self._modules[l_pre].from_input
             fv = l.forward(*inp)
-            if isinstance(fv, torch.Size):
+            if isinstance(fv, torch.Size) or isinstance(fv, tuple):
                 fv = torch.tensor(fv, device=self.device)
             object.__setattr__(l, 'forward_value', fv)
             object.__setattr__(l, 'fv', fv)
@@ -504,10 +504,12 @@ class BoundedModule(nn.Module):
             assert l.shape[1] == 1
             if i == 0 or i == iteration - 1:
                 print('optimal slope:', l.flatten(), scheduler.get_last_lr())
+                if (l > 1e-4).all():  # all lower bounds > 0, no need to optimize
+                    break
 
             l = l.sum()
             opt.zero_grad()
-            l = -1 * l
+            l = (-1 * l) * (l < 1e-4)  # only optimize the lower bounds < 0
             # early stop
             if last_l <= l and iteration < 100:
                 break
@@ -521,7 +523,9 @@ class BoundedModule(nn.Module):
         return self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp, return_A, final_node_name, average_A, new_interval)
 
     def compute_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
-                       bound_upper=True, reuse_ibp=False, return_A=False, final_node_name=None, average_A=False, new_interval=None):
+                       bound_upper=True, reuse_ibp=False, 
+                       return_A=False, final_node_name=None, average_A=False, new_interval=None,
+                       return_b=False, b_dict=None):
         if not bound_lower and not bound_upper:
             raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
         A_dict = {} if return_A else None
@@ -533,18 +537,10 @@ class BoundedModule(nn.Module):
         if method == 'forward':
             forward = True
         root = [self._modules[name] for name in self.root_name]
-        batch_size = root[0].value.shape[0]
+        batch_size = root[0].fv.shape[0]
         dim_in = 0
         for i in range(len(root)):
-            if type(root[i]) == BoundInput:
-                value = root[i].forward_value = root[i].value
-            elif type(root[i]) == BoundParams:
-                value = root[i].forward_value = root[i].param
-            elif type(root[i]) == BoundBuffers:
-                value = root[i].forward_value = root[i].buffer
-            else:
-                # a detached intermediate node, which can be treated as an independent node in bound computation
-                value = root[i].forward_value 
+            value = root[i].forward()
             if root[i].perturbation is not None:
                 root[i].linear, root[i].center, root[i].aux = \
                     root[i].perturbation.init(value, aux=aux, forward=forward)
@@ -651,7 +647,8 @@ class BoundedModule(nn.Module):
 
         if method == 'backward':
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
-                                          return_A=return_A, average_A=average_A, A_dict=A_dict)
+                                          return_A=return_A, average_A=average_A, A_dict=A_dict,
+                                          return_b=return_b, b_dict=b_dict)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -675,8 +672,8 @@ class BoundedModule(nn.Module):
                 node_linear = self._modules[node.input_name[0]]
                 node_start = self._modules[node_linear.input_name[0]]
                 if isinstance(node_linear, BoundLinear):
-                    w = self._modules[node_linear.input_name[1]].forward_value
-                    b = self._modules[node_linear.input_name[2]].forward_value
+                    w = self._modules[node_linear.input_name[1]].fv
+                    b = self._modules[node_linear.input_name[2]].fv
                     labels = self._modules[node_gather.input_name[1]]
                     if not hasattr(node_start, 'interval'):
                         self._IBP_general(node_start)
@@ -741,7 +738,8 @@ class BoundedModule(nn.Module):
 
         return node.interval
 
-    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True, return_A=False, average_A=False, A_dict=None):
+    def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True, 
+            return_A=False, average_A=False, A_dict=None, return_b=False, b_dict=None):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
 
         _print_time = False
@@ -761,7 +759,6 @@ class BoundedModule(nn.Module):
                     queue.append(self._modules[l_pre])
         node.bounded = True
         batch_size, output_dim = C.shape[:2]
-
 
         if not isinstance(C, eyeC) and not isinstance(C, Patches):
             C = C.transpose(0, 1)
@@ -783,9 +780,16 @@ class BoundedModule(nn.Module):
             return shape_A
 
         queue = deque([node])
+        A_record = {}
         while len(queue) > 0:
             l = queue.popleft()  # backward from l
             l.bounded = True
+
+            if return_b:
+                b_dict[l.name] = {
+                    'lower_b': lb,
+                    'upper_b': ub
+                }            
 
             if l.name in self.root_name or l == root: continue
 
@@ -854,7 +858,9 @@ class BoundedModule(nn.Module):
                         logger.debug('Backward at {}[{}], fv shape {}, {}'.format(
                             l, l.name, l.forward_value.shape, _get_A_shape(l)))
                     except: pass            
-                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)       
+                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)
+                    if return_A:
+                        A_record.update({l.name: A})
                 except:
                     raise Exception('Error at bound_backward of {}, {}'.format(l, l.name))
   
@@ -863,9 +869,7 @@ class BoundedModule(nn.Module):
                     if time_elapsed > 1e-3:
                         print(l, time_elapsed)
                 lb = lb + lower_b
-                ub = ub + upper_b
-
-                logger.debug('ub mean {}'.format(torch.mean(ub)))
+                ub = ub + upper_b                  
 
                 for i, l_pre in enumerate(l.input_name):
                     try: logger.debug('  {} -> {}, uA shape {}'.format(l.name, l_pre, A[i][1].shape))
@@ -887,6 +891,7 @@ class BoundedModule(nn.Module):
             for i in range(len(root)):
                 if root[i].lA is None and root[i].uA is None: continue
                 this_A_dict.update({root[i].name: [root[i].lA, root[i].uA]})
+            this_A_dict.update(A_record)
             A_dict.update({node.name: this_A_dict})
 
         for i in range(len(root)): 
@@ -905,8 +910,6 @@ class BoundedModule(nn.Module):
             if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].lA, Patches):
                 uA = root[i].uA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_upper else None
             if root[i].perturbation is not None:
-                logger.debug('Concretize {}[{}], fv shape {}, {}'.format(
-                    root[i], root[i].name, root[i].forward_value.shape, _get_A_shape(root[i])))
                 if isinstance(root[i], BoundParams):
                     # add batch_size dim for weights node
                     lb = lb + root[i].perturbation.concretize(
@@ -921,24 +924,24 @@ class BoundedModule(nn.Module):
             # FIXME to simplify
             elif i < self.num_global_inputs:
                 if not isinstance(lA, eyeC):
-                    lb = lb + lA.bmm(root[i].value.view(batch_size, -1, 1)).squeeze(-1) if bound_lower else None
+                    lb = lb + lA.bmm(root[i].fv.view(batch_size, -1, 1)).squeeze(-1) if bound_lower else None
                 else:
-                    lb = lb + root[i].value.view(batch_size, -1) if bound_lower else None
+                    lb = lb + root[i].fv.view(batch_size, -1) if bound_lower else None
                 if not isinstance(uA, eyeC):
                     # FIXME looks questionable
-                    ub = ub + uA.bmm(root[i].value.view(batch_size, -1, 1)).squeeze(-1) if bound_upper else None
+                    ub = ub + uA.bmm(root[i].fv.view(batch_size, -1, 1)).squeeze(-1) if bound_upper else None
                 else:
-                    ub = ub + root[i].value.view(batch_size, -1) if bound_upper else None
+                    ub = ub + root[i].fv.view(batch_size, -1) if bound_upper else None
             else:
                 if not isinstance(lA, eyeC):
-                    lb = lb + lA.matmul(root[i].param.view(-1, 1)).squeeze(-1) if bound_lower else None
+                    lb = lb + lA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_lower else None
                 else:
-                    lb = lb + root[i].param.view(1, -1) if bound_lower else None
+                    lb = lb + root[i].fv.view(1, -1) if bound_lower else None
                 if not isinstance(uA, eyeC):
                     # FIXME looks questionable
-                    ub = ub + uA.matmul(root[i].param.view(-1, 1)).squeeze(-1) if bound_upper else None
+                    ub = ub + uA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_upper else None
                 else:
-                    ub = ub + root[i].param.view(1, -1) if bound_upper else None
+                    ub = ub + root[i].fv.view(1, -1) if bound_upper else None
 
         node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
         node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
@@ -1019,7 +1022,7 @@ class BoundedModule(nn.Module):
         if dim_in == 0:
             raise ValueError("At least one node should have a specified perturbation")
         prev_dim_in = 0
-        batch_size = root[0].value.shape[0]
+        batch_size = root[0].fv.shape[0]
         for i in range(len(root)):
             if root[i].perturbation is not None:
                 shape = root[i].linear.lw.shape
@@ -1121,7 +1124,7 @@ class BoundDataParallel(DataParallel):
             # inputs_scatter = inputs_scatter[0]
             bounded_inputs = []
             for input_s in inputs_scatter:  # GPU numbers
-                ptb = PerturbationLpNorm(inputs[0].ptb.norm, inputs[0].ptb.eps, x_L=input_s[1], x_U=input_s[2])
+                ptb = PerturbationLpNorm(norm=inputs[0].ptb.norm, eps=inputs[0].ptb.eps, x_L=input_s[1], x_U=input_s[2])
                 # bounded_inputs.append(tuple([(BoundedTensor(input_s[0][0], ptb))]))
                 input_s = list(input_s[0])
                 input_s[0] = BoundedTensor(input_s[0], ptb)
@@ -1136,7 +1139,7 @@ class BoundDataParallel(DataParallel):
             bounded_inputs = []
             inputs_scatter, kwargs = self.scatter((inputs, x.ptb.x_L, x.ptb.x_U), kwargs, self.device_ids)
             for input_s, kw_s in zip(inputs_scatter, kwargs):  # GPU numbers
-                ptb = PerturbationLpNorm(x.ptb.norm, x.ptb.eps, x_L=input_s[1], x_U=input_s[2])
+                ptb = PerturbationLpNorm(norm=x.ptb.norm, eps=x.ptb.eps, x_L=input_s[1], x_U=input_s[2])
                 kw_s['x'] = list(kw_s['x'])
                 kw_s['x'][0] = BoundedTensor(kw_s['x'][0], ptb)
                 kw_s['x'] = (kw_s['x'])

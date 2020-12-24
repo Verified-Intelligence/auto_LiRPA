@@ -89,7 +89,7 @@ class Bound(nn.Module):
         self.output_name = []
         self.input_name, self.name, self.ori_name, self.attr, self.inputs, self.output_index, self.options, self.device = \
             input_name, name, ori_name, attr, inputs, output_index, options, device
-        self.forward_value = None
+        self.fv = None
         self.from_input = False
         self.bounded = False
         self.IBP_rets = None
@@ -121,14 +121,14 @@ class Bound(nn.Module):
         raise NotImplementedError
 
     def infer_batch_dim(self, batch_size, *x):
-        print(self, self.name, self.forward_value.shape)
+        print(self, self.name, self.fv.shape)
         raise NotImplementedError
 
     def broadcast_backward(self, A, x):
         shape = x.default_shape
         batch_dim = max(self.batch_dim, 0)
                 
-        if type(A) == torch.Tensor:
+        if isinstance(A, torch.Tensor):
             if x.batch_dim == -1:
                 # final shape of input
                 shape = torch.Size([A.shape[batch_dim + 1]] + list(shape))
@@ -153,25 +153,7 @@ class Bound(nn.Module):
             assert (A.shape[1:] == shape)
         elif type(A) == Patches:
             pass
-            # patches = A.patches
-            # shape = torch.Size([patches.size(0)] + list(shape))
-            # if A.identity == 1:
-            #     # Here we need A.shape
-
-            # else:
-            #     patches = A.patches
-            #     # shape of input
-            #     shape = torch.Size([patches.size(0)] + list(shape))
-            #     dim_sum = []
-            #     cnt_sum = 4 - len(shape) - 1 #batch_dim, channel_dim, H, W
-            #     for i in range(-3, 0):
-            #         if cnt_sun > 0:
-            #             dim_sum.append(i)
-            #             cnt_sum -= 1
-            #     if dim_sum:
-            #         patches = torch.sum(patches, dim = dim_sum)
-            #     A = Patches(patches, A.stride, A.padding)
-
+            
         return A
 
     @staticmethod
@@ -205,7 +187,7 @@ class Bound(nn.Module):
         assert not isnan(A)
         assert not isnan(bias)
 
-        if type(A) == torch.Tensor:
+        if isinstance(A, torch.Tensor):
             if torch.norm(A, p=1) < epsilon:
                 return 0
             output_dim = A.shape[0]
@@ -429,7 +411,7 @@ class BoundInput(Bound):
             self.name))
 
     def infer_batch_dim(self, batch_size, *x):
-        shape = self.forward_value.shape
+        shape = self.fv.shape
         for i in range(len(shape)):
             if shape[i] == batch_size:
                 return i
@@ -441,6 +423,7 @@ class BoundParams(BoundInput):
         super().__init__(input_name, name, ori_name, None, perturbation)
         self.register_parameter('param', value)
         self.from_input = False
+        self.initializing = False
 
     """Override register_parameter() hook to register only needed parameters."""
 
@@ -452,8 +435,14 @@ class BoundParams(BoundInput):
             # Just register it as a normal property of class.
             object.__setattr__(self, name, param)
 
+    def init(self, initializing=False):
+        self.initializing = initializing
+
     def forward(self):
-        return self.param
+        if self.initializing:
+            return self.param_init
+        else:
+            return self.param
 
     def infer_batch_dim(self, batch_size, *x):
         return -1
@@ -998,7 +987,7 @@ class BoundConv(Bound):
             raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
 
         lA_y = uA_y = lA_bias = uA_bias = None
-        weight = x[1].param
+        weight = x[1].fv
 
         def _bound_oneside(last_A):
             if last_A is None:
@@ -1015,7 +1004,7 @@ class BoundConv(Bound):
                                             groups=self.groups, output_padding=(output_padding0, output_padding1))
                 next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
                 if self.has_bias:
-                    sum_bias = (last_A.sum((3, 4)) * x[2].param).sum(2)
+                    sum_bias = (last_A.sum((3, 4)) * x[2].fv).sum(2)
                 else:
                     sum_bias = 0
                 return next_A, sum_bias
@@ -1040,7 +1029,7 @@ class BoundConv(Bound):
                         patches = last_A.patches
                         patches_sum = patches.sum((-1, -2)) 
 
-                        sum_bias = (patches_sum * x[2].param).sum(-1).transpose(-2, -1)
+                        sum_bias = (patches_sum * x[2].fv).sum(-1).transpose(-2, -1)
                         sum_bias = sum_bias.view(batch_size, -1, int(math.sqrt(L)), int(math.sqrt(L))).transpose(0, 1)
                         # shape of the bias is [batch_size, L, out_channel]
                     else:
@@ -1048,7 +1037,7 @@ class BoundConv(Bound):
                 elif last_A.identity == 1:
                     pieces = weight.view(1, 1, weight.size(0), weight.size(1), weight.size(2), weight.size(3))
                     # Here we should transpose sum_bias to set the batch dim to 1, which is aimed to keep consistent with the matrix version
-                    sum_bias = x[2].param.unsqueeze(0).unsqueeze(2).unsqueeze(3).transpose(0, 1)
+                    sum_bias = x[2].fv.unsqueeze(0).unsqueeze(2).unsqueeze(3).transpose(0, 1)
                 else:
                     raise NotImplementedError()
                 padding = last_A.padding if last_A is not None else 0
@@ -1174,7 +1163,7 @@ class BoundAveragePool(AvgPool2d):
         self.output_name = []
         self.name = name
         self.ori_name = ori_name
-        self.forward_value = None
+        self.fv = None
         self.bounded = False
         self.IBP_rets = None
         self.from_input = False
@@ -1219,7 +1208,7 @@ class BoundGlobalAveragePool(AdaptiveAvgPool2d):
         self.output_name = []
         self.name = name
         self.ori_name = ori_name
-        self.forward_value = None
+        self.fv = None
         self.bounded = False
         self.IBP_rets = None
 
@@ -1900,7 +1889,9 @@ class BoundExp(BoundActivation):
                 last_uA) >= 0 and x.from_input:
             # Adding an extra bias term to the input. This is equivalent to adding a constant and subtract layer before exp.
             # Note that we also need to adjust the bias term at the end.
-            if self.options != 'no-max-input':
+            if self.options == 'no-detach':
+                self.max_input = torch.max(x.upper, dim=-1, keepdim=True)[0]
+            elif self.options != 'no-max-input':
                 self.max_input = torch.max(x.upper, dim=-1, keepdim=True)[0].detach()
             else:
                 self.max_input = 0
@@ -1914,7 +1905,6 @@ class BoundExp(BoundActivation):
             uA = last_uA * k.unsqueeze(0)
             ubias = last_uA * (-adjusted_lower * k + exp_l).unsqueeze(0)
 
-            # can use tensor.ndim instead of len(tensor.shape) in newer Torch
             if ubias.ndim > 2:
                 ubias = torch.sum(ubias, dim=tuple(range(2, ubias.ndim)))
             # Also adjust the missing ubias term.
@@ -1953,7 +1943,7 @@ class BoundLog(BoundActivation):
     def forward(self, x):
         # FIXME adhoc implementation for loss fusion
         if self.loss_fusion:
-            return torch.logsumexp(self.inputs[0].inputs[0].inputs[0].forward_value, dim=-1) 
+            return torch.logsumexp(self.inputs[0].inputs[0].inputs[0].fv, dim=-1) 
         return torch.log(x.clamp(min=epsilon))
 
     def bound_relax(self, x):
@@ -2162,7 +2152,7 @@ class BoundShape(Bound):
         raise NotImplementedError
 
     def bound_forward(self, dim_in, x):
-        return self.forward_value
+        return self.fv
 
     def infer_batch_dim(self, batch_size, *x):
         return -1
@@ -3073,10 +3063,10 @@ class BoundExpand(Bound):
 
     def infer_batch_dim(self, batch_size, *x):
         # FIXME should avoid referring to batch_size
-        if self.forward_value.shape[0] != batch_size:
+        if self.fv.shape[0] != batch_size:
             return -1
         else:
-            raise NotImplementedError('fv shape {}'.format(self.forward_value.shape))
+            raise NotImplementedError('fv shape {}'.format(self.fv.shape))
 
 
 class BoundWhere(Bound):

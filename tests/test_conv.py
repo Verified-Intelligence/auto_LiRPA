@@ -64,8 +64,7 @@ def test():
                 except:
                     continue
 
-
-                model = BoundedModule(model_ori, torch.empty_like(image), device="cpu", bound_opts={"conv_mode": "patches"})
+                model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "patches"})
                 eps = 0.3
                 norm = np.inf
                 ptb = PerturbationLpNorm(norm=norm, eps=eps)
@@ -73,15 +72,13 @@ def test():
                 pred = model(image)
                 lb, ub = model.compute_bounds()
 
-                model = BoundedModule(model_ori, torch.empty_like(image), device="cpu", bound_opts={"conv_mode": "matrix"})
+                model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "matrix"})
                 pred = model(image)
                 lb_ref, ub_ref = model.compute_bounds()
 
                 assert lb.shape == ub.shape == torch.Size((N, n_classes))    
                 assert torch.allclose(lb, lb_ref)
                 assert torch.allclose(ub, ub_ref)
-
-                # print("passed")
 
 if __name__ == '__main__':
     test()

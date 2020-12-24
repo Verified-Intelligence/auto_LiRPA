@@ -1,15 +1,19 @@
 import copy
 import random
-
+import argparse
 import torch.nn.functional as F
 
 from auto_LiRPA import BoundedModule, BoundedParameter
 from auto_LiRPA.perturbations import *
 
-# with open('data/weight_perturbation_test_data.pickle', 'rb') as handle:
-#     data = pickle.load(handle)
-data = torch.load('data/weight_perturbation_test_data')
+parser = argparse.ArgumentParser()
+parser.add_argument('--gen_ref', action='store_true', help='generate reference results')
+args, unknown = parser.parse_known_args()   
 
+if args.gen_ref:
+    data = {}
+else:
+    data = torch.load('data/weight_perturbation_test_data')
 
 class mlp_3layer(nn.Module):
     def __init__(self, in_ch=1, in_dim=28, width=1, pert_weight=True, pert_bias=True, norm=2):
@@ -41,8 +45,9 @@ class mlp_3layer(nn.Module):
 
 def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
-    # data[lb_name] = lb.detach().data.clone()
-    # data[ub_name] = ub.detach().data.clone()
+    if args.gen_ref:
+        data[lb_name] = lb.detach().data.clone()
+        data[ub_name] = ub.detach().data.clone()
     assert torch.allclose(lb, data[lb_name], 1e-4)
     assert torch.allclose(ub, data[ub_name], 1e-4)
     assert ((lb - data[lb_name]).pow(2).sum() < 1e-9)
@@ -52,10 +57,10 @@ def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     loss = (ub - lb).abs().sum()
     loss.backward()
 
-    # grad_sum = sum((p.grad.abs().sum()) for n, p in model.named_parameters() if p.grad is not None)
     # gradient w.r.t input only
     grad = x.grad
-    # data[lb_name+'_grad'] = grad.detach().data.clone()
+    if args.gen_ref:
+        data[lb_name+'_grad'] = grad.detach().data.clone()
     assert torch.allclose(grad, data[lb_name + '_grad'], 1e-4)
     assert ((grad - data[lb_name + '_grad']).pow(2).sum() < 1e-9)
 
@@ -67,8 +72,11 @@ def test():
     np.random.seed(123)
 
     model_ori = mlp_3layer(pert_weight=True, pert_bias=True).eval()
+    if args.gen_ref:
+        data['model'] = model_ori.state_dict()
+        data['data'] = torch.randn(8, 1, 28, 28)
     model_ori.load_state_dict(data['model'])
-    state_dict = copy.deepcopy(model_ori.state_dict())
+    state_dict = copy.deepcopy(model_ori.state_dict())  
     dummy_input = data['data'].requires_grad_()
     inputs = (dummy_input,)
 
@@ -100,8 +108,9 @@ def test():
     verify_model(pert_weight=True, pert_bias=True, norm=2, lb_name='l_2_weights_bias_lb', ub_name='l_2_weights_bias_ub')
     verify_model(pert_weight=True, pert_bias=False, norm=2, lb_name='l_2_weights_lb', ub_name='l_2_weights_ub')
     verify_model(pert_weight=False, pert_bias=True, norm=2, lb_name='l_2_bias_lb', ub_name='l_2_bias_ub')
-    # torch.save(data, 'data/weight_perturbation_test_data')
-
+    
+    if args.gen_ref:
+        torch.save(data, 'data/weight_perturbation_test_data')
 
 if __name__ == "__main__":
     test()

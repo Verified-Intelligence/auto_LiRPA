@@ -1,6 +1,6 @@
 # auto_LiRPA: Automatic Linear Relaxation based Perturbation Analysis for Neural Networks
 
-![](https://travis-ci.com/KaidiXu/CROWN-GENERAL.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
+![](https://travis-ci.com/KaidiXu/auto_LiRPA.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
 
 <p align="center">
 <img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_2.png" width="45%" height="45%" float="left">

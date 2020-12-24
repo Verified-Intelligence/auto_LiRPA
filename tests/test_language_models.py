@@ -67,19 +67,19 @@ def gen_ref():
     if args.train:
         train()
     res_transformer, res_lstm = evaluate()
-    with open('data/language.pkl', 'wb') as file:
+    with open('data/language_test_data', 'wb') as file:
         pickle.dump((res_transformer, res_lstm), file)
     logger.info('Reference results saved')
 
 def check():
-    with open('data/language.pkl', 'rb') as file:
+    with open('data/language_test_data', 'rb') as file:
         res_transformer_ref, res_lstm_ref = pickle.load(file)
     res_transformer, res_lstm = evaluate()
     for res, res_ref in zip([res_transformer, res_lstm], [res_transformer_ref, res_lstm_ref]):
         for a, b in zip(res, res_ref):
             ta, tb = torch.tensor(a), torch.tensor(b)
-            assert torch.max(torch.abs(ta - tb)) < 1e-6
-            assert (torch.tensor(a) - torch.tensor(b)).pow(2).sum() < 1e-12
+            assert torch.max(torch.abs(ta - tb)) < 1e-5
+            assert (torch.tensor(a) - torch.tensor(b)).pow(2).sum() < 1e-9
 
 def test():
     if not os.path.exists('../examples/language/data'):

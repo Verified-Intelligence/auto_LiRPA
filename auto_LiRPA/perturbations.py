@@ -1,10 +1,10 @@
 import os
 import json
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList
-import math
 import torch.nn.functional as F
 
 class Perturbation:
@@ -78,9 +78,9 @@ class PerturbationL0Norm(Perturbation):
 
 """Perturbation constrained by the L_p norm."""
 class PerturbationLpNorm(Perturbation):
-    def __init__(self, norm, eps, x_L=None, x_U=None):
-        self.norm = norm
+    def __init__(self, eps, norm=np.inf, x_L=None, x_U=None):
         self.eps = eps
+        self.norm = norm
         self.dual_norm = 1 if (norm == np.inf) else (np.float64(1.0) / (1 - 1.0 / self.norm))
         self.x_L = x_L
         self.x_U = x_U

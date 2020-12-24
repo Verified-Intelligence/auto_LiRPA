@@ -47,8 +47,7 @@ def verify_bounds(model, x, IBP, method, forward_ret, lb_name, ub_name):
     # gradient w.r.t input only
     grad = x.grad
     # data[lb_name[:-2]+'grad'] = grad.detach().data.clone()
-    # print(grad.sum(), data[lb_name[:-2] + 'grad'].sum(),)
-    assert torch.allclose(grad, data[lb_name[:-2] + 'grad'], 1e-4), (grad - data[lb_name[:-2] + 'grad']).abs().sum()
+    assert torch.allclose(grad, data[lb_name[:-2] + 'grad'], 1e-4), (grad - data[lb_name[:-2] + 'grad']).abs().max()
     assert ((grad - data[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-12), (grad - data[lb_name[:-2] + 'grad']).pow(2).sum()
 
 
@@ -67,7 +66,7 @@ def test():
     forward_ret = model(dummy_input)
     model_ori.eval()
 
-    assert torch.isclose(model_ori(dummy_input), model_ori(dummy_input), 1e-8).all()
+    assert torch.isclose(model_ori(dummy_input), model(dummy_input), 1e-8).all()
 
     # Linf
     ptb = PerturbationLpNorm(norm=np.inf, eps=0.01)
