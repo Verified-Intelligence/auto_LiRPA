@@ -17,6 +17,7 @@ import models
 # BoundeModule object.  In this test we show the difference between Patches
 # mode and Matrix mode in memory consumption.
 
+device = 'cuda'
 conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'
 
 seed = 1234
@@ -25,25 +26,9 @@ torch.cuda.manual_seed_all(seed)
 random.seed(seed)
 np.random.seed(seed)
 
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size(0), -1)
-
-## Step 1: Define computational graph by implementing forward()
-def cifar_model():
-    model = nn.Sequential(
-        nn.Conv2d(3, 8, 4, stride=2, padding=1),
-        nn.ReLU(),
-        nn.Conv2d(8, 16, 4, stride=2, padding=1),
-        nn.ReLU(),
-        Flatten(),
-        nn.Linear(1024, 100),
-        nn.ReLU(),
-        nn.Linear(100, 10)
-    )
-    return model
-
-model_ori = cifar_model()
+## Step 1: Define the model
+# model_ori = models.model_resnet(width=1, mult=4)
+model_ori = models.ResNet18(in_planes=2)
 # model_ori.load_state_dict(torch.load("data/cifar_base_kw.pth")['state_dict'][0])
 
 ## Step 2: Prepare dataset as usual
@@ -52,19 +37,20 @@ model_ori = cifar_model()
 normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
 test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
                 transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
-# For illustration we only use 2 image from dataset
-N = 2
+# For illustration we only use 1 image from dataset
+N = 1
 n_classes = 10
 
 image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
 # Convert to float
 image = image.to(torch.float32) / 255.0
-image = image.cuda()
+if device == 'cuda':
+    image = image.cuda()
 
 ## Step 3: wrap model with auto_LiRPA
 # The second parameter is for constructing the trace of the computational graph, and its content is not important.
 # The new "patches" conv_mode provides an more efficient implementation for convolutional neural networks.
-model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode}, device="cuda") 
+model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode}, device=device) 
 
 ## Step 4: Compute bounds using LiRPA given a perturbation
 eps = 0.03
@@ -77,7 +63,7 @@ pred = model(image)
 # Compute bounds
 torch.cuda.empty_cache()
 print('Using {} mode to compute convolution.'.format(conv_mode))
-lb, ub = model.compute_bounds(x=(image,), IBP=False, C=None, method='backward')
+lb, ub = model.compute_bounds(IBP=False, C=None, method='backward')
 
 ## Step 5: Final output
 # pred = pred.detach().cpu().numpy()
@@ -92,4 +78,3 @@ for i in range(N):
 # Print the GPU memory usage
 print('Memory usage in "{}" mode:'.format(conv_mode))
 print(torch.cuda.memory_summary())
-

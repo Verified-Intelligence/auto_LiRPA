@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from auto_LiRPA import PerturbationLpNorm, BoundedParameter
 
 
 # CNN, relatively large 4-layer
@@ -69,6 +70,35 @@ class mlp_3layer(nn.Module):
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
+
+
+class mlp_3layer_weight_perturb(nn.Module):
+    def __init__(self, in_ch=1, in_dim=28, width=1, pert_weight=True, pert_bias=False, norm=2):
+        super(mlp_3layer_weight_perturb, self).__init__()
+        self.fc1 = nn.Linear(in_ch * in_dim * in_dim, 64 * width)
+        self.fc2 = nn.Linear(64 * width, 64 * width)
+        self.fc3 = nn.Linear(64 * width, 10)
+
+        eps = 0.01
+        self.ptb = PerturbationLpNorm(norm=norm, eps=eps)
+
+        if pert_weight:
+            self.fc1.weight = BoundedParameter(self.fc1.weight.data, self.ptb)
+            self.fc2.weight = BoundedParameter(self.fc2.weight.data, self.ptb)
+            self.fc3.weight = BoundedParameter(self.fc3.weight.data, self.ptb)
+
+        if pert_bias:
+            self.fc1.bias = BoundedParameter(self.fc1.bias.data, self.ptb)
+            self.fc2.bias = BoundedParameter(self.fc2.bias.data, self.ptb)
+            self.fc3.bias = BoundedParameter(self.fc3.bias.data, self.ptb)
+
+    def forward(self, x):
+        x = x.view(-1, 784)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
 
 class mlp_5layer(nn.Module):
     def __init__(self, in_ch, in_dim, width=1):

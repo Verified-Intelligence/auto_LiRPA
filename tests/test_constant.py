@@ -1,16 +1,12 @@
 """Test classes in auto_LiRPA/bound_ops.py"""
 import torch
-import argparse
 import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--gen_ref', action='store_true', help='generate reference results')
-args, unknown = parser.parse_known_args()   
+from testcase import TestCase  
 
 class cnn_MNIST(nn.Module):
     def __init__(self):
@@ -29,38 +25,36 @@ class cnn_MNIST(nn.Module):
         x = self.fc2(x)
         return 0.5 * x
 
-def test():
-    torch.manual_seed(1)
-    torch.cuda.manual_seed_all(1)
+class TestConstant(TestCase): 
+    def __init__(self, methodName='runTest', generate=False):
+        super().__init__(methodName, 
+            seed=1, ref_path='data/constant_test_data',
+            generate=generate)
 
-    model = cnn_MNIST()
-    checkpoint = torch.load("../examples/vision/pretrain/mnist_cnn_small.pth", map_location="cpu")
-    model.load_state_dict(checkpoint)
+    def test(self):
+        model = cnn_MNIST()
+        checkpoint = torch.load("../examples/vision/pretrain/mnist_cnn_small.pth", map_location="cpu")
+        model.load_state_dict(checkpoint)
 
-    N = 2
-    n_classes = 10
-    image = torch.randn(N, 1, 28, 28)
-    image = image.to(torch.float32) / 255.0
+        N = 2
+        n_classes = 10
+        image = torch.randn(N, 1, 28, 28)
+        image = image.to(torch.float32) / 255.0
 
-    model = BoundedModule(model, torch.empty_like(image), device="cpu")
-    eps = 0.3
-    norm = np.inf
-    ptb = PerturbationLpNorm(norm=norm, eps=eps)
-    image = BoundedTensor(image, ptb)
-    pred = model(image)
-    lb, ub = model.compute_bounds()
+        model = BoundedModule(model, torch.empty_like(image), device="cpu")
+        eps = 0.3
+        norm = np.inf
+        ptb = PerturbationLpNorm(norm=norm, eps=eps)
+        image = BoundedTensor(image, ptb)
+        pred = model(image)
+        lb, ub = model.compute_bounds()
 
-    assert lb.shape == ub.shape == torch.Size((2, 10))    
+        assert lb.shape == ub.shape == torch.Size((2, 10))    
 
-    path = 'data/constant_test_data'
-    if args.gen_ref:
-        torch.save((lb, ub), path)
-    else:
-        lb_ref, ub_ref = torch.load(path)
-        print(lb, lb_ref, (lb - lb_ref).abs().max())
-        print(ub, ub_ref, (ub - ub_ref).abs().max())
-        assert torch.allclose(lb, lb_ref)
-        assert torch.allclose(ub, ub_ref)
+        self.result = (lb, ub)
+        self.check()
 
 if __name__ == '__main__':
-    test()
+    # Change to generate=True when genearting reference results
+    testcase = TestConstant(generate=False)
+    testcase.test()        

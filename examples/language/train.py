@@ -167,7 +167,7 @@ def step(model, ptb, batch, eps=1.0, train=False):
             if args.method == 'IBP+backward_train':
                 lb, ub = model_loss.compute_bounds(
                     x=(labels, embeddings, mask), aux=aux, 
-                    IBP=True, C=None, method='backward', bound_lower=False)
+                    C=None, method='IBP+backward', bound_lower=False)
             else:
                 raise NotImplementedError
             loss_robust = torch.log(ub).mean()
@@ -184,21 +184,16 @@ def step(model, ptb, batch, eps=1.0, train=False):
                     torch.eye(num_class).type_as(embeddings).unsqueeze(0)
                 I = (~(labels.data.unsqueeze(1) == torch.arange(num_class).type_as(labels.data).unsqueeze(0)))
                 c = (c[I].view(embeddings.size(0), num_class - 1, num_class))
-                if args.method == 'IBP':
-                    lb, ub = model_bound.compute_bounds(aux=aux, IBP=True, C=c, method=None)
-                elif args.method == 'IBP+backward':
-                    lb, ub = model_bound.compute_bounds(aux=aux, IBP=True, C=c, method='backward', bound_upper=False)
+                if args.method in ['IBP', 'IBP+backward', 'forward', 'forward+backward']:
+                    lb, ub = model_bound.compute_bounds(aux=aux, C=c, method=args.method, bound_upper=False)
                 elif args.method == 'IBP+backward_train':
+                    # CROWN-IBP
                     if 1 - eps > 1e-4:
-                        lb, ub = model_bound.compute_bounds(aux=aux, IBP=True, C=c, method='backward', bound_upper=False)
-                        ilb, iub = model_bound.compute_bounds(aux=aux, IBP=True, C=c, method=None, reuse_ibp=True)
+                        lb, ub = model_bound.compute_bounds(aux=aux, C=c, method='IBP+backward', bound_upper=False)
+                        ilb, iub = model_bound.compute_bounds(aux=aux, C=c, method='IBP', reuse_ibp=True)
                         lb = eps * ilb + (1 - eps) * lb
                     else:
-                        lb, ub = model_bound.compute_bounds(aux=aux, IBP=True, C=c, method=None)
-                elif args.method == 'forward':
-                    lb, ub = model_bound.compute_bounds(aux=aux, IBP=False, C=c, method='forward', bound_upper=False)
-                elif args.method == 'forward+backward':
-                    lb, ub = model_bound.compute_bounds(aux=aux, IBP=False, forward=True, C=c, method='backward', bound_upper=False)
+                        lb, ub = model_bound.compute_bounds(aux=aux, C=c, method='IBP')
                 else:
                     raise NotImplementedError
                 lb_padded = torch.cat((torch.zeros(size=(lb.size(0),1), dtype=lb.dtype, device=lb.device), lb), dim=1)

@@ -62,7 +62,7 @@ parser.add_argument('--clip_grad_norm', type=float, default=8.0)
 
 args = parser.parse_args()
 
-exp_name = args.model + '_b' + str(args.batch_size) + str(args.bound_type) + '_epoch' + str(
+exp_name = args.model + '_b' + str(args.batch_size) + '_' + str(args.bound_type) + '_epoch' + str(
     args.num_epochs) + '_' + args.scheduler_opts + '_ImageNet_' + str(args.eps)[:6]
 os.makedirs('saved_models/', exist_ok=True)
 if args.verify:
@@ -292,7 +292,7 @@ def main(args):
             Train(model, 1, test_data, eps_scheduler, norm, False, None, 'IBP', loss_fusion=False, final_node_name=None)
     else:
         timer = 0.0
-        best_acc = 1e10
+        best_err = 1e10
         # with torch.autograd.detect_anomaly():
         for t in range(epoch + 1, args.num_epochs + 1):
             logger.log("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
@@ -327,10 +327,10 @@ def main(args):
             if t < int(eps_scheduler.params['start']):
                 torch.save(save_dict, 'saved_models/natural_' + exp_name)
             elif t > int(eps_scheduler.params['start']) + int(eps_scheduler.params['length']):
-                current_acc = m.avg('Verified_Err')
-                if current_acc < best_acc:
-                    best_acc = current_acc
-                    torch.save(save_dict, 'saved_models/' + exp_name + '_best_' + str(best_acc)[:6])
+                current_err = m.avg('Verified_Err')
+                if current_err < best_err:
+                    best_err = current_err
+                    torch.save(save_dict, 'saved_models/' + exp_name + '_best_' + str(best_err)[:6])
             else:
                 torch.save(save_dict, 'saved_models/' + exp_name)
             torch.cuda.empty_cache()

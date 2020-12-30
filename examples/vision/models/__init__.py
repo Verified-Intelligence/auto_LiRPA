@@ -14,6 +14,7 @@ from models.resnet18 import *
 Models = {
     'mlp_2layer': mlp_2layer,
     'mlp_3layer': mlp_3layer,
+    'mlp_3layer_weight_perturb': mlp_3layer_weight_perturb,
     'mlp_5layer': mlp_5layer,
     'cnn_4layer': cnn_4layer,
     'cnn_5layer': cnn_5layer,

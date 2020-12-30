@@ -115,10 +115,10 @@ model = BoundedModule(model, my_input)
 ptb = PerturbationLpNorm(norm=np.inf, eps=0.1)
 # Make the input a BoundedTensor with perturbation
 my_input = BoundedTensor(my_input, ptb)
-# Forward propagation using BoundedTensor
+# Regular forward propagation using BoundedTensor works as usual.
 prediction = model(my_input)
 # Compute LiRPA bounds
-lb, ub = model.compute_bounds(method="backward")
+lb, ub = model.compute_bounds(x=(my_input,), method="backward")
 ```
 
 Checkout

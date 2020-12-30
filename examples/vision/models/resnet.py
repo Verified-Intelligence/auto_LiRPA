@@ -36,7 +36,7 @@ class Flatten(nn.Module):
         return x.view(x.size(0), -1)
 
 
-def model_resnet(in_ch=3, in_dim=32, width=1, N=1):
+def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
     def block(in_filters, out_filters, k, downsample):
         if not downsample:
             k_first = 3
@@ -55,23 +55,23 @@ def model_resnet(in_ch=3, in_dim=32, width=1, N=1):
             nn.ReLU()
         ]
 
-    conv1 = [nn.Conv2d(in_ch, 16, 3, stride=1, padding=3 if in_dim == 28 else 1), nn.ReLU()]
-    conv2 = block(16, 16 * width, 3, False)
+    conv1 = [nn.Conv2d(in_ch, mult, 3, stride=1, padding=3 if in_dim == 28 else 1), nn.ReLU()]
+    conv2 = block(mult, mult * width, 3, False)
     for _ in range(N):
-        conv2.extend(block(16 * width, 16 * width, 3, False))
-    conv3 = block(16 * width, 32 * width, 3, True)
+        conv2.extend(block(mult * width, mult * width, 3, False))
+    conv3 = block(mult * width, mult * 2 * width, 3, True)
     for _ in range(N - 1):
-        conv3.extend(block(32 * width, 32 * width, 3, False))
-    conv4 = block(32 * width, 64 * width, 3, True)
+        conv3.extend(block(mult * 2 * width, mult * 2 * width, 3, False))
+    conv4 = block(mult * 2 * width, mult * 4 * width, 3, True)
     for _ in range(N - 1):
-        conv4.extend(block(64 * width, 64 * width, 3, False))
+        conv4.extend(block(mult * 4 * width, mult * 4 * width, 3, False))
     layers = (
             conv1 +
             conv2 +
             conv3 +
             conv4 +
             [Flatten(),
-             nn.Linear(64 * width * 8 * 8, 1000),
+             nn.Linear(mult * 4 * width * 8 * 8, 1000),
              nn.ReLU(),
              nn.Linear(1000, 10)]
     )

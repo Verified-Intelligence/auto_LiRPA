@@ -5,10 +5,7 @@ import torch.nn.functional as F
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 
-# with open('data/vision_test_data.pickle', 'rb') as handle:
-#     data = pickle.load(handle)
 data = torch.load('data/vision_test_data')
-
 
 class cnn_4layer_test(nn.Module):
     def __init__(self):

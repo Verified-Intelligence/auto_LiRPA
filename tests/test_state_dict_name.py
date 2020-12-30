@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from auto_LiRPA import BoundedModule
+from testcase import TestCase
 
 
 class FeatureExtraction(nn.Module):
@@ -42,25 +42,30 @@ class cnn_MNIST_nobound(nn.Module):
         return self.fc(x)
 
 
-def test():
-    nobound_model = cnn_MNIST_nobound()
-    print('expected', nobound_model.state_dict().keys())
+class TestStateDictName(TestCase): 
+    def __init__(self, methodName='runTest', generate=False):
+        super().__init__(methodName)
 
-    model = cnn_MNIST()
-    state_dict = model.state_dict()
-    dummy = torch.randn((1, 1, 28, 28))
-    ret1 = model(dummy)
+    def test(self):
+        nobound_model = cnn_MNIST_nobound()
 
-    # create second model and load state_dict to test load_state_dict() whether works proper
-    model = cnn_MNIST()
-    model.load_state_dict(state_dict, strict=False)
-    ret2 = model(dummy)
-    assert (ret1 == ret2).all()
+        model = cnn_MNIST()
+        state_dict = model.state_dict()
+        dummy = torch.randn((1, 1, 28, 28))
+        ret1 = model(dummy)
 
-    print('got', model.state_dict().keys())
+        # create second model and load state_dict to test load_state_dict() whether works proper
+        model = cnn_MNIST()
+        model.load_state_dict(state_dict, strict=False)
+        ret2 = model(dummy)
+        self.assertEqual(ret1, ret2)
+        self.assertEqual(nobound_model.state_dict().keys(), model.state_dict().keys())
 
-    assert (nobound_model.state_dict().keys() == model.state_dict().keys())
-
+        print('expected', nobound_model.state_dict().keys())
+        print('got', model.state_dict().keys())
+        
 
 if __name__ == '__main__':
-    test()
+    # Change to generate=True when genearting reference results
+    testcase = TestStateDictName(generate=False)
+    testcase.test()

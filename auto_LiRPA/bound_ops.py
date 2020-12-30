@@ -220,7 +220,7 @@ class Bound(nn.Module):
 
             # the shape of A.patches is [batch, L, out_c, in_c, K, K]
             
-            if self.batch_dim != -1: # Here we only support batch_dim == 0
+            if self.batch_dim != -1:
                 batch_size = bias.shape[0]
                 bias = F.unfold(bias, kernel_size=A.patches.size(-1), stride=A.stride, padding=A.padding).transpose(-2, -1).unsqueeze(-2)
                 # Here the size of bias is [batch_size, L, 1, in_c * K * K]
@@ -232,7 +232,12 @@ class Bound(nn.Module):
                 bias_new = prod.sum(-1).transpose(-2, -1)
                 bias_new = bias_new.view(batch_size, bias_new.size(-2), int(math.sqrt(bias_new.size(-1))), int(math.sqrt(bias_new.size(-1))))
             else:
-                raise NotImplementedError()
+                # Similar to BoundConstant
+                patches = A.patches
+                patches_reshape = torch.sum(patches, dim=(-1, -2, -3)) * bias.to(self.device)
+                patches_reshape = patches_reshape.transpose(-1, -2)
+                return patches_reshape.view(patches_reshape.size(0), patches_reshape.size(1), int(math.sqrt(patches_reshape.size(2))), -1).transpose(0, 1)
+
             return bias_new
         else:
             return NotImplementedError()
@@ -914,7 +919,7 @@ class BoundBatchNormalization(Bound):
                 else:
                     # we should create a real identity Patch
                     num_channel = tmp_weight.view(-1).size(0)
-                    patches = (torch.eye(num_channel) * tmp_weight.view(-1)).unsqueeze(0).unsqueeze(0).unsqueeze(4).unsqueeze(5) # now [1 * 1 * in_C * in_C * 1 * 1]
+                    patches = (torch.eye(num_channel, device=tmp_weight.device) * tmp_weight.view(-1)).unsqueeze(0).unsqueeze(0).unsqueeze(4).unsqueeze(5) # now [1 * 1 * in_C * in_C * 1 * 1]
                     next_A = Patches(patches, 1, 0, [1, 1, num_channel, 1, 1])
                     sum_bias = tmp_bias.unsqueeze(1).unsqueeze(2).unsqueeze(3) # squeezing batch dim, now [C * 1 * 1 * 1]
             else:
@@ -2119,8 +2124,16 @@ class BoundConstant(Bound):
         def _bound_oneside(A):
             if A is None:
                 return 0.0
-            while A.ndim > 2:
-                A = torch.sum(A, dim=-1)
+
+            if type(A) == torch.Tensor:
+                while A.ndim > 2:
+                    A = torch.sum(A, dim=-1)
+            elif type(A) == Patches:
+                patches = A.patches
+                patches_reshape = torch.sum(patches, dim=(-1, -2, -3)) * self.value.to(self.device)
+                patches_reshape = patches_reshape.transpose(-1, -2)
+                return patches_reshape.view(patches_reshape.size(0), patches_reshape.size(1), int(math.sqrt(patches_reshape.size(2))), -1).transpose(0, 1)
+
             return A * self.value.to(self.device)
 
         lbias = _bound_oneside(last_lA)
@@ -2255,10 +2268,10 @@ class BoundGatherElements(Bound):
             if last_A is None:
                 return None
             A = torch.zeros(
-                last_A.shape[0], last_A.shape[1], *x.lower.shape[1:], device=last_A.device)
+                last_A.shape[0], last_A.shape[1], *x.default_shape[1:], device=last_A.device)
             A.scatter_(
                 dim=dim + 1,
-                index=index.lower.unsqueeze(0).repeat(A.shape[0], *([1] * (A.ndim - 1))),
+                index=self.index.unsqueeze(0).repeat(A.shape[0], *([1] * (A.ndim - 1))),
                 src=last_A)
             return A
 
