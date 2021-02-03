@@ -249,6 +249,7 @@ class BoundReshape(Bound):
 
     def forward(self, x, shape):
         shape = list(shape)
+        shape = [x.cpu() for x in shape]
         for i in range(len(shape)):
             if shape[i] == -1:
                 shape[i] = np.prod(x.shape) // int(np.prod(shape[:i]) * np.prod(shape[(i + 1):]))
@@ -513,8 +514,9 @@ class BoundLinear(Bound):
                     if last_A is None:
                         return None, 0
                     # Just multiply this layer's weight into bound matrices, and produce biases.
+                    bias_lower = x[2].lower if x[2].lower.dim() != 0 else x[2].lower.reshape(1)
                     next_A = last_A.matmul(x[1].lower)
-                    sum_bias = last_A.matmul(x[2].lower) if has_bias else 0.0
+                    sum_bias = last_A.matmul(bias_lower) if has_bias else 0.0
                     return next_A, sum_bias
 
                 lA_x, lbias = _bound_oneside(last_lA)
@@ -678,8 +680,8 @@ class BoundLinear(Bound):
 
             if C is not None:
                 w = C.matmul(w)
-                lb = C.matmul(lb) if not isinstance(lb, float) else lb
-                ub = C.matmul(ub) if not isinstance(ub, float) else ub
+                lb = C.matmul(lb) if not (isinstance(lb, float) or lb.dim()==0) else lb
+                ub = C.matmul(ub) if not (isinstance(lb, float) or lb.dim()==0) else ub
 
         # interval_propagate() of the Linear layer may encounter input with different norms.
         norm = Interval.get_perturbation(v[0])
