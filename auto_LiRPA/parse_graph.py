@@ -164,7 +164,7 @@ def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=No
             _set_opset_version(11)
         else:
             _set_opset_version(12)
-        trace_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
+        trace_graph = torch.onnx.utils._optimize_graph(trace, torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK, params_dict={})
 
     logger.debug('trace_graph: {}'.format(trace_graph))
 

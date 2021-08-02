@@ -1,12 +1,16 @@
 language: python
 python:
-  - "3.7"
+  - "3.8"
 install:
   - pip install --editable .
   - cd examples 
   - pip install -r requirements.txt
-  - pip install torchvision==0.6.0 torch==1.7.0
   - cd ..
+  - sudo fallocate -l 16G /swapfile
+  - sudo chmod 600 /swapfile
+  - sudo mkswap /swapfile
+  - sudo swapon /swapfile
+  - free -h
 script:
   - cd tests
   - python utils/download_models.py

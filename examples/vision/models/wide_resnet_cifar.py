@@ -103,17 +103,16 @@ class Wide_ResNet(nn.Module):
 
         return out
 
-
-def wide_resnet_cifar():
+def wide_resnet_cifar(in_ch=3, in_dim=32):
     return Wide_ResNet(16, 4, 0.3, 10)
 
-def wide_resnet_cifar_bn():
+def wide_resnet_cifar_bn(in_ch=3, in_dim=32):
     return Wide_ResNet(10, 4, None, 10, use_bn=True)
 
-def wide_resnet_cifar_bn_wo_pooling(): # 1113M, 21M
+def wide_resnet_cifar_bn_wo_pooling(in_ch=3, in_dim=32): # 1113M, 21M
     return Wide_ResNet(10, 4, None, 10, use_bn=True, use_pooling=False)
 
-def wide_resnet_cifar_bn_wo_pooling_dropout(): # 1113M, 21M
+def wide_resnet_cifar_bn_wo_pooling_dropout(in_ch=3, in_dim=32): # 1113M, 21M
     return Wide_ResNet(10, 4, 0.3, 10, use_bn=True, use_pooling=False)
 
 if __name__ == '__main__':

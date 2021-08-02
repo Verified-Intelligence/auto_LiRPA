@@ -7,6 +7,7 @@ unzip tiny-imagenet-200.zip
 current="$(pwd)/tiny-imagenet-200"
 
 # training data
+echo "preparing training data..."
 cd $current/train
 for DIR in $(ls); do
    cd $DIR
@@ -17,6 +18,7 @@ for DIR in $(ls); do
 done
 
 # validation data
+echo "preparing validation data..."
 cd $current/val
 annotate_file="val_annotations.txt"
 length=$(cat $annotate_file | wc -l)

@@ -106,7 +106,7 @@ class DenseNet(nn.Module):
 # def Densenet_cifar():
 #     return DenseNet(Bottleneck, [2,4,6], growth_rate=16)
 
-def Densenet_cifar_32():
+def Densenet_cifar_32(in_ch=3, in_dim=32):
     return DenseNet(Bottleneck, [2,4,4], growth_rate=32)
 
 if __name__ == "__main__":

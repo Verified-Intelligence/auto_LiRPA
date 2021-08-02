@@ -94,7 +94,7 @@ def ResNeXt29_8x64d():
 def ResNeXt29_32x4d():
     return ResNeXt(num_blocks=[3,3,3], cardinality=32, bottleneck_width=4)
 
-def ResNeXt_cifar():
+def ResNeXt_cifar(in_ch=3, in_dim=32):
     return ResNeXt(num_blocks=[1,1,1], cardinality=2, bottleneck_width=32)
 
 if __name__ == "__main__":

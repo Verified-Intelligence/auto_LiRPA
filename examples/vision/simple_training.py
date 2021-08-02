@@ -1,9 +1,18 @@
-import random
-import sys
+"""
+A simple script to train certified defense using the auto_LiRPA library.
+
+We compute output bounds under input perturbations using auto_LiRPA, and use
+them to form a "robust loss" for certified defense.  Several different bound
+options are supported, such as IBP, CROWN, and CROWN-IBP. This is a basic
+example on MNIST and CIFAR-10 datasets with Lp (p>=0) norm perturbation. For
+faster training, please see our examples with loss fusion such as
+cifar_training.py and tinyimagenet_training.py
+"""
+
 import time
+import random
 import multiprocessing
 import argparse
-import multiprocessing
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from auto_LiRPA import BoundedModule, BoundedTensor
@@ -109,7 +118,7 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
                     clb, cub = model.compute_bounds(IBP=False, C=c, method="backward", bound_upper=False)
                     lb = clb * factor + ilb * (1 - factor)
             elif bound_type == "CROWN-FAST":
-                # model.compute_bounds(IBP=True, C=c, method=None)
+                # Similar to CROWN-IBP but no mix between IBP and CROWN bounds.
                 lb, ub = model.compute_bounds(IBP=True, C=c, method=None)
                 lb, ub = model.compute_bounds(IBP=False, C=c, method="backward", bound_upper=False)
 
@@ -154,11 +163,11 @@ def main(args):
 
     ## Step 2: Prepare dataset as usual
     if args.data == 'MNIST':
-        dummy_input = torch.randn(1, 1, 28, 28)
+        dummy_input = torch.randn(2, 1, 28, 28)
         train_data = datasets.MNIST("./data", train=True, download=True, transform=transforms.ToTensor())
         test_data = datasets.MNIST("./data", train=False, download=True, transform=transforms.ToTensor())
     elif args.data == 'CIFAR':
-        dummy_input = torch.randn(1, 3, 32, 32)
+        dummy_input = torch.randn(2, 3, 32, 32)
         normalize = transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
         train_data = datasets.CIFAR10("./data", train=True, download=True,
                 transform=transforms.Compose([

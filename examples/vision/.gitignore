@@ -2,6 +2,6 @@ exp
 exp_inv
 __pycache__
 model_*
+!model_gurobi.py
 saved_models
 config
-

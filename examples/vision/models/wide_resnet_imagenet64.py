@@ -82,11 +82,12 @@ class Wide_ResNet(nn.Module):
 
         return out
 
-def wide_resnet_imagenet64():
+def wide_resnet_imagenet64(in_ch=3, in_dim=56):
     return Wide_ResNet(10, 10, 0.3, 200)
 
-def wide_resnet_imagenet64_1000class():
+def wide_resnet_imagenet64_1000class(in_ch=3, in_dim=56):
     return Wide_ResNet(10, 10, 0.3, 1000)
+
 
 if __name__ == '__main__':
     from thop import profile

@@ -1,3 +1,14 @@
+"""
+A simple example for certified robustness against model weight perturbations.
+
+Since our framework works on general computational graphs, where both model
+weights and model inputs are inputs of the computational graph, our
+perturbation analysis can naturally be applied to the model weights, allowing
+analysis for certified model robustness under weight perturbations. This file
+provides a simple example of certified defense for model weight perturbations.
+
+See our paper https://arxiv.org/abs/2002.12920 for more details.
+"""
 import random
 import time
 import argparse
@@ -7,7 +18,6 @@ from auto_LiRPA import BoundedModule, CrossEntropyWrapper, BoundDataParallel, Bo
 from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter
-import torch.nn.functional as F
 from datasets import mnist_loaders
 import torchvision.datasets as datasets
 import models
@@ -41,7 +51,7 @@ parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"
 parser.add_argument("--data", type=str, default="MNIST", choices=["MNIST", "FashionMNIST"], help='dataset')
 parser.add_argument("--ratio", type=float, default=None, help='percent of training used, None means whole training data')
 parser.add_argument("--seed", type=int, default=100, help='random seed')
-parser.add_argument("--eps", type=float, default=0.1, help='Target training epsilon')
+parser.add_argument("--eps", type=float, default=0.1, help='Target training epsilon for weight perturbations')
 parser.add_argument("--norm", type=float, default='inf', help='p norm for epsilon perturbation')
 parser.add_argument("--bound_type", type=str, default="CROWN-IBP",
                     choices=["IBP", "CROWN-IBP", "CROWN"], help='method of bound analysis')
@@ -219,7 +229,7 @@ def main(args):
         logger.log('Checkpoint loaded: {}'.format(args.load))
 
     ## Step 2: Prepare dataset as usual
-    dummy_input = torch.randn(1, 1, 28, 28)
+    dummy_input = torch.randn(2, 1, 28, 28)
     train_data,  test_data = mnist_loaders(datasets.MNIST, batch_size=args.batch_size, ratio=args.ratio)
     train_data.mean = test_data.mean = torch.tensor([0.0])
     train_data.std = test_data.std = torch.tensor([1.0])

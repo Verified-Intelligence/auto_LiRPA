@@ -19,7 +19,7 @@ class TestWeightPerturbation(TestCase):
 
     def test_training(self):
         ret = subprocess.run(
-            ['python', 'weights_training.py', 
+            ['python', 'weight_perturbation_training.py', 
             '--device', 'cpu',
             '--scheduler_opts', 'start=1,length=100',
             '--num_epochs',  '1', 
@@ -33,10 +33,11 @@ class TestWeightPerturbation(TestCase):
         lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
         self.result[lb_name] = lb.detach().data.clone()
         self.result[ub_name] = ub.detach().data.clone()
-        assert torch.allclose(lb, self.result[lb_name], 1e-4)
-        assert torch.allclose(ub, self.result[ub_name], 1e-4)
-        assert ((lb - self.result[lb_name]).pow(2).sum() < 1e-9)
-        assert ((ub - self.result[ub_name]).pow(2).sum() < 1e-9)
+
+        assert torch.allclose(self.reference[lb_name], self.result[lb_name], 1e-4, 1e-6)
+        assert torch.allclose(self.reference[ub_name], self.result[ub_name], 1e-4, 1e-6)
+        assert ((self.reference[lb_name] - self.result[lb_name]).pow(2).sum() < 1e-9)
+        assert ((self.reference[ub_name] - self.result[ub_name]).pow(2).sum() < 1e-9)
 
         # test gradient backward propagation
         loss = (ub - lb).abs().sum()
@@ -45,8 +46,8 @@ class TestWeightPerturbation(TestCase):
         # gradient w.r.t input only
         grad = x.grad
         self.result[lb_name+'_grad'] = grad.detach().data.clone()
-        assert torch.allclose(grad, self.result[lb_name + '_grad'], 1e-4)
-        assert ((grad - self.result[lb_name + '_grad']).pow(2).sum() < 1e-9)
+        assert torch.allclose(self.reference[lb_name+'_grad'], self.result[lb_name + '_grad'], 1e-4, 1e-6)
+        assert ((self.reference[lb_name + '_grad'] - self.result[lb_name + '_grad']).pow(2).sum() < 1e-8)
 
     def test_perturbation(self):
         np.random.seed(123) # FIXME This seed is inconsistent with other seeds (1234)
@@ -77,8 +78,7 @@ class TestWeightPerturbation(TestCase):
                         lb_name=lb_name + '_CROWN', ub_name=ub_name + '_CROWN')  # CROWN
 
         # Linf
-        verify_model(pert_weight=True, pert_bias=True, norm=np.inf, lb_name='l_inf_weights_bias_lb',
-                    ub_name='l_inf_weights_bias_ub')
+        verify_model(pert_weight=True, pert_bias=True, norm=np.inf, lb_name='l_inf_weights_bias_lb', ub_name='l_inf_weights_bias_ub')
         verify_model(pert_weight=True, pert_bias=False, norm=np.inf, lb_name='l_inf_weights_lb', ub_name='l_inf_weights_ub')
         verify_model(pert_weight=False, pert_bias=True, norm=np.inf, lb_name='l_inf_bias_lb', ub_name='l_inf_bias_ub')
 

@@ -92,7 +92,7 @@ class DenseNet(nn.Module):
         return out
 
 
-def Densenet_imagenet():
+def Densenet_imagenet(in_ch=3, in_dim=56):
     return DenseNet(Bottleneck, [2,4,4], growth_rate=32)
 
 if __name__ == "__main__":

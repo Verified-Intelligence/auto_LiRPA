@@ -4,6 +4,7 @@ import argparse
 import pickle
 import torch
 import numpy as np
+import pytest
 from auto_LiRPA.utils import logger
 
 parser = argparse.ArgumentParser()
@@ -54,12 +55,12 @@ def read_res():
         return pickle.load(file)
 
 def evaluate():
-    logger.info('Evaluating the trained Transformer')
-    os.system(cmd_transformer_test)
-    res_transformer = read_res()
     logger.info('Evaluating the trained LSTM')
     os.system(cmd_lstm_test)
     res_lstm = read_res()
+    logger.info('Evaluating the trained Transformer')
+    os.system(cmd_transformer_test)
+    res_transformer = read_res()    
     os.system("rm {}".format(res_path))
     return res_transformer, res_lstm
 
@@ -78,7 +79,8 @@ def check():
     for res, res_ref in zip([res_transformer, res_lstm], [res_transformer_ref, res_lstm_ref]):
         for a, b in zip(res, res_ref):
             ta, tb = torch.tensor(a), torch.tensor(b)
-            assert torch.max(torch.abs(ta - tb)) < 1e-5
+            diff = torch.max(torch.abs(ta - tb))
+            assert diff < 1e-5, diff
             assert (torch.tensor(a) - torch.tensor(b)).pow(2).sum() < 1e-9
 
 def test():

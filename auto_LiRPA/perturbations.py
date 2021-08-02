@@ -4,10 +4,22 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList
+from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList, patchesToMatrix, check_padding
 import torch.nn.functional as F
 
 class Perturbation:
+    r"""
+    Base class for a perturbation specification. 
+
+    Examples: 
+
+    * `PerturbationLpNorm`: Lp-norm (p>=1) perturbation.
+
+    * `PerturbationL0Norm`: L0-norm perturbation.
+
+    * `PerturbationSynonym`: Synonym substitution perturbation for NLP.
+    """
+
     def __init__(self):
         pass
 
@@ -15,12 +27,46 @@ class Perturbation:
         self.eps = eps
     
     def concretize(self, x, A, sign=-1, aux=None):
+        r"""
+        Concretize bounds according to the perturbation specification.
+
+        Args:
+            x (Tensor): Input before perturbation.
+
+            A (Tensor) : A matrix from LiRPA computation.
+
+            sign (-1 or +1): If -1, concretize for lower bound; if +1, concretize for upper bound.
+
+            aux (object, optional): Auxilary information for concretization.
+
+        Returns:
+            bound (Tensor): concretized bound with the shape equal to the clean output.
+        """
         raise NotImplementedError
 
     def init(self, x, aux=None, forward=False):
+        r"""
+        Initialize bounds before LiRPA computation.
+
+        Args:
+            x (Tensor): Input before perturbation.
+
+            aux (object, optional): Auxilary information.
+
+            forward (bool): It indicates whether forward mode LiRPA is involved. 
+
+        Returns:
+            bound (LinearBound): Initialized bounds.
+
+            center (Tensor): Center of perturbation. It can simply be `x`, or some other value.
+
+            aux (object, optional): Auxilary information. Bound initialization may modify or add auxilary information.
+        """
+
         raise NotImplementedError
 
 
+"""Perturbation constrained by the L_0 norm (assuming input data is in the range of 0-1)."""
 class PerturbationL0Norm(Perturbation):
     def __init__(self, eps, x_L = None, x_U = None, ratio = 1.0):
         self.eps = eps
@@ -52,6 +98,7 @@ class PerturbationL0Norm(Perturbation):
             A_diff[pos_mask] = original[pos_mask]
             A_diff[neg_mask] = original[neg_mask] - A[neg_mask]
 
+        # FIXME: this assumes the input pixel range is between 0 and 1!
         A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
 
         bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
@@ -72,28 +119,45 @@ class PerturbationL0Norm(Perturbation):
         uw, ub = lw.clone(), lb.clone()       
         return LinearBound(lw, lb, uw, ub, x_L, x_U), x, None
 
-    
     def __repr__(self):
         return 'PerturbationLpNorm(norm=0, eps={})'.format(self.eps)
 
 """Perturbation constrained by the L_p norm."""
 class PerturbationLpNorm(Perturbation):
-    def __init__(self, eps, norm=np.inf, x_L=None, x_U=None):
+    def __init__(self, eps=0, norm=np.inf, x_L=None, x_U=None, relative=False):
         self.eps = eps
         self.norm = norm
         self.dual_norm = 1 if (norm == np.inf) else (np.float64(1.0) / (1 - 1.0 / self.norm))
         self.x_L = x_L
         self.x_U = x_U
+        self.relative = relative
 
     """Given an variable x and its bound matrix A, compute worst case bound according to Lp norm."""
-    def concretize(self, x, A, sign=-1, aux=None):
+    def concretize(self, x, A, sign=-1, aux=None, extra_constr=None):
         if A is None:
             return None
         # If A is an identity matrix, we will handle specially.
         def concretize_matrix(A):
             nonlocal x
             if not isinstance(A, eyeC):
+                # A has (Batch, spec, *input_size). For intermediate neurons, spec is *neuron_size.
                 A = A.reshape(A.shape[0], A.shape[1], -1)
+
+                if extra_constr is not None:
+                    # For each neuron, we have a beta, so beta size is (Batch, *neuron_size, n_beta) (in A, spec is *neuron_size).
+                    # For intermediate layer neurons, A has *neuron_size specifications.
+                    beta = extra_constr['beta']
+                    beta = beta.view(beta.size(0), -1, beta.size(-1))
+                    # coeffs are linear relationships between split neurons and x. They have size (batch, n_beta, *input_size), and unreated to neuron_size.
+                    beta_coeffs = extra_constr['coeffs']
+                    beta_coeffs = beta_coeffs.view(beta_coeffs.size(0), beta_coeffs.size(1), -1)
+                    # biases are added for each batch each spec, size is (batch, n_beta), and unrelated to neuron_size.
+                    beta_bias = extra_constr['bias']
+                    # Merge beta into extra A and bias. Extra A has size (batch, spec, *input_size). For intermediate neurons, spec is *neuron_size.
+                    extra_A = torch.einsum('ijk,ikl->ijl', beta, beta_coeffs)
+                    # Merge beta into the bias term. Output has size (batch, spec).
+                    extra_bias = torch.einsum('ijk,ik->ij', beta, beta_bias)
+
             if self.norm == np.inf:
                 # For Linfinity distortion, when an upper and lower bound is given, we use them instead of eps.
                 x_L = x - self.eps if self.x_L is None else self.x_L
@@ -104,11 +168,20 @@ class PerturbationLpNorm(Perturbation):
                 center = (x_ub + x_lb) / 2.0
                 diff = (x_ub - x_lb) / 2.0
                 if not isinstance(A, eyeC):
-                    bound = A.matmul(center) + sign * A.abs().matmul(diff)
+                    if extra_constr is not None:
+                        # Extra linear and bias terms from constraints.
+                        print(
+                            f'A extra: {(sign * extra_A).abs().sum().item()}, b extra: {(sign * extra_bias).abs().sum().item()}')
+                        A = A - sign * extra_A
+                        bound = A.matmul(center) - sign * extra_bias.unsqueeze(-1) + sign * A.abs().matmul(diff)
+                    else:
+                        bound = A.matmul(center) + sign * A.abs().matmul(diff)
                 else:
+                    assert extra_constr is None
                     # A is an identity matrix. No need to do this matmul.
                     bound = center + sign * diff
             else:
+                assert extra_constr is None
                 x = x.reshape(x.shape[0], -1, 1)
                 if not isinstance(A, eyeC):
                     # Find the upper and lower bounds via dual norm.
@@ -133,28 +206,63 @@ class PerturbationLpNorm(Perturbation):
                 diff = (x_U - x_L) / 2.0
                 if not A.identity == 1:
                     # unfold the input as [batch_size, L, in_c * H * W]
-                    unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    padded_center, padding = check_padding(center, A.padding)
+                    unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = padding, stride = A.stride).transpose(-2, -1)
                     # reshape the input as [batch_size, L, 1, in_c, H, W]
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
-                    prod = unfold_input * A.patches
-                    prod = prod.sum((-1, -2, -3)).transpose(-2, -1)
+
+                    # use torch.einsum() to save memory, equal to:
+                    # prod = (unfold_input * A.patches).sum((-1, -2, -3)).transpose(-2, -1)
+                    if unfold_input.shape[1] == A.patches.shape[1]:
+                        prod = torch.einsum('ijaxyz,ijbxyz->ibj', unfold_input, A.patches)
+                    else:
+                        prod = torch.einsum('imaxyz,inbxyz->ibm', unfold_input, A.patches)
+                    # assert torch.allclose((unfold_input * A.patches).sum((-1, -2, -3)).transpose(-2, -1), prod, 1e-2)
+
                     # size of prod: [batch_size, out_c, L], and then reshape it to [batch_size, out_c, M, M]
                     bound = prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
- 
-                    unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+
+                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
+                        # Asymmetric padding.
+                        padded_diff = F.pad(diff, A.padding)
+                        unfold_input = F.unfold(padded_diff, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
+                    else:
+                        unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
-                    prod = unfold_input * A.patches.abs()
-                    prod = prod.sum((-1, -2, -3)).transpose(-2, -1)
+                    if unfold_input.shape[1] == A.patches.shape[1]:
+                        prod = torch.einsum('ijaxyz,ijbxyz->ibj', unfold_input, A.patches.abs())
+                    else:
+                        prod = torch.einsum('imaxyz,inbxyz->ibm', unfold_input, A.patches.abs())
+                    # assert torch.allclose((unfold_input * A.patches.abs()).sum((-1, -2, -3)).transpose(-2, -1), prod, 1e-2)
                     bound += sign * prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
+
+                    # The extra bias term from beta term.
+                    if extra_constr is not None:
+                        bound += extra_constr
                 else:
+                    assert extra_constr is None
                     # A is an identity matrix. No need to do this matmul.
                     bound = center + sign * diff
                 return bound
             else:# Lp norm
-                x_L = x - self.eps if self.x_L is None else self.x_L
-                x_U = x + self.eps if self.x_U is None else self.x_U
-                
-                raise NotImplementedError()
+                # x_L = x - self.eps if self.x_L is None else self.x_L
+                # x_U = x + self.eps if self.x_U is None else self.x_U
+
+                input_shape = x.shape
+                x = x.reshape(x.shape[0], -1, 1)
+                if not A.identity:
+                    out_c = A.patches.size(2)
+                    L = A.patches.size(1)
+                    # Find the upper and lower bounds via dual norm.
+                    matrix = patchesToMatrix(A.patches, input_shape, A.stride, A.padding)
+                    matrix = matrix.reshape(matrix.shape[0], matrix.shape[1], -1)
+                    deviation = matrix.norm(self.dual_norm, -1) * self.eps
+                    bound = matrix.matmul(x) + sign * deviation.unsqueeze(-1)
+                    bound = bound.reshape(bound.size(0), out_c, int(math.sqrt(L)), int(math.sqrt(L)))
+                else:
+                    # A is an identity matrix. Its norm is all 1.
+                    bound = x + sign * self.eps
+                return bound
 
         if isinstance(A, eyeC) or isinstance(A, torch.Tensor):
             return concretize_matrix(A)
@@ -175,15 +283,25 @@ class PerturbationLpNorm(Perturbation):
             # For other norms, we pass in the BoundedTensor objects directly.
             x_L = x
             x_U = x
+        if self.relative:
+            nominal = x
+            lower_offset = torch.max(x_L - x - 1e-8, torch.ones_like(x_L) * (-self.eps))
+            upper_offset = torch.min(x_U - x + 1e-8, torch.ones_like(x_U) * (self.eps))
+        else:
+            nominal = lower_offset = upper_offset = None     
         if not forward:
-            return LinearBound(None, None, None, None, x_L, x_U), x, None
+            return LinearBound(
+                None, None, None, None, x_L, x_U,
+                nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset), x, None
         batch_size = x.shape[0]
         dim = x.reshape(batch_size, -1).shape[-1]
-        eye = torch.eye(dim).to(x.device).unsqueeze(0).repeat(batch_size, 1, 1)
+        eye = torch.eye(dim).to(x).unsqueeze(0).repeat(batch_size, 1, 1)
         lw = eye.reshape(batch_size, dim, *x.shape[1:])
         lb = torch.zeros_like(x).to(x.device)
-        uw, ub = lw.clone(), lb.clone()       
-        return LinearBound(lw, lb, uw, ub, x_L, x_U), x, None
+        uw, ub = lw.clone(), lb.clone()     
+        return LinearBound(
+            lw, lb, uw, ub, x_L, x_U, 
+            nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset), x, None
 
     def __repr__(self):
         if self.norm == np.inf:

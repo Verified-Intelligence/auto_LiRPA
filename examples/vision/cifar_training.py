@@ -36,6 +36,7 @@ def get_exp_module(bounded_module):
 
 
 parser = argparse.ArgumentParser()
+# python cifar_training.py --bound_type=IBP --model=cnn_6layer 
 
 parser.add_argument("--verify", action="store_true", help='verification mode, do not train')
 parser.add_argument("--no_loss_fusion", action="store_true", help='without loss fusion, slower training mode')
@@ -52,6 +53,7 @@ parser.add_argument("--model", type=str, default="cnn_7layer_bn",
 parser.add_argument("--num_epochs", type=int, default=2000, help='number of total epochs')
 parser.add_argument("--batch_size", type=int, default=256, help='batch size')
 parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
+parser.add_argument("--lr_decay_rate", type=float, default=0.1, help='learning rate decay rate')
 parser.add_argument("--lr_decay_milestones", nargs='+', type=int, default=[1400, 1700], help='learning rate dacay milestones')
 parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
                     choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
@@ -223,7 +225,7 @@ def main(args):
     if args.data == 'MNIST':
         model_ori = models.Models[args.model](in_ch=1, in_dim=28)
     else:
-        model_ori = models.Models[args.model]()
+        model_ori = models.Models[args.model](in_ch=3, in_dim=32)
     epoch = 0
     if args.load:
         checkpoint = torch.load(args.load)
@@ -240,11 +242,11 @@ def main(args):
 
     ## Step 2: Prepare dataset as usual
     if args.data == 'MNIST':
-        dummy_input = torch.randn(1, 1, 28, 28)
+        dummy_input = torch.randn(2, 1, 28, 28)
         train_data = datasets.MNIST("./data", train=True, download=True, transform=transforms.ToTensor())
         test_data = datasets.MNIST("./data", train=False, download=True, transform=transforms.ToTensor())
     elif args.data == 'CIFAR':
-        dummy_input = torch.randn(1, 3, 32, 32)
+        dummy_input = torch.randn(2, 3, 32, 32)
         normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
         train_data = datasets.CIFAR10("./data", train=True, download=True,
                 transform=transforms.Compose([
@@ -284,7 +286,7 @@ def main(args):
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model_loss.parameters(), lr=args.lr)
     norm = float(args.norm)
-    lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=0.1)
+    lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=args.lr_decay_rate)
     eps_scheduler = eval(args.scheduler_name)(args.eps, args.scheduler_opts)
     logger.log(str(model_ori))
 

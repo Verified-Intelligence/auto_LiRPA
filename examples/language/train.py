@@ -107,7 +107,7 @@ test_batches = get_batches(data_test, args.batch_size)
 ptb = PerturbationSynonym(budget=args.budget)
 dummy_embeddings = BoundedTensor(dummy_embeddings, ptb)
 model_ori = model.model_from_embeddings
-bound_opts = { 'relu': args.bound_opts_relu, 'exp': 'no-max-input' }
+bound_opts = { 'relu': args.bound_opts_relu, 'exp': 'no-max-input', 'fixed_reducemax_index': True }
 if isinstance(model_ori, BoundedModule):
     model_bound = model_ori
 else:

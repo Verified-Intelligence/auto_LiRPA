@@ -231,7 +231,7 @@ def main(args):
         logger.log('Checkpoint loaded: {}'.format(args.load))
 
     ## Step 2: Prepare dataset as usual
-    dummy_input = torch.randn(1, 3, 56, 56)
+    dummy_input = torch.randn(2, 3, 56, 56)
     normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2302, 0.2265, 0.2262])
     train_data = datasets.ImageFolder(args.data_dir + '/train',
                                       transform=transforms.Compose([

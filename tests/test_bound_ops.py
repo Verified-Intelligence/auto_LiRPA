@@ -11,7 +11,7 @@ class Dummy:
         self.lower = lower
         self.upper = upper if upper is not None else lower
         self.perturbed = perturbed
-        self.default_shape = lower.shape
+        self.output_shape = lower.shape
 
 class TestBoundOp(TestCase): 
     def __init__(self, methodName='runTest', generate=False):

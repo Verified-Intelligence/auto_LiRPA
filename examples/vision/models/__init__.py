@@ -9,6 +9,7 @@ from models.densenet_imagenet import *
 from models.wide_resnet_imagenet64 import *
 from models.wide_resnet_cifar import *
 from models.resnet18 import *
+from models.vnncomp_resnet import resnet2b as vnncomp_resnet2b, resnet4b as vnncomp_resnet4b
 
 
 Models = {
@@ -39,4 +40,6 @@ Models = {
     'cnn_4layer_LeakyRelu': cnn_4layer_LeakyRelu,
     'wide_resnet_imagenet64': wide_resnet_imagenet64,
     'wide_resnet_imagenet64_1000class': wide_resnet_imagenet64_1000class,
+    'vnncomp_resnet2b': vnncomp_resnet2b,
+    'vnncomp_resnet4b': vnncomp_resnet4b,
 }
