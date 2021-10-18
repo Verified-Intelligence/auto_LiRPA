@@ -4266,7 +4266,7 @@ class BoundSlice(Bound):
         self.start = attr["starts"][0] if "starts" in attr else None
         self.end = attr["ends"][0] if "ends" in attr else None
         self.axes = attr["axes"][0] if "axes" in attr else None
-        self.use_default_ibp = True
+        self.use_default_ibp = False
 
     # Older Pytorch version only passes steps as input.
     @Bound.save_io_shape
@@ -4290,6 +4290,11 @@ class BoundSlice(Bound):
         if steps == -1:
             final = torch.flip(final, dims=tuple(axes))
         return final
+    
+    def interval_propagate(self, *v):       
+        lb = tuple(map(lambda x:x[0],v))
+        ub = tuple(map(lambda x:x[1],v))
+        return Interval.make_interval(self.forward(*lb), self.forward(*ub))
 
     def infer_batch_dim(self, batch_size, *x):
         if x[0] == -1:
