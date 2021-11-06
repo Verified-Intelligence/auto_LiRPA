@@ -1,0 +1,32 @@
+name: auto_LiRPA CI
+on: [push]
+jobs:
+  Tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create swap
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+      - name: Setup Python
+        uses: actions/setup-python@v2.2.2
+        with:
+          python-version: 3.8
+          architecture: x64
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - name: Install auto_LiRPA
+        run: python setup.py install
+      - name: Install dependencies for examples
+        run: |
+          cd examples 
+          pip install -r requirements.txt
+          cd ..
+      - name: Run tests
+        run: |
+          cd tests
+          python utils/download_models.py
+          pytest

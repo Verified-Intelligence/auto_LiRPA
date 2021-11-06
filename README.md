@@ -91,7 +91,9 @@ user-defined ranges.  We get guaranteed output ranges (bounds):
 ## Installation
 
 Python 3.7+ is required. Pytorch 1.8 (LTS) is recommended, although a newer
-version might also work. You can install `auto_LiRPA` via:
+version might also work. It is highly recommended to have a pre-installed PyTorch
+that matches your system and our version requirement. See [PyTorch Get Started](https://pytorch.org/get-started). 
+Then you can install `auto_LiRPA` via:
 
 ```bash
 git clone https://github.com/KaidiXu/auto_LiRPA
@@ -139,7 +141,6 @@ bounds for a 18-layer ResNet model on CIFAR-10 dataset. Once the ResNet model
 is defined as usual in Pytorch, obtaining provable output bounds is as easy as
 obtaining gradients through autodiff. Bounds are efficiently computed on GPUs.
 
-
 ## More Working Examples
 
 We provide a wide range of examples of using `auto_LiRPA`: 
@@ -151,7 +152,17 @@ We provide a wide range of examples of using `auto_LiRPA`:
 * [Certifiably Robust Language Classifier using **Transformers**](doc/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
 
-See also the [full documentation](https://auto-lirpa.readthedocs.io) with [API documentation](https://auto-lirpa.readthedocs.io/en/latest/api.html) for important functions and interfaces in `auto_LiRPA`. For reproducing [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920) result see this [guide](doc/paper.md).
+## Full Documentations
+
+For more documentations, please refer to:
+
+* [Documentation homepage](https://auto-lirpa.readthedocs.io)
+
+* [API documentation](https://auto-lirpa.readthedocs.io/en/latest/api.html)
+
+* [Adding custom operators](doc/custom_op.md)
+
+* [Guide](doc/paper.md) for reproducing [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920)
 
 ## Publications
 
@@ -170,20 +181,22 @@ ICLR 2021
 Kaidi Xu\*, Huan Zhang\*, Shiqi Wang, Yihan Wang, Suman Jana, Xue Lin and Cho-Jui Hsieh (\* Equal contribution)
 
 * [Beta-CROWN: Efficient Bound Propagation with Per-neuron Split Constraints for Complete and Incomplete Neural Network Verification](https://arxiv.org/pdf/2103.06624.pdf).  
-Shiqi Wang\*, Huan Zhang\*, Kaidi Xu\*, Suman Jana, Xue Lin and Cho-Jui Hsieh (\* Equal contribution)
-
+NeurIPS 2021  
+Shiqi Wang\*, Huan Zhang\*, Kaidi Xu\*, Suman Jana, Xue Lin, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution)
 
 
 ## Developers and Copyright
 
-| [Kaidi Xu](https://kaidixu.com/) | [Zhouxing Shi](https://shizhouxing.github.io/) | [Huan Zhang](https://huan-zhang.com/) | [Yihan Wang](mailto:yihanwang@ucla.edu) | [Shiqi Wang](https://www.cs.columbia.edu/~tcwangshiqi/) |
+| [Kaidi Xu](https://kaidixu.com/) | [Zhouxing Shi](https://shizhouxing.github.io/) | [Huan Zhang](https://huan-zhang.com/) | [Yihan Wang](https://yihanwang617.github.io/) | [Shiqi Wang](https://www.cs.columbia.edu/~tcwangshiqi/) |
 |:--:|:--:| :--:| :--:| :--:|
-| <img src="https://kaidixu.files.wordpress.com/2020/07/profile2-1.jpg" width="125" /> | <img src="https://shizhouxing.github.io/photo.jpg" width="125" height="125" /> | <img src="https://huan-zhang.appspot.com/images/Huan_Zhang_photo.jpg" width="125" /> | <img src="https://upload.wikimedia.org/wikipedia/commons/8/89/Portrait_Placeholder.png" width="125" height="125" /> | <img src="https://www.cs.columbia.edu/~tcwangshiqi/images/shiqiwang.jpg" width="125" /> |
+| <img src="https://kaidixu.files.wordpress.com/2020/07/profile2-1.jpg" width="125" /> | <img src="https://shizhouxing.github.io/photo.jpg" width="115" /> | <img src="https://huan-zhang.appspot.com/images/Huan_Zhang_photo.jpg" width="125" /> | <img src="https://upload.wikimedia.org/wikipedia/commons/8/89/Portrait_Placeholder.png" width="125" height="125" /> | <img src="https://www.cs.columbia.edu/~tcwangshiqi/images/shiqiwang.jpg" width="125" /> |
 
 * Kaidi Xu (xu.kaid@northeastern.edu): main developer
 * Zhouxing Shi (zshi@cs.ucla.edu): main developer
 * Huan Zhang (huan@huan-zhang.com): team lead
 * Yihan Wang (yihanwang@ucla.edu)
 * Shiqi Wang (sw3215@columbia.edu): contact for beta-CROWN
+
+We thank [commits](https://github.com/KaidiXu/auto_LiRPA/commits) and [pull requests](https://github.com/KaidiXu/auto_LiRPA/pulls) from community contributors.
 
 Our library is released under the BSD 3-Clause license.

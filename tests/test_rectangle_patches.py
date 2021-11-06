@@ -11,16 +11,35 @@ sys.path.append('../examples/vision')
 import models
 from testcase import TestCase
 
+class cnn_4layer_resnet(nn.Module):
+    def __init__(self):
+        super(cnn_4layer_resnet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 3, 4, stride=2, padding=1)
+        self.bn = nn.BatchNorm2d(3)
+        self.shortcut = nn.Conv2d(3, 3, 4, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(3, 3, 4, stride=2, padding=1)
+        self.fc1 = nn.Linear(168, 10)
+
+    def forward(self, x):
+        x_ = x
+        x = F.relu(self.conv1(self.bn(x)))
+        x += self.shortcut(x_)
+        x = F.relu(self.conv2(x))
+        x = x.view(x.size(0), -1)
+        print(x.size())
+        x = self.fc1(x)
+
+        return x
+
 class TestResnetPatches(TestCase): 
     def __init__(self, methodName='runTest', generate=False):
         super().__init__(methodName, 
-            seed=1234, ref_path='data/resnet_patches_test_data',
+            seed=1234, ref_path='data/rectangle_patches_test_data',
             generate=generate)
 
     def test(self):
         model_oris = [
-            models.model_resnet(width=1, mult=2),
-            models.ResNet18(in_planes=2)
+            cnn_4layer_resnet(),
         ]
         self.result = []
         if not self.generate:
@@ -36,6 +55,7 @@ class TestResnetPatches(TestCase):
             n_classes = 10
 
             image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
+            image = image[:, :, :28, :]
             image = image.to(torch.float32) / 255.0
 
             model = BoundedModule(model_ori, image, bound_opts={"conv_mode": conv_mode})

@@ -1,7 +1,4 @@
-
-
-
-# Examples for auto\_LiRPA library
+# Examples
 
 We provide many [examples](examples) of using our `auto_LiRPA` library,
 including robustness verification and certified robust training for fairly
@@ -113,7 +110,7 @@ python tinyimagenet_training.py --batch_size 100 --model wide_resnet_imagenet64
 ```
 
 For downscaled ImageNet, please download raw images (Train and Val, 64x64, npz format) from 
-[Image-Net.org](http://image-net.org/download-images) to `example/vision/data/ImageNet64/raw_data`,
+[Image-Net.org](http://image-net.org/download-images), under the "Download downsampled image data (32x32, 64x64)" section, to `example/vision/data/ImageNet64/raw_data`, 
 decompress them and then run data preprocessing:
 
 ```bash
@@ -199,7 +196,7 @@ python train.py --load=ckpt_transformer --robust --method=IBP+backward
 # Download and evaluate our trained LSTM
 wget http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_lstm
 python train.py --model=lstm --load=ckpt_lstm --robust --method=IBP+backward
-``` 
+```
 
 ## Certified Robustness against Model Weight Perturbations and Certified Defense
 
@@ -232,14 +229,6 @@ If you have an example based on `auto_LiRPA` that can be potentially helpful
 for other users, you are encouraged to create a pull request so that we can
 include your example here.  Any contributions from the community will be
 greatly appreciated.
-
-## Adding New/Customized Activation Functions
-
-This library is still under heavy development.  We are still working
-on implementing more primitive operations on computational graphs.  These
-operations are implemented in `auto_LiRPA/bound_ops.py`.  For example, if you
-add a custom activation function that is not supported by our framework, you
-can implement it in this file.
 
 ## BibTeX Entries
 

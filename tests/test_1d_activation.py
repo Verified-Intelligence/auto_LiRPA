@@ -6,7 +6,6 @@ from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import logger
 
-
 # Wrap the computation with a nn.Module
 class test_model(nn.Module):
     def __init__(self, act_func):

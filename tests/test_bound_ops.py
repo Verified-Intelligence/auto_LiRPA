@@ -1,4 +1,4 @@
-"""Test classes in auto_LiRPA/bound_ops.py"""
+"""Test classes for bound operators"""
 import torch
 import os
 from auto_LiRPA.bound_ops import *

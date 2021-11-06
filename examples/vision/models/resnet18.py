@@ -103,28 +103,9 @@ class ResNet(nn.Module):
         out = self.linear(out)
         return out
 
-
 def ResNet18(in_planes=64):
     return ResNet(BasicBlock, [2, 2, 2, 2], in_planes=in_planes)
-
-'''
-def ResNet34():
-    return ResNet(BasicBlock, [3, 4, 6, 3])
-
-
-def ResNet50():
-    return ResNet(Bottleneck, [3, 4, 6, 3])
-
-
-def ResNet101():
-    return ResNet(Bottleneck, [3, 4, 23, 3])
-
-
-def ResNet152():
-    return ResNet(Bottleneck, [3, 8, 36, 3])
-'''
-
-
+    
 if __name__ == "__main__":
     from thop import profile
     net = ResNet18(in_planes=64)

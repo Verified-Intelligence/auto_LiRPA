@@ -91,21 +91,6 @@ class DenseNet(nn.Module):
 
         return out
 
-# def DenseNet121():
-#     return DenseNet(Bottleneck, [6,12,24,16], growth_rate=32)
-#
-# def DenseNet169():
-#     return DenseNet(Bottleneck, [6,12,32,32], growth_rate=32)
-#
-# def DenseNet201():
-#     return DenseNet(Bottleneck, [6,12,48,32], growth_rate=32)
-#
-# def DenseNet161():
-#     return DenseNet(Bottleneck, [6,12,36,24], growth_rate=48)
-#
-# def Densenet_cifar():
-#     return DenseNet(Bottleneck, [2,4,6], growth_rate=16)
-
 def Densenet_cifar_32(in_ch=3, in_dim=32):
     return DenseNet(Bottleneck, [2,4,4], growth_rate=32)
 

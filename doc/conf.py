@@ -10,16 +10,18 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-# import os
+import os
+import subprocess
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
+subprocess.run(['python', 'parse_readme.py'])
 
 # -- Project information -----------------------------------------------------
 
 project = 'auto_LiRPA'
-copyright = '2021, <a href="https://github.com/KaidiXu/auto_LiRPA#developers-and-copyright">auto_LiRPA authors</a>'
-author = 'auto_LiRPA authors'
+author = '<a href="https://github.com/KaidiXu/auto_LiRPA#developers-and-copyright">auto-LiRPA authors</a>'
+copyright = f'2021, {author}'
 
 
 # -- General configuration ---------------------------------------------------

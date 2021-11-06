@@ -1,4 +1,4 @@
-"""Test classes in auto_LiRPA/bound_ops.py"""
+"""Test BoundConstant"""
 import torch
 import os
 import torch.nn as nn

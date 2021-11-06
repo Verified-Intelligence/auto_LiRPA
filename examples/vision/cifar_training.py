@@ -2,6 +2,7 @@ import argparse
 import multiprocessing
 import random
 import time
+import logging
 
 import torch.optim as optim
 import torchvision.datasets as datasets
@@ -14,18 +15,7 @@ from auto_LiRPA import BoundedModule, BoundedTensor, BoundDataParallel, CrossEnt
 from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.eps_scheduler import AdaptiveScheduler, FixedScheduler, SmoothedScheduler
 from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import MultiAverageMeter
-
-
-class Logger(object):
-    def __init__(self, log_file=None):
-        self.log_file = log_file
-
-    def log(self, *args, **kwargs):
-        print(*args, **kwargs)
-        if self.log_file:
-            print(*args, **kwargs, file=self.log_file)
-            self.log_file.flush()
+from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
 
 def get_exp_module(bounded_module):
     for _, node in bounded_module.named_modules():
@@ -34,9 +24,7 @@ def get_exp_module(bounded_module):
             return node
     return None
 
-
 parser = argparse.ArgumentParser()
-# python cifar_training.py --bound_type=IBP --model=cnn_6layer 
 
 parser.add_argument("--verify", action="store_true", help='verification mode, do not train')
 parser.add_argument("--no_loss_fusion", action="store_true", help='without loss fusion, slower training mode')
@@ -62,15 +50,12 @@ parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope
                     help='bound options for relu')
 parser.add_argument('--clip_grad_norm', type=float, default=8.0)
 
-
 args = parser.parse_args()
 exp_name = args.model + '_b' + str(args.batch_size) + '_' + str(args.bound_type) + '_epoch' + str(args.num_epochs) + '_' + args.scheduler_opts + '_' + str(args.eps)[:6]
 os.makedirs('saved_models/', exist_ok=True)
-if args.verify:
-    logger = Logger(open('saved_models/' + exp_name + '_test.log', "w"))
-else:
-    logger = Logger(open('saved_models/' + exp_name + '.log', "w"))
-
+log_file = f'saved_models/{exp_name}{"_test" if args.verify else ""}.log'
+file_handler = logging.FileHandler(log_file)
+logger.addHandler(file_handler) 
 
 def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust', loss_fusion=True, final_node_name=None):
     num_class = 10
@@ -161,11 +146,8 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             x = (x, labels)
             c = None
         else:
-            c = torch.eye(num_class).type_as(data)[labels].unsqueeze(1) - torch.eye(num_class).type_as(data).unsqueeze(
-                0)
-            # remove specifications to self
-            I = (~(labels.data.unsqueeze(1) == torch.arange(num_class).type_as(labels.data).unsqueeze(0)))
-            c = (c[I].view(data.size(0), num_class - 1, num_class))
+            # Generate speicification matrix (when loss fusion is not used).
+            c = get_spec_matrix(data, labels, num_class)
             x = (x,) if final_node_name is None else (x, labels)
             output = model(x, final_node_name=final_node_name)
             regular_ce = CrossEntropyLoss()(output, labels)  # regular CrossEntropyLoss used for warming up
@@ -209,9 +191,9 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
         meter.update('Time', time.time() - start)
 
         if (i + 1) % 50 == 0 and train:
-            logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
+            logger.info('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
 
-    logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
+    logger.info('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
     return meter
 
 
@@ -238,7 +220,7 @@ def main(args):
         for k, v in state_dict.items():
             assert torch.isnan(v).any().cpu().numpy() == 0 and torch.isinf(v).any().cpu().numpy() == 0
         model_ori.load_state_dict(state_dict)
-        logger.log('Checkpoint loaded: {}'.format(args.load))
+        logger.info('Checkpoint loaded: {}'.format(args.load))
 
     ## Step 2: Prepare dataset as usual
     if args.data == 'MNIST':
@@ -281,14 +263,14 @@ def main(args):
     model_loss = BoundDataParallel(model_loss)
 
     macs, params = profile(model_ori, (dummy_input.cuda(),))
-    logger.log('macs: {}, params: {}'.format(macs, params))
+    logger.info('macs: {}, params: {}'.format(macs, params))
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model_loss.parameters(), lr=args.lr)
     norm = float(args.norm)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=args.lr_decay_rate)
     eps_scheduler = eval(args.scheduler_name)(args.eps, args.scheduler_opts)
-    logger.log(str(model_ori))
+    logger.info(str(model_ori))
 
     # skip epochs
     if epoch > 0:
@@ -300,12 +282,12 @@ def main(args):
             eps_scheduler.step_epoch(verbose=True)
             for j in range(epoch_length):
                 eps_scheduler.step_batch()
-        logger.log('resume from eps={:.12f}'.format(eps_scheduler.get_eps()))
+        logger.info('resume from eps={:.12f}'.format(eps_scheduler.get_eps()))
 
     if args.load:
         if opt_state:
             opt.load_state_dict(opt_state)
-            logger.log('resume opt_state')
+            logger.info('resume opt_state')
 
     ## Step 5: start training
     if args.verify:
@@ -317,15 +299,15 @@ def main(args):
         best_err = 1e10
         # with torch.autograd.detect_anomaly():
         for t in range(epoch + 1, args.num_epochs+1):
-            logger.log("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
+            logger.info("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
             start_time = time.time()
             Train(model_loss, t, train_data, eps_scheduler, norm, True, opt, args.bound_type, loss_fusion=not args.no_loss_fusion)
             lr_scheduler.step()
             epoch_time = time.time() - start_time
             timer += epoch_time
-            logger.log('Epoch time: {:.4f}, Total time: {:.4f}'.format(epoch_time, timer))
+            logger.info('Epoch time: {:.4f}, Total time: {:.4f}'.format(epoch_time, timer))
 
-            logger.log("Evaluating...")
+            logger.info("Evaluating...")
             torch.cuda.empty_cache()
 
             # remove 'model.' in state_dict for CrossEntropyWrapper
@@ -361,5 +343,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    logger.log(args)
+    logger.info(args)
     main(args)

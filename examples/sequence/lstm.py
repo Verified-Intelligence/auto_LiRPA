@@ -42,15 +42,11 @@ class LSTM(nn.Module):
         if not os.path.exists(self.dir):
             os.makedirs(self.dir)
         self.checkpoint = 0
-        if os.path.exists(os.path.join(self.dir, "checkpoint")):
-            with open(os.path.join(self.dir, "checkpoint")) as file:
-                self.checkpoint = int(file.readline())
-            dir_ckpt = os.path.join(self.dir, "ckpt-{}".format(self.checkpoint))
-            path = os.path.join(dir_ckpt, "model")
-            self.model = torch.load(path)
-            logger.info("Model loaded: {}".format(dir_ckpt))
+        self.model = LSTMCore(args)
+        if args.load:
+            self.model.load_state_dict(args.load)
+            logger.info(f"Model loaded: {args.load}")
         else:
-            self.model = LSTMCore(args)
             logger.info("Model initialized")
         self.model = self.model.to(self.device)
         self.core = self.model
@@ -60,13 +56,10 @@ class LSTM(nn.Module):
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
         os.mkdir(output_dir)
-
         path = os.path.join(output_dir, "model")
-        torch.save(self.core, path)
-
+        torch.save(self.core.state_dict(), path)
         with open(os.path.join(self.dir, "checkpoint"), "w") as file: 
             file.write(str(epoch))
-
         logger.info("LSTM saved: %s" % output_dir)
 
     def build_optimizer(self):

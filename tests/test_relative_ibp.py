@@ -1,4 +1,4 @@
-"""Test classes in auto_LiRPA/bound_ops.py"""
+"""Test IBP with relative bounds"""
 import torch
 import os
 import torch.nn as nn

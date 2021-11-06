@@ -27,7 +27,7 @@ class TestWeightPerturbation(TestCase):
             cwd='../examples/vision', capture_output=True)
         self.assertEqual(ret.returncode, 0, ret.stderr)
         res_test = ret.stdout.decode().split('\n')[-2].split(' ')
-        assert abs(float(res_test[8].split('=')[1]) - 2.246) < 0.01
+        assert abs(float(res_test[-3].split('=')[1]) - 2.246) < 0.01
 
     def verify_bounds(self, model, x, IBP, method, forward_ret, lb_name, ub_name):
         lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
@@ -36,8 +36,8 @@ class TestWeightPerturbation(TestCase):
 
         assert torch.allclose(self.reference[lb_name], self.result[lb_name], 1e-4, 1e-6)
         assert torch.allclose(self.reference[ub_name], self.result[ub_name], 1e-4, 1e-6)
-        assert ((self.reference[lb_name] - self.result[lb_name]).pow(2).sum() < 1e-9)
-        assert ((self.reference[ub_name] - self.result[ub_name]).pow(2).sum() < 1e-9)
+        assert ((self.reference[lb_name] - self.result[lb_name]).pow(2).sum() < 1e-8)
+        assert ((self.reference[ub_name] - self.result[ub_name]).pow(2).sum() < 1e-8)
 
         # test gradient backward propagation
         loss = (ub - lb).abs().sum()
@@ -89,3 +89,9 @@ class TestWeightPerturbation(TestCase):
 
         if self.generate:
             self.save()
+
+if __name__ == '__main__':
+    testcase = TestWeightPerturbation()
+    testcase.setUp()
+    testcase.test_perturbation()
+    testcase.test_training()

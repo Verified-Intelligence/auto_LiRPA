@@ -7,10 +7,11 @@ import numpy as np
 from lstm import LSTM
 from data_utils import load_data, get_batches
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
-from auto_LiRPA.utils import AverageMeter, logger
+from auto_LiRPA.utils import AverageMeter, logger, get_spec_matrix
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--load", type=str, default=None)
 parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
 parser.add_argument("--norm", type=int, default=np.inf)
 parser.add_argument("--eps", type=float, default=0.1)
@@ -38,10 +39,7 @@ def step(model, ptb, batch, eps=args.eps, train=False):
 
     # Form the linear speicifications, which are margins of ground truth class and other classes.
     num_class = args.num_classes
-    c = torch.eye(num_class).type_as(X)[y].unsqueeze(1) - \
-        torch.eye(num_class).type_as(X).unsqueeze(0)
-    I = (~(y.data.unsqueeze(1) == torch.arange(num_class).type_as(y.data).unsqueeze(0)))
-    c = (c[I].view(X.size(0), num_class - 1, num_class))
+    c = get_spec_matrix(X, y, num_class)
 
     # Compute CROWN-IBP (IBP+backward) bounds for training. We only need the lower bound.
     # Here we can omit the x=(X,) argument because we have just used X for forward propagation.

@@ -12,28 +12,17 @@ See our paper https://arxiv.org/abs/2002.12920 for more details.
 import random
 import time
 import argparse
+import logging
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from auto_LiRPA import BoundedModule, CrossEntropyWrapper, BoundDataParallel, BoundedParameter
 from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import MultiAverageMeter
+from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
 from datasets import mnist_loaders
 import torchvision.datasets as datasets
 import models
 from auto_LiRPA.eps_scheduler import LinearScheduler, AdaptiveScheduler, SmoothedScheduler, FixedScheduler
-
-
-class Logger(object):
-    def __init__(self, log_file=None):
-        self.log_file = log_file
-
-    def log(self, *args, **kwargs):
-        print(*args, **kwargs)
-        if self.log_file:
-            print(*args, **kwargs, file=self.log_file)
-            self.log_file.flush()
-
 
 def get_exp_module(bounded_module):
     for _, node in bounded_module.named_modules():
@@ -41,7 +30,6 @@ def get_exp_module(bounded_module):
         if isinstance(node, BoundExp):
             return node
     return None
-
 
 parser = argparse.ArgumentParser()
 
@@ -69,15 +57,12 @@ parser.add_argument('--clip_grad_norm', type=float, default=8.0)
 parser.add_argument('--truncate_data', type=int, help='Truncate the training/test batches in unit test')
 parser.add_argument('--multigpu', action='store_true', help='MultiGPU training')
 
-
 num_class = 10
 args = parser.parse_args()
 exp_name = 'mlp_MNIST'+'_b'+str(args.batch_size)+'_'+str(args.bound_type)+'_epoch'+str(args.num_epochs)+'_'+args.scheduler_opts+'_'+str(args.eps)[:6]
-if args.verify:
-    logger = Logger(open(exp_name + '_test.log', "w"))
-else:
-    logger = Logger(open(exp_name+'.log', "w"))
-
+log_file = f'{exp_name}{"_test" if args.verify else ""}.log'
+file_handler = logging.FileHandler(log_file)
+logger.addHandler(file_handler) 
 
 ## Training one epoch.
 def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust', loss_fusion=True, final_node_name=None):
@@ -160,11 +145,7 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             c = None
         else:
             # Generate speicification matrix (when loss fusion is not used).
-            c = torch.eye(num_class).type_as(data)[labels].unsqueeze(1) - torch.eye(num_class).type_as(data).unsqueeze(
-                0)
-            # remove specifications to self.
-            I = (~(labels.data.unsqueeze(1) == torch.arange(num_class).type_as(labels.data).unsqueeze(0)))
-            c = (c[I].view(data.size(0), num_class - 1, num_class))
+            c = get_spec_matrix(data, labels, num_class)
             x = (x, labels)
             output = model(x, final_node_name=final_node_name)
             regular_ce = CrossEntropyLoss()(output, labels)  # regular CrossEntropyLoss used for warming up
@@ -198,9 +179,9 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
         meter.update('Time', time.time() - start)
 
         if (i + 1) % 50 == 0 and train:
-            logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
+            logger.info('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
 
-    logger.log('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
+    logger.info('[{:2d}:{:4d}]: eps={:.12f} {}'.format(t, i + 1, eps, meter))
     return meter
 
 
@@ -226,7 +207,7 @@ def main(args):
         for k, v in state_dict.items():
             assert torch.isnan(v).any().cpu().numpy() == 0 and torch.isinf(v).any().cpu().numpy() == 0
         model_ori.load_state_dict(state_dict)
-        logger.log('Checkpoint loaded: {}'.format(args.load))
+        logger.info('Checkpoint loaded: {}'.format(args.load))
 
     ## Step 2: Prepare dataset as usual
     dummy_input = torch.randn(2, 1, 28, 28)
@@ -257,7 +238,7 @@ def main(args):
     norm = float(args.norm)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=args.lr_decay_milestones, gamma=0.1)
     eps_scheduler = eval(args.scheduler_name)(args.eps, args.scheduler_opts)
-    logger.log(str(model_ori))
+    logger.info(str(model_ori))
 
     # Skip epochs if we continue training from a checkpoint.
     if epoch > 0:
@@ -269,12 +250,12 @@ def main(args):
             eps_scheduler.step_epoch(verbose=True)
             for j in range(epoch_length):
                 eps_scheduler.step_batch()
-        logger.log('resume from eps={:.12f}'.format(eps_scheduler.get_eps()))
+        logger.info('resume from eps={:.12f}'.format(eps_scheduler.get_eps()))
 
     if args.load:
         if opt_state:
             opt.load_state_dict(opt_state)
-            logger.log('resume opt_state')
+            logger.info('resume opt_state')
 
     ## Step 5: start training.
     if args.verify:
@@ -286,7 +267,7 @@ def main(args):
         best_loss = 1e10
         # Main training loop
         for t in range(epoch + 1, args.num_epochs+1):
-            logger.log("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
+            logger.info("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
             start_time = time.time()
 
             # Training one epoch
@@ -294,9 +275,9 @@ def main(args):
             lr_scheduler.step()
             epoch_time = time.time() - start_time
             timer += epoch_time
-            logger.log('Epoch time: {:.4f}, Total time: {:.4f}'.format(epoch_time, timer))
+            logger.info('Epoch time: {:.4f}, Total time: {:.4f}'.format(epoch_time, timer))
 
-            logger.log("Evaluating...")
+            logger.info("Evaluating...")
             torch.cuda.empty_cache()
 
             # remove 'model.' in state_dict (hack for saving models so far...)

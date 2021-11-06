@@ -9,8 +9,12 @@ Documentation for `auto_LiRPA <https://github.com/KaidiXu/auto_LiRPA>`_
 .. toctree::
    :hidden:
 
+   sections/installation
+   sections/quick-start
+   examples
    api
-
+   custom_op
+   paper
 
 .. raw:: html
 
@@ -19,12 +23,14 @@ Documentation for `auto_LiRPA <https://github.com/KaidiXu/auto_LiRPA>`_
    <a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_1.png" width="45%" height="45%" float="right"></a>
    </p>
 
-.. mdinclude:: introduction.md
+.. mdinclude:: sections/introduction.md
 
 Usage
 -----
 
-* `Installation <https://github.com/KaidiXu/auto_LiRPA#installation>`_
-* `Quick Start <https://github.com/KaidiXu/auto_LiRPA#quick-start>`_
-* `More Working Examples <https://github.com/KaidiXu/auto_LiRPA#more-working-examples>`_
+* :doc:`Installation <sections/installation>`
+* :doc:`Quick Start <sections/quick-start>`
+* :doc:`More Working Examples <examples>`
 * :doc:`API Usage <api>`
+* :doc:`Custom Operators <custom_op>`
+* :doc:`Reproducing our NeurIPS 2020 paper <paper>`
