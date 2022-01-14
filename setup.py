@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+import sys
 
 """Check PyTorch version"""
 pytorch_version_l = "1.8.0"
@@ -22,6 +23,13 @@ with open('auto_LiRPA/__init__.py') as file:
         if '__version__' in line:
             version = eval(line.strip().split()[-1])
 
+assert sys.version_info.major == 3, 'Python 3 is required'
+if sys.version_info.minor < 8:
+    # numpy 1.22 requires Python 3.8+
+    numpy_requirement = 'numpy>=1.16,<=1.21'
+else:
+    numpy_requirement = 'numpy>=1.16'
+
 print(f'Installing auto_LiRPA {version}')
 setup(
     name='auto_LiRPA',
@@ -34,7 +42,7 @@ setup(
     install_requires=[
         f'torch>={pytorch_version_l},<{pytorch_version_u}',
         'torchvision>=0.9,<0.10',
-        'numpy>=1.16',
+        numpy_requirement,
         'packaging>=20.0',
         'pytest>=5.0',
         'appdirs>=1.4',

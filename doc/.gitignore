@@ -1,2 +1,5 @@
 _build
 sections
+*.md
+!src/*.md
+!README.md

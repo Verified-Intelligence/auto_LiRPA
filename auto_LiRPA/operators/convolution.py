@@ -490,8 +490,8 @@ class BoundGlobalAveragePool(Bound):
     def bound_backward(self, last_lA, last_uA, x):
         H, W = self.input_shape[-2], self.input_shape[-1]
 
-        lA = last_lA.expand(list(last_lA.shape[:-2]) + [H, W]) / (H * W)
-        uA = last_uA.expand(list(last_lA.shape[:-2]) + [H, W]) / (H * W)
+        lA = (last_lA.expand(list(last_lA.shape[:-2]) + [H, W]) / (H * W)) if last_lA is not None else None
+        uA = (last_uA.expand(list(last_uA.shape[:-2]) + [H, W]) / (H * W)) if last_uA is not None else None
 
         return [(lA, uA)], 0, 0
 

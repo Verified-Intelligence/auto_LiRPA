@@ -18,6 +18,8 @@ API Usage
    .. autofunction:: auto_LiRPA.perturbations.Perturbation.concretize
    .. autofunction:: auto_LiRPA.perturbations.Perturbation.init
 
+.. autofunction:: auto_LiRPA.bound_op_map.register_custom_op
+   
 Indices and tables
 -------------------
 

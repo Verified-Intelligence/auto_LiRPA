@@ -14,13 +14,12 @@
 ## What's New?
 
 - Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) **won** [VNN-COMP 2021](https://sites.google.com/view/vnn2021) **with the highest total score**, outperforming 11 SOTA verifiers. α,β-CROWN uses the `auto_LiRPA` library as its core bound computation library.
+- Support for [custom operators](https://auto-lirpa.readthedocs.io/en/latest/custom_op.html). (01/02/2022) 
 - [Optimized CROWN/LiRPA](https://arxiv.org/pdf/2011.13824.pdf) bound (α-CROWN) for ReLU, **sigmoid**, **tanh**, and **maxpool** activation functions, which can significantly outperform regular CROWN bounds. See [simple_verification.py](examples/vision/simple_verification.py#L59) for an example. (07/31/2021)
 - Handle split constraints for ReLU neurons ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for complete verifiers. (07/31/2021)
 - A memory efficient GPU implementation of backward (CROWN) bounds for 
 convolutional layers. (10/31/2020)
-- Certified defense models for downscaled
-[ImageNet](#imagenet-pretrained), [TinyImageNet](#imagenet-pretrained), [CIFAR-10](#cifar10-pretrained),
-and [LSTM/Transformers](#language-pretrained). (08/20/2020)
+- Certified defense models for downscaled ImageNet, TinyImageNet, CIFAR-10, LSTM/Transformer. (08/20/2020)
 - Adding support to **complex vision models** including DenseNet, ResNeXt and WideResNet. (06/30/2020)
 - **Loss fusion**, a technique that reduces training cost of tight LiRPA bounds 
 (e.g. CROWN-IBP) to the same asympototic complexity of IBP, making LiRPA based certified 
@@ -143,26 +142,23 @@ obtaining gradients through autodiff. Bounds are efficiently computed on GPUs.
 
 ## More Working Examples
 
-We provide a wide range of examples of using `auto_LiRPA`: 
+We provide [a wide range of examples](doc/src/examples.md) of using `auto_LiRPA`: 
 
-* [Basic Bound Computation and **Robustness Verification** of Neural Networks](doc/examples.md#basic-bound-computation-and-robustness-verification-of-neural-networks)
-* [Basic **Certified Adversarial Defense** Training](doc/examples.md#basic-certified-adversarial-defense-training)
-* [Large-scale Certified Defense Training on **ImageNet**](doc/examples.md#certified-adversarial-defense-on-downscaled-imagenet-and-tinyimagenet-with-loss-fusion)
-* [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
-* [Certifiably Robust Language Classifier using **Transformers**](doc/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
-* [Certified Robustness against **Model Weight Perturbations**](doc/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
+* [Basic Bound Computation and **Robustness Verification** of Neural Networks](doc/src/examples.md#basic-bound-computation-and-robustness-verification-of-neural-networks)
+* [Basic **Certified Adversarial Defense** Training](doc/src/examples.md#basic-certified-adversarial-defense-training)
+* [Large-scale Certified Defense Training on **ImageNet**](doc/src/examples.md#certified-adversarial-defense-on-downscaled-imagenet-and-tinyimagenet-with-loss-fusion)
+* [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/src/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
+* [Certifiably Robust Language Classifier using **Transformers**](doc/src/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
+* [Certified Robustness against **Model Weight Perturbations**](doc/src/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
 
 ## Full Documentations
 
 For more documentations, please refer to:
 
 * [Documentation homepage](https://auto-lirpa.readthedocs.io)
-
 * [API documentation](https://auto-lirpa.readthedocs.io/en/latest/api.html)
-
-* [Adding custom operators](doc/custom_op.md)
-
-* [Guide](doc/paper.md) for reproducing [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920)
+* [Adding custom operators](https://auto-lirpa.readthedocs.io/en/latest/custom_op.html)
+* [Guide](https://auto-lirpa.readthedocs.io/en/latest/paper.html) for reproducing [our NeurIPS 2020 paper](https://arxiv.org/abs/2002.12920)
 
 ## Publications
 

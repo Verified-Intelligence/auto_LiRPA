@@ -1,4 +1,7 @@
+
 # Documentation
+
+This directory contains source files for building our documentation.
 
 ## Dependencies
 
@@ -17,4 +20,3 @@ make html
 ```
 
 The documentation will be generated at `_build/html`.
-

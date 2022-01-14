@@ -1,6 +1,6 @@
 # Examples
 
-We provide many [examples](examples) of using our `auto_LiRPA` library,
+We provide many [examples](../../examples) of using our `auto_LiRPA` library,
 including robustness verification and certified robust training for fairly
 complicated networks and specifications. Please first install required libraries
 to run the examples:
@@ -13,7 +13,7 @@ pip install -r requirements.txt
 ## Basic Bound Computation and Robustness Verification of Neural Networks
 
 We provide a very simple tutorial for `auto_LiRPA` at
-[examples/vision/simple_verification.py](examples/vision/simple_verification.py).
+[examples/vision/simple_verification.py](../../examples/vision/simple_verification.py).
 This script is self-contained. It loads a simple CNN model and compute the
 guaranteed lower and upper bounds using LiRPA for each output neuron under a L
 infinity perturbation.
@@ -34,7 +34,7 @@ can be obtained using α-CROWN within a few seconds.
 ## Basic Certified Adversarial Defense Training
 
 We provide a [simple example of certified
-training](examples/vision/simple_training.py). By default it uses
+training](../../examples/vision/simple_training.py). By default it uses
 [CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf) to train a certifiably robust
 model:
 
@@ -59,17 +59,17 @@ python simple_training.py --model mlp_3layer --norm 0 --eps 1
 ```
 
 For CIFAR-10, we provided some sample models in `examples/vision/models`:
-e.g., [cnn_7layer_bn](./examples/vision/models/feedforward.py),
-[DenseNet](./examples/vision/models/densenet.py),
-[ResNet18](./examples/vision/models/resnet18.py),
-[ResNeXt](./examples/vision/models/resnext.py). For example, to train a ResNeXt model on CIFAR,
+e.g., [cnn_7layer_bn](../../examples/vision/models/feedforward.py),
+[DenseNet](../../examples/vision/models/densenet.py),
+[ResNet18](../../examples/vision/models/resnet18.py),
+[ResNeXt](../../examples/vision/models/resnext.py). For example, to train a ResNeXt model on CIFAR,
 use:
 
 ```bash
 python cifar_training.py --batch_size 256 --model ResNeXt_cifar
 ```
 
-See a list of supported models [here](./examples/vision/models/__init__.py).
+See a list of supported models [here](../../examples/vision/models/__init__.py).
 This command uses multi-GPUs by default. You probably need to reduce batch size
 if you have only 1 GPU. The CIFAR training implementation includes **loss
 fusion**, a technique that can greatly reduce training time and memory usage of
@@ -85,7 +85,7 @@ python cifar_training.py --verify  --model cnn_7layer_bn --load saved_models/cnn
 ```
 
 More example of CIFAR-10 training can be found
-in [doc/paper.md](doc/paper.md).
+in [doc/paper.md](paper.md).
 
 
 ## Certified Adversarial Defense on Downscaled ImageNet and TinyImageNet with Loss Fusion
@@ -139,12 +139,12 @@ MODEL=saved_models/wide_resnet_imagenet64_1000
 python imagenet_training.py --verify --model wide_resnet_imagenet64_1000class --load $MODEL --eps 0.003921568627451
 ```
 
-See more details in [doc/paper.md](doc/paper.md) for these examples.
+See more details in [paper.md](paper.md) for these examples.
 
 
 ## Certified Adversarial Defense Training for LSTM on MNIST
 
-In [examples/sequence](examples/sequence), we have an example of training a
+In [examples/sequence](../../examples/sequence), we have an example of training a
 certifiably robust LSTM on MNIST, where an input image is perturbed within an
 Lp-ball and sliced to several pieces each regarded as an input frame. To run
 the example:
@@ -156,7 +156,7 @@ python train.py
 
 ## Certifiably Robust Language Classifier with Transformer and LSTM
 
-In [examples/language](examples/language),  we show that our framework can
+In [examples/language](../../examples/language),  we show that our framework can
 support perturbation specification of word substitution, beyond Lp-ball
 perturbation. We perform certified training for Transformer and LSTM on a
 sentiment classification task. 
