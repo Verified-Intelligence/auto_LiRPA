@@ -432,7 +432,7 @@ class PerturbationSynonym(Perturbation):
         batch_size, length, dim_word = x.shape[0], x.shape[1], x.shape[2]
 
         max_pos = 1
-        can_be_replaced = np.zeros((batch_size, length), dtype=np.bool)
+        can_be_replaced = np.zeros((batch_size, length), dtype=bool)
 
         self._build_substitution(batch)
 
