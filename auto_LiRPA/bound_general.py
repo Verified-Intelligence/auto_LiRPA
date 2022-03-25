@@ -1179,7 +1179,7 @@ class BoundedModule(nn.Module):
 
         # check whether weights are perturbed and set nonlinear for the BoundMatMul operation
         for n in self._modules.values():
-            if isinstance(n, (BoundLinear, BoundConv, BoundBatchNormalization)):
+            if type(n) in [BoundLinear, BoundConv, BoundBatchNormalization]:
                 n.nonlinear = False
                 for l_name in n.input_name[1:]:
                     node = self._modules[l_name]
