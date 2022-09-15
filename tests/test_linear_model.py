@@ -1,4 +1,4 @@
-# Test bounds on a 1 layer linear network.
+"""Test bounds on a 1 layer linear network."""
 
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor
@@ -17,7 +17,7 @@ class LinearModel(nn.Module):
         x = self.fc(x)
         return x
 
-class TestLinearModel(TestCase): 
+class TestLinearModel(TestCase):
     def __init__(self, methodName='runTest', generate=False):
         super().__init__(methodName, seed=0)
         self.original_model = LinearModel()

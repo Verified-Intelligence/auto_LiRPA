@@ -1,9 +1,9 @@
 """Test classes for bound operators"""
 import torch
-import os
 from auto_LiRPA.bound_ops import *
-from auto_LiRPA.utils import LinearBound
+from auto_LiRPA.linear_bound import LinearBound
 from testcase import TestCase
+
 
 """Dummy node for testing"""
 class Dummy:
@@ -36,10 +36,9 @@ class TestBoundOp(TestCase):
         dummy_bias = Dummy(bias)
 
         op = BoundLinear(
-            input_name=[None, None, None], 
-            name=None, ori_name=None, attr=None, 
+            attr={}, 
             inputs=[dummy_in, dummy_weight, dummy_bias],
-            output_index=0, options={}, device=device)
+            output_index=0, options={})
 
         # test `forward`
         data_out = op(data_in, weight, bias)

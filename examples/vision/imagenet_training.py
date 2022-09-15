@@ -54,7 +54,7 @@ exp_name = args.model + '_b' + str(args.batch_size) + '_' + str(args.bound_type)
     args.num_epochs) + '_' + args.scheduler_opts + '_' + str(args.eps)[:6]
 log_file = f'saved_models/{exp_name}{"_test" if args.verify else ""}.log'
 file_handler = logging.FileHandler(log_file)
-logger.addHandler(file_handler) 
+logger.addHandler(file_handler)
 
 def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust', loss_fusion=True,
           final_node_name=None):

@@ -43,10 +43,14 @@ def train():
         os.system("rm -rf ../examples/language/model_transformer_test")
     if os.path.exists("../examples/language/model_lstm_test"):
         os.system("rm -rf ../examples/language/model_lstm_test")
-    logger.info("Training a Transformer")
+    logger.info("\nTraining a Transformer")
+    print(cmd_transformer_train)
+    print()
     os.system(cmd_transformer_train)
     os.system("cp ../examples/language/model_transformer_test/ckpt_2 data/ckpt_transformer")
-    logger.info("Training an LSTM")
+    logger.info("\nTraining an LSTM")
+    print(cmd_lstm_train)
+    print()
     os.system(cmd_lstm_train)
     os.system("cp ../examples/language/model_lstm_test/ckpt_2 data/ckpt_lstm")
 
@@ -55,10 +59,14 @@ def read_res():
         return pickle.load(file)
 
 def evaluate():
-    logger.info('Evaluating the trained LSTM')
+    logger.info('\nEvaluating the trained LSTM')
+    print(cmd_lstm_test)
+    print()
     os.system(cmd_lstm_test)
     res_lstm = read_res()
-    logger.info('Evaluating the trained Transformer')
+    logger.info('\nEvaluating the trained Transformer')
+    print(cmd_transformer_test)
+    print()
     os.system(cmd_transformer_test)
     res_transformer = read_res()    
     os.system("rm {}".format(res_path))

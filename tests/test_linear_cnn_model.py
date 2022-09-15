@@ -1,4 +1,4 @@
-# Test bounds on a 1 layer CNN network.
+"""Test bounds on a 1 layer CNN network."""
 
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor
@@ -19,7 +19,7 @@ class LinearCNNModel(nn.Module):
         x = x.view(-1, input_dim //2 * input_dim // 2 * out_channel)
         return x
 
-class TestLinearCNNModel(TestLinearModel): 
+class TestLinearCNNModel(TestLinearModel):
     def __init__(self, methodName='runTest', generate=False):
         super().__init__(methodName)
         self.original_model = LinearCNNModel()

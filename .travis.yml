@@ -3,8 +3,10 @@ python:
   - "3.8"
 install:
   - pip install --editable .
-  - cd examples 
+  - cd examples
   - pip install -r requirements.txt
+  - pip install git+https://github.com/KaidiXu/onnx2pytorch.git
+  - pip install onnxruntime
   - cd ..
   - sudo fallocate -l 16G /swapfile
   - sudo chmod 600 /swapfile
@@ -14,4 +16,5 @@ install:
 script:
   - cd tests
   - python utils/download_models.py
-  - pytest 
+  - pytest
+  - cd ..

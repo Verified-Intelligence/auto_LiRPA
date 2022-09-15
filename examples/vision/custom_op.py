@@ -1,7 +1,7 @@
 """ A example for custom operators.
 
-In this example, we create a custom operator called "PlusConstant", which can 
-be written as "f(x) = x + c" for some constant "c" (an attribute of the operator). 
+In this example, we create a custom operator called "PlusConstant", which can
+be written as "f(x) = x + c" for some constant "c" (an attribute of the operator).
 """
 import torch
 import torch.nn as nn
@@ -11,22 +11,22 @@ from auto_LiRPA.operators import Bound
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import Flatten
 
-""" Step 1: Define a `torch.autograd.Function` class to declare and implement the 
+""" Step 1: Define a `torch.autograd.Function` class to declare and implement the
 computation of the operator. """
 class PlusConstantOp(torch.autograd.Function):
     @staticmethod
     def symbolic(g, x, const):
         """ In this function, define the arguments and attributes of the operator.
         "custom::PlusConstant" is the name of the new operator, "x" is an argument
-        of the operator, "const_i" is an attribute which stands for "c" in the operator. 
-        There can be multiple arguments and attributes. For attribute naming, 
-        use a suffix such as "_i" to specify the data type, where "_i" stands for 
+        of the operator, "const_i" is an attribute which stands for "c" in the operator.
+        There can be multiple arguments and attributes. For attribute naming,
+        use a suffix such as "_i" to specify the data type, where "_i" stands for
         integer, "_t" stands for tensor, "_f" stands for float, etc. """
         return g.op('custom::PlusConstant', x, const_i=const)
 
     @staticmethod
     def forward(ctx, x, const):
-        """ In this function, implement the computation for the operator, i.e., 
+        """ In this function, implement the computation for the operator, i.e.,
         f(x) = x + c in this case. """
         return x + const
 
@@ -43,9 +43,9 @@ class PlusConstant(nn.Module):
 
 """ Step 3: Implement a Bound class to support bound computation for the new operator. """
 class BoundPlusConstant(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+    def __init__(self, attr, inputs, output_index, options):
         """ `const` is an attribute and can be obtained from the dict `attr` """
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        super().__init__(attr, inputs, output_index, options)
         self.const = attr['const']
 
     def forward(self, x):
@@ -67,7 +67,7 @@ class BoundPlusConstant(Bound):
             bias = last_A.sum(dim=list(range(2, last_A.ndim))) * self.const
             return A, bias
         lA, lbias = _bound_oneside(last_lA)
-        uA, ubias = _bound_oneside(last_uA)
+        uA, ubias = _bound_oneside(last_lA)
         return [(lA, uA)], lbias, ubias
 
     def interval_propagate(self, *v):

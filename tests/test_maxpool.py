@@ -1,82 +1,120 @@
+"""Test max pooling."""
+
 import torch
 import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.perturbations import *  
+from auto_LiRPA.perturbations import *
+from auto_LiRPA.utils import Flatten
 from testcase import TestCase
 
-class Flatten(nn.Module):
-    def __init__(self):
-        super(Flatten, self).__init__()
-    
-    def forward(self, x):
-        return x.view((x.shape[0], -1))
+def MadryCNN():
+    return nn.Sequential(
+        nn.Conv2d(1, 32, 5, stride=1, padding=2),
+        nn.ReLU(),
+        nn.MaxPool2d(2, stride=2),
+        nn.Conv2d(32, 64, 5, stride=1, padding=2),
+        nn.ReLU(),
+        nn.MaxPool2d(2, stride=2),
+        Flatten(),
+        nn.Linear(64*7*7,1024),
+        nn.ReLU(),
+        nn.Linear(1024, 10)
+    )
 
 class Model(nn.Module):
-  def __init__(self):
-    super(Model, self).__init__()
-    self.n_n_conv2d = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 32, 'padding': [0, 0], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
-    self.n_n_average_pooling2d = nn.MaxPool2d(**{'kernel_size': [4, 4], 'ceil_mode': False, 'stride': [4, 4], 'padding': [0, 0]})
-    self.n_n_flatten_Flatten = nn.Flatten(**{'start_dim': 1})
-    self.n_n_dense = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 10, 'padding': [0, 0], 'kernel_size': (1, 1), 'stride': [1, 1], 'in_channels': 1152, 'bias': True})
-    self.n_n_activation_Flatten = nn.Flatten(**{'start_dim': 1})
+    def __init__(self, kernel_size=4, stride=4, padding=0, conv_padding=0):
+        super(Model, self).__init__()
+        self.n_n_conv2d = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 1, 'padding': [0, 0], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
+        self.n_n_maxpool = nn.MaxPool2d(**{'kernel_size': [kernel_size, kernel_size], 'ceil_mode': False, 'stride': [stride, stride], 'padding': [padding, padding]})
+        self.n_n_conv2d_2 = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 8, 'padding': [conv_padding, conv_padding], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
+        self.n_n_maxpool_2 = nn.MaxPool2d(**{'kernel_size': [kernel_size, kernel_size], 'ceil_mode': False, 'stride': [stride, stride], 'padding': [padding, padding]})
+        self.n_n_flatten_Flatten = nn.Flatten(**{'start_dim': 1})
 
-  def forward(self, *inputs):
-    t_ImageInputLayer, = inputs
-    t_conv2d = self.n_n_conv2d(t_ImageInputLayer)
-    t_conv2d_relu = F.relu(t_conv2d)
-    t_average_pooling2d = self.n_n_average_pooling2d(t_conv2d_relu)[:, :, :, :]
-    t_flatten_Transpose = t_average_pooling2d.permute(*[0, 2, 3, 1])
-    t_flatten_Flatten = self.n_n_flatten_Flatten(t_flatten_Transpose)
-    t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Flatten, 2)
-    t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Unsqueeze, 3)
-    t_dense = self.n_n_dense(t_flatten_Unsqueeze)
-    t_activation_Flatten = self.n_n_activation_Flatten(t_dense)
-    return t_activation_Flatten
+        self.n_n_dense = None
 
-class TestConv(TestCase): 
+        self.n_n_activation_Flatten = nn.Flatten(**{'start_dim': 1})
+
+    def forward(self, *inputs):
+        t_ImageInputLayer, = inputs
+        t_conv2d = self.n_n_conv2d(t_ImageInputLayer)
+        t_conv2d_relu = F.relu(t_conv2d)
+        t_maxpool = self.n_n_maxpool(t_conv2d_relu)[:, :, :, :]
+        t_conv2d_max = self.n_n_conv2d_2(t_maxpool)
+        t_conv2d_max = F.relu(t_conv2d_max)
+        t_maxpool_2 = self.n_n_maxpool_2(t_conv2d_max)
+        t_flatten_Transpose = t_maxpool_2.permute(*[0, 2, 3, 1])
+        t_flatten_Flatten = self.n_n_flatten_Flatten(t_flatten_Transpose)
+        t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Flatten, 2)
+        t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Unsqueeze, 3)
+
+        if self.n_n_dense is None:
+            self.n_n_dense = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 10, 'padding': [0, 0], 'kernel_size': (1, 1), 'stride': [1, 1], 'in_channels': t_flatten_Unsqueeze.shape[1], 'bias': True})
+        t_dense = self.n_n_dense(t_flatten_Unsqueeze)
+        t_activation_Flatten = self.n_n_activation_Flatten(t_dense)
+
+        return t_activation_Flatten
+
+class TestMaxPool(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1, ref_path=None,
             generate=generate)
 
     def test(self):
         np.random.seed(123)
-        models = [2, 3]
-        paddings = [1, 2]
-        strides = [1, 3]
-
-        model_ori = Model()
-        data = torch.load('data/maxpool_test_data')
-        model_ori.load_state_dict(data['model'])
 
         N = 2
-        n_classes = 10
-        image = data['input']
-        # image = torch.rand([N,1,28,28])
-        # image = image.to(torch.float32) / 255.0
 
-        model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "matrix"})
-        eps = 0.3
-        norm = np.inf
-        ptb = PerturbationLpNorm(norm=norm, eps=eps)
-        image = BoundedTensor(image, ptb)
-        pred = model(image)
-        lb, ub = model.compute_bounds()
+        for kernel_size in [3,4]:
+            for padding in [0]:
+                    for conv_padding in [0,1]:
+                        print(kernel_size, padding, kernel_size, conv_padding)
 
-        lb_ref = data['lb']
-        ub_ref = data['ub']
+                        model_ori = Model(kernel_size=kernel_size, padding=padding, stride=kernel_size, conv_padding=conv_padding)
+                        if not self.generate:
+                            data = torch.load('data/maxpool_test_data_{}-{}-{}-{}'.format(kernel_size, padding, kernel_size, conv_padding))
+                            image = data['input']
+                            model_ori(image)
+                            model_ori.load_state_dict(data['model'])
+                        else:
+                            image = torch.rand([N, 1, 28, 28])
+                            model_ori(image)
 
-        assert torch.allclose(lb, lb_ref, 1e-4)
-        assert torch.allclose(ub, ub_ref, 1e-4)
 
-        # lb, ub = model.compute_bounds(x=(image,), method="CROWN-Optimized")
+                        if self.generate:
+                            conv_mode = "matrix"
+                        else:
+                            conv_mode = "patches"
 
-        # torch.save({'input': image, 'model': model_ori.state_dict(), 'lb': lb, 'ub': ub}, 'data/maxpool_test_data')
+                        model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": conv_mode})
+                        eps = 0.3
+                        norm = np.inf
+                        ptb = PerturbationLpNorm(norm=norm, eps=eps)
+                        image = BoundedTensor(image, ptb)
+                        pred = model(image)
+
+                        lb, ub = model.compute_bounds()
+
+
+                        if self.generate:
+                            torch.save(
+                                {'model': model_ori.state_dict(),
+                                'input': image,
+                                'lb': lb,
+                                'ub': ub}, 'data/maxpool_test_data_{}-{}-{}-{}'.format(kernel_size, padding, kernel_size, conv_padding)
+                            )
+
+                        if not self.generate:
+                            lb_ref = data['lb']
+                            ub_ref = data['ub']
+
+                            assert torch.allclose(lb, lb_ref, 1e-4)
+                            assert torch.allclose(ub, ub_ref, 1e-4)
 
 
 if __name__ == '__main__':
-    testcase = TestConv()
+    testcase = TestMaxPool(generate=True)
     testcase.test()

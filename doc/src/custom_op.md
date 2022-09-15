@@ -13,7 +13,7 @@ There are three steps to write an operator:
 
 3. Implement a [Bound class](api.html#auto_LiRPA.bound_ops.Bound) to support bound propagation methods for this operator. 
 
-4. [Register the custom operator](api.html#auto_LiRPA.bound_op_map.register_custom_op).
+4. Create a mapping from the operator name (defined in step 1) to the bound class (defined in step 3). Define a `dict` which each item is a mapping. Pass the `dict` to the `custom_ops` argument when calling `BoundedModule` (see the [documentation](api.html#auto_LiRPA.BoundedModule)). For example, if the operator name is `MyRelu`, and the bound class is `BoundMyRelu`, then add `"MyRelu": BoundMyRelu` to the `dict`.
 
 ## Example
 

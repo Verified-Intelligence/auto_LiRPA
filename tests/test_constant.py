@@ -57,4 +57,5 @@ class TestConstant(TestCase):
 if __name__ == '__main__':
     # Change to generate=True when genearting reference results
     testcase = TestConstant(generate=False)
+    testcase.setUp()
     testcase.test()        

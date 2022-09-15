@@ -3,11 +3,11 @@ import multiprocessing
 import random
 import time
 import logging
+import os
 
 import torch.optim as optim
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-from thop import profile
 from torch.nn import CrossEntropyLoss
 
 import models
@@ -55,7 +55,7 @@ exp_name = args.model + '_b' + str(args.batch_size) + '_' + str(args.bound_type)
 os.makedirs('saved_models/', exist_ok=True)
 log_file = f'saved_models/{exp_name}{"_test" if args.verify else ""}.log'
 file_handler = logging.FileHandler(log_file)
-logger.addHandler(file_handler) 
+logger.addHandler(file_handler)
 
 def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method='robust', loss_fusion=True, final_node_name=None):
     num_class = 10
@@ -172,16 +172,6 @@ def Train(model, t, loader, eps_scheduler, norm, train, opt, bound_type, method=
             opt.step()
         meter.update('Loss', loss.item(), data.size(0))
 
-        # check gradient
-        # for n, p in model.named_parameters():
-        #     if p.grad is None:
-        #         print('gradient for layer {} is NULL!!!'.format(n))
-        #     else:
-        #         print('gradient for layer {} is not null'.format(n))
-        #         print(p.grad.flatten()[:8])
-        #
-        # sys.exit()
-
         if batch_method != 'natural':
             meter.update('Robust_CE', robust_ce.item(), data.size(0))
             if not loss_fusion:
@@ -261,9 +251,6 @@ def main(args):
         model_loss = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
         final_name2 = None
     model_loss = BoundDataParallel(model_loss)
-
-    macs, params = profile(model_ori, (dummy_input.cuda(),))
-    logger.info('macs: {}, params: {}'.format(macs, params))
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model_loss.parameters(), lr=args.lr)

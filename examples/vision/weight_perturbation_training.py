@@ -11,6 +11,7 @@ See our paper https://arxiv.org/abs/2002.12920 for more details.
 """
 import random
 import time
+import os
 import argparse
 import logging
 import torch.optim as optim
@@ -217,17 +218,22 @@ def main(args):
 
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
-    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+    model = BoundedModule(model_ori, dummy_input, device=args.device, bound_opts={
+        'relu':args.bound_opts, 'sparse_intermediate_bounds': False,
+        'sparse_conv_intermediate_bounds': False, 'sparse_intermediate_bounds_with_ibp': False})
     final_name1 = model.final_name
     model_loss = BoundedModule(CrossEntropyWrapper(model_ori), (dummy_input, torch.zeros(1, dtype=torch.long)),
-                               bound_opts= { 'relu': args.bound_opts, 'loss_fusion': True }, device=args.device)
+            device=args.device, bound_opts= {'relu': args.bound_opts, 'loss_fusion': True,
+                                             'sparse_intermediate_bounds': False,
+                                             'sparse_conv_intermediate_bounds': False,
+                                             'sparse_intermediate_bounds_with_ibp': False})
 
     # after CrossEntropyWrapper, the final name will change because of one more input node in CrossEntropyWrapper
     final_name2 = model_loss._modules[final_name1].output_name[0]
     assert type(model._modules[final_name1]) == type(model_loss._modules[final_name2])
     if args.multigpu:
         model_loss = BoundDataParallel(model_loss)
-    model_loss.ptb = model.ptb = model_ori.ptb # Perturbation on the parameters
+    model_loss.ptb = model.ptb = model_ori.ptb  # Perturbation on the parameters
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     if args.opt == 'ADAM':

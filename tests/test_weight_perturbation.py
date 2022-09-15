@@ -1,28 +1,26 @@
 import copy
-import random
-import argparse
-import torch.nn.functional as F
 import subprocess
 import numpy as np
 from testcase import TestCase
 import sys
 sys.path.append('../examples/vision')
 import models
-from auto_LiRPA import BoundedModule, BoundedParameter
+from auto_LiRPA import BoundedModule
 from auto_LiRPA.perturbations import *
 
 
-class TestWeightPerturbation(TestCase): 
+class TestWeightPerturbation(TestCase):
     def __init__(self, methodName='runTest', generate=False):
         super().__init__(methodName, seed=1234, ref_path='data/weight_perturbation_test_data')
         self.result = {}
 
     def test_training(self):
+        # python weight_perturbation_training.py --device cpu --scheduler_opts start=1,length=100 --num_epochs 1  --truncate_data 5
         ret = subprocess.run(
-            ['python', 'weight_perturbation_training.py', 
+            ['python', 'weight_perturbation_training.py',
             '--device', 'cpu',
             '--scheduler_opts', 'start=1,length=100',
-            '--num_epochs',  '1', 
+            '--num_epochs',  '1',
             '--truncate_data', '5'],
             cwd='../examples/vision', capture_output=True)
         self.assertEqual(ret.returncode, 0, ret.stderr)
@@ -56,11 +54,12 @@ class TestWeightPerturbation(TestCase):
         self.result['model'] = model_ori.state_dict()
         self.result['data'] = torch.randn(8, 1, 28, 28)
         model_ori.load_state_dict(self.result['model'])
-        state_dict = copy.deepcopy(model_ori.state_dict())  
+        state_dict = copy.deepcopy(model_ori.state_dict())
         dummy_input = self.result['data'].requires_grad_()
         inputs = (dummy_input,)
 
-        model = BoundedModule(model_ori, inputs)
+        model = BoundedModule(model_ori, inputs, bound_opts={
+            'sparse_intermediate_bounds': False, 'sparse_conv_intermediate_bounds': False, 'sparse_intermediate_bounds_with_ibp': False})
         forward_ret = model(dummy_input)
         model_ori.eval()
 
@@ -69,7 +68,8 @@ class TestWeightPerturbation(TestCase):
         def verify_model(pert_weight=True, pert_bias=True, norm=np.inf, lb_name='', ub_name=''):
             model_ori_ = models.Models['mlp_3layer_weight_perturb'](pert_weight=pert_weight, pert_bias=pert_bias, norm=norm).eval()
             model_ori_.load_state_dict(state_dict)
-            model_ = BoundedModule(model_ori_, inputs)
+            model_ = BoundedModule(model_ori_, inputs, bound_opts={
+                'sparse_intermediate_bounds': False, 'sparse_conv_intermediate_bounds': False, 'sparse_intermediate_bounds_with_ibp': False})
             model_.ptb = model_ori.ptb
 
             self.verify_bounds(model_, dummy_input, IBP=True, method='backward', forward_ret=forward_ret,

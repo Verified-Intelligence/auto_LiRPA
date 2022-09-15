@@ -15,7 +15,7 @@ class Flatten(nn.Module):
         return x.view((x.shape[0], -1))
 
 class cnn_model(nn.Module):
-    def __init__(self, layers, padding, stride):
+    def __init__(self, layers, padding, stride, linear=True):
         super(cnn_model, self).__init__()
         self.module_list = []
         channel = 1
@@ -27,8 +27,9 @@ class cnn_model(nn.Module):
             assert length > 0
             self.module_list.append(nn.ReLU())
         self.module_list.append(Flatten())
-        self.module_list.append(nn.Linear(3 * length * length, 256))
-        self.module_list.append(nn.Linear(256, 10))
+        if linear:
+            self.module_list.append(nn.Linear(3 * length * length, 256))
+            self.module_list.append(nn.Linear(256, 10))
         self.model = nn.Sequential(*self.module_list)
 
     def forward(self, x):
@@ -42,7 +43,7 @@ class TestConv(TestCase):
             generate=generate)
 
     def test(self):
-        models = [2, 3]
+        models = [1, 2, 3]
         paddings = [1, 2]
         strides = [1, 3]
 
@@ -54,26 +55,32 @@ class TestConv(TestCase):
         for layer_num in models:
             for padding in paddings:
                 for stride in strides:
-                    try:
+                    for linear in [True, False]:
                         model_ori = cnn_model(layer_num, padding, stride)
-                    except:
-                        continue
+                        print('Model:', model_ori)
 
-                    model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "patches"})
-                    eps = 0.3
-                    norm = np.inf
-                    ptb = PerturbationLpNorm(norm=norm, eps=eps)
-                    image = BoundedTensor(image, ptb)
-                    pred = model(image)
-                    lb, ub = model.compute_bounds()
+                        model = BoundedModule(model_ori, image, bound_opts={"conv_mode": "patches"})
+                        eps = 0.3
+                        norm = np.inf
+                        ptb = PerturbationLpNorm(norm=norm, eps=eps)
+                        image = BoundedTensor(image, ptb)
+                        pred = model(image)
+                        lb, ub = model.compute_bounds()
 
-                    model = BoundedModule(model_ori, image, device="cpu", bound_opts={"conv_mode": "matrix"})
-                    pred = model(image)
-                    lb_ref, ub_ref = model.compute_bounds()
+                        model = BoundedModule(model_ori, image, bound_opts={"conv_mode": "matrix"})
+                        pred = model(image)
+                        lb_ref, ub_ref = model.compute_bounds()
 
-                    assert lb.shape == ub.shape == torch.Size((N, n_classes))    
-                    self.assertEqual(lb, lb_ref)
-                    self.assertEqual(ub, ub_ref)
+                        if linear:
+                            assert lb.shape == ub.shape == torch.Size((N, n_classes))    
+                        self.assertEqual(lb, lb_ref)
+                        self.assertEqual(ub, ub_ref)
+
+                        if not linear and layer_num == 1:
+                            pred = model(image)
+                            lb_forward, ub_forward = model.compute_bounds(method='forward')                        
+                            self.assertEqual(lb, lb_forward)
+                            self.assertEqual(ub, ub_forward)
 
 if __name__ == '__main__':
     testcase = TestConv()

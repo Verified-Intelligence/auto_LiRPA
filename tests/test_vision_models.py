@@ -1,4 +1,5 @@
-import random
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
@@ -23,26 +24,28 @@ class cnn_4layer_test(nn.Module):
 
         return x
 
-class TestVisionModels(TestCase): 
+class TestVisionModels(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, seed=1234, ref_path='data/vision_test_data')
+        super().__init__(methodName, seed=1234, 
+            ref_path='data/vision_test_data', generate=generate)
         self.result = {}
 
     def verify_bounds(self, model, x, IBP, method, forward_ret, lb_name, ub_name):
         lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
         self.result[lb_name] = lb
         self.result[ub_name] = ub
-        assert torch.allclose(lb, self.reference[lb_name], 1e-4), (lb - self.reference[lb_name]).abs().sum()
-        assert torch.allclose(ub, self.reference[ub_name], 1e-4), (ub - self.reference[ub_name]).abs().sum()
-        assert ((lb - self.reference[lb_name]).pow(2).sum() < 1e-9), (lb - self.reference[lb_name]).pow(2).sum()
-        assert ((ub - self.reference[ub_name]).pow(2).sum() < 1e-9), (ub - self.reference[ub_name]).pow(2).sum()
         # test gradient backward propagation
         loss = (ub - lb).abs().sum()
         loss.backward()
         grad = x.grad
-        self.result[lb_name[:-2] + 'grad'] = grad
-        assert torch.allclose(grad, self.reference[lb_name[:-2] + 'grad'], 1e-4, 1e-6)
-        assert (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-9
+        self.result[lb_name[:-2] + 'grad'] = grad.clone()
+        if not self.generate:
+            assert torch.allclose(lb, self.reference[lb_name], 1e-4), (lb - self.reference[lb_name]).abs().sum()
+            assert torch.allclose(ub, self.reference[ub_name], 1e-4), (ub - self.reference[ub_name]).abs().sum()
+            assert ((lb - self.reference[lb_name]).pow(2).sum() < 1e-9), (lb - self.reference[lb_name]).pow(2).sum()
+            assert ((ub - self.reference[ub_name]).pow(2).sum() < 1e-9), (ub - self.reference[ub_name]).pow(2).sum()
+            assert torch.allclose(grad, self.reference[lb_name[:-2] + 'grad'], 1e-4, 1e-6)
+            assert (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-9
 
     def test_bounds(self):
         np.random.seed(123) # FIXME inconsistent seeds
@@ -83,6 +86,13 @@ class TestVisionModels(TestCase):
                     ub_name='l_2_CROWN_ub')  # CROWN
 
         if self.generate:
-            for item in self.result:
-                self.reference = self.result[item]
+            self.result['data'] = self.reference['data']
+            self.result['model'] = self.reference['model']
             self.save()
+
+
+if __name__ =="__main__":
+    # t = TestVisionModels(generate=True)
+    t = TestVisionModels()
+    t.setUp()
+    t.test_bounds()

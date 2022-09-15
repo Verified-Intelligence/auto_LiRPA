@@ -1,4 +1,4 @@
-# Test bounds on a 1 layer linear network.
+"""Test average pooling."""
 
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor

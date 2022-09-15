@@ -1,5 +1,6 @@
 """Test one dimensional activation functions (e.g., ReLU, tanh, exp, sin, etc)"""
 import torch
+import torch.nn as nn
 import os
 from testcase import TestCase
 from auto_LiRPA import BoundedModule, BoundedTensor
@@ -21,6 +22,8 @@ class Test1DActivation(TestCase):
         super().__init__(methodName)
 
     def create_test(self, act_func, low, high, ntests=10000, nsamples=1000, method='IBP'):
+        print(f'Testing activation {act_func}')
+        
         model = test_model(act_func)
         image = torch.zeros(1, ntests)
         bounded_model = BoundedModule(model, image)
@@ -83,6 +86,22 @@ class Test1DActivation(TestCase):
         assert torch.all(output_lb - 1e-5 <= ref_output_lb)
 
 
+    def _single(self):
+        model = test_model(torch.sin)
+        image = torch.zeros(1, 1)
+        bounded_model = BoundedModule(model, image)
+
+        input_lb = torch.tensor([2.817])
+        input_ub = torch.tensor([5.196])
+        input_center = (input_lb + input_ub) / 2.0
+        ptb = PerturbationLpNorm(norm=float("inf"), eps=None, x_L=input_lb, x_U=input_ub)
+        ptb_data = BoundedTensor(input_center, ptb)
+
+        # Get bounding results.
+        forward = bounded_model(ptb_data)
+        output_lb, output_ub = bounded_model.compute_bounds(x=(ptb_data,), method = 'CROWN')
+        print(output_lb, output_ub)
+
     def test_relu(self):
         self.create_test(act_func=torch.nn.functional.relu, low=-10, high=10, method='IBP')
         self.create_test(act_func=torch.nn.functional.relu, low=-10, high=10, method='CROWN')
@@ -106,13 +125,22 @@ class Test1DActivation(TestCase):
 
     def test_sin(self):
         self.create_test(act_func=torch.sin, low=-10, high=10, method='IBP')
-        # self.create_test(act_func=torch.sin, low=-10, high=10, method='CROWN')
+        self.create_test(act_func=torch.sin, low=-10, high=10, method='CROWN')
 
 
     def test_cos(self):
         self.create_test(act_func=torch.cos, low=-10, high=10, method='IBP')
-        # self.create_test(act_func=torch.cos, low=-10, high=10, method='CROWN')
+        self.create_test(act_func=torch.cos, low=-10, high=10, method='CROWN')
 
+    def test_arctan(self):
+        self.create_test(act_func=torch.arctan, low=-10, high=10, method='IBP')
+        self.create_test(act_func=torch.arctan, low=-10, high=10, method='CROWN')
+
+    def test_tan(self):
+        # Test tan(x) in different periods.
+        for i in range(-5, 5):
+            self.create_test(act_func=torch.arctan, low=-0.5*torch.pi + i*torch.pi + 1e-20, high=0.5*torch.pi + i*torch.pi - 1e-20, method='IBP')
+            self.create_test(act_func=torch.arctan, low=-0.5*torch.pi + i*torch.pi + 1e-20, high=0.5*torch.pi + i*torch.pi - 1e-20, method='CROWN')
 
 if __name__ == '__main__':
     testcase = Test1DActivation()
@@ -122,5 +150,5 @@ if __name__ == '__main__':
     testcase.test_tanh()
     testcase.test_sin()
     testcase.test_cos()
-
-
+    testcase.test_arctan()
+    testcase.test_tan()

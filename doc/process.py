@@ -5,7 +5,7 @@ import shutil
 from pygit2 import Repository
 
 repo = 'https://github.com/KaidiXu/auto_LiRPA'
-branch = os.environ.get('BRANCH', None) or Repository('.').head.shorthand
+branch = Repository('.').head.shorthand
 repo_file_path = os.path.join(repo, 'tree', branch)
 
 """ Parse README.md into sections which can be reused """
@@ -40,7 +40,6 @@ for filename in os.listdir('src'):
         source = file.read()
     source_new = ''
     ptr = 0
-    # res = re.findall('\[.*\]\(.*\)', source)
     for m in re.finditer('(\[.*\])(\(.*\))', source):
         assert m.start() >= ptr
         source_new += source[ptr:m.start()]
