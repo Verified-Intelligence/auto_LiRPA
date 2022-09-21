@@ -28,8 +28,8 @@ setup(
     version=version,
     description='A library for Automatic Linear Relaxation based Perturbation Analysis (LiRPA) on general computational graphs, with a focus on adversarial robustness verification and certification of deep neural networks.',
     url='https://github.com/KaidiXu/auto_LiRPA',
-    author='Kaidi Xu, Zhouxing Shi, Huan Zhang, Yihan Wang, Shiqi Wang',
-    author_email='xu.kaid@husky.neu.edu, zhouxingshichn@gmail.com, huan@huan-zhang.com, wangyihan617@gmail.com, sw3215@columbia.edu',
+    author='Kaidi Xu, Zhouxing Shi, Huan Zhang, Yihan Wang, Shiqi Wang, Linyi Li, Jinqi (Kathryn) Chen, Zhuolin Yang',
+    author_email='xu.kaid@husky.neu.edu, zhouxingshichn@gmail.com, huan@huan-zhang.com, wangyihan617@gmail.com, sw3215@columbia.edu,linyi2@illinois.edu,jinqic@cs.cmu.edu,zhuolin5@illinois.edu',
     packages=find_packages(),
     install_requires=[
         f'torch>={pytorch_version_l},<{pytorch_version_u}',
