@@ -221,6 +221,6 @@ Contributors:
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
 
-We thank the[commits](https://github.com/KaidiXu/auto_LiRPA/commits) and [pull requests](https://github.com/KaidiXu/auto_LiRPA/pulls) from community contributors.
+We thank the [commits](https://github.com/KaidiXu/auto_LiRPA/commits) and [pull requests](https://github.com/KaidiXu/auto_LiRPA/pulls) from community contributors.
 
 Our library is released under the BSD 3-Clause license.
