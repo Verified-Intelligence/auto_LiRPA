@@ -169,8 +169,8 @@ class PerturbationLpNorm(Perturbation):
         if self.norm == np.inf:
             # For Linfinity distortion, when an upper and lower bound is given, we use them instead of eps.
             x_L, x_U = self.get_input_bounds(x, A)
-            x_ub = x_U.reshape(x_U.shape[0], -1, 1)
-            x_lb = x_L.reshape(x_L.shape[0], -1, 1)
+            x_ub = x_U.reshape(-1, x_U.shape[0],  1)
+            x_lb = x_L.reshape(-1, x_L.shape[0],  1)
             # Find the uppwer and lower bound similarly to IBP.
             center = (x_ub + x_lb) / 2.0
             diff = (x_ub - x_lb) / 2.0
