@@ -1,8 +1,10 @@
 """Unary nonlinearities other than activation functions."""
 import math
 import torch
-from .activation import BoundActivation, BoundTanh
+from .activation_base import BoundActivation
+from .activations import BoundTanh
 from .base import epsilon, LinearBound
+
 
 class BoundSin(BoundActivation):
     # Lookup tables shared by all BoundSin classes.
@@ -321,8 +323,6 @@ class BoundTan(BoundAtan):
     inverse function and directly convert the bounds of the inverse function to bounds of the original
     function. This trick allows us to quickly implement bounds on inverse functions.
     """
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
 
     def forward(self, x):
         return torch.tan(x)
@@ -472,8 +472,6 @@ class BoundExp(BoundActivation):
 
 
 class BoundLog(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
 
     def forward(self, x):
         # NOTE adhoc implementation for loss fusion
@@ -510,8 +508,6 @@ class BoundLog(BoundActivation):
 
 
 class BoundPow(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
 
     def forward(self, x, y):
         return torch.pow(x, y)
@@ -570,8 +566,6 @@ class BoundPow(BoundActivation):
 
 
 class BoundReciprocal(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
 
     def forward(self, x):
         return torch.reciprocal(x)
@@ -590,14 +584,9 @@ class BoundReciprocal(BoundActivation):
 
 
 class BoundSqrt(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
 
     def forward(self, x):
         return torch.sqrt(x)
-
-    def interval_propagate(self, *v):
-        return super().interval_propagate(*v)
 
     def bound_backward(self, last_lA, last_uA, x):
         x_l = x.lower
@@ -630,9 +619,6 @@ class BoundSqrt(BoundActivation):
 
 
 class BoundSqr(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-        self.nonlinear = True
 
     def forward(self, x):
         return x**2

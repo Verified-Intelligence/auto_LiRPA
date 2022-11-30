@@ -5,7 +5,7 @@ from torch import Tensor as Tensor
 
 import torch._C as _C
 
-class BoundedTensor(Tensor): 
+class BoundedTensor(Tensor):
     @staticmethod
     # We need to override the __new__ method since Tensor is a C class
     def __new__(cls, x, ptb, *args, **kwargs):
@@ -54,8 +54,8 @@ class BoundedTensor(Tensor):
             return ret
 
         if isinstance(ret, Tensor):
-            if True: 
-                # The current implementation does not seem to need non-leaf BoundedTensor      
+            if True:
+                # The current implementation does not seem to need non-leaf BoundedTensor
                 return ret
             else:
                 # Enable this branch if non-leaf BoundedTensor should be kept
@@ -64,26 +64,25 @@ class BoundedTensor(Tensor):
         if isinstance(ret, tuple):
             ret = tuple(cls._convert(r) for r in ret)
 
-        return ret 
+        return ret
 
-    if torch.__version__ >= '1.7':
-        @classmethod
-        def __torch_function__(cls, func, types, args=(), kwargs=None):
-            if kwargs is None:
-                kwargs = {}
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
 
-            if not all(issubclass(cls, t) for t in types):
-                return NotImplemented
+        if not all(issubclass(cls, t) for t in types):
+            return NotImplemented
 
-            with _C.DisableTorchFunction():
-                ret = func(*args, **kwargs)
-                return cls._convert(ret)
+        with _C.DisableTorchFunction():
+            ret = func(*args, **kwargs)
+            return cls._convert(ret)
 
 
 class BoundedParameter(nn.Parameter):
     def __new__(cls, data, ptb, requires_grad=True):
         return BoundedTensor._make_subclass(cls, data, requires_grad)
-    
+
     def __init__(self, data, ptb, requires_grad=True):
         self.ptb = ptb
         self.requires_grad = requires_grad
@@ -102,4 +101,3 @@ class BoundedParameter(nn.Parameter):
 
     def __reduce_ex__(self, proto):
         raise NotImplementedError
-

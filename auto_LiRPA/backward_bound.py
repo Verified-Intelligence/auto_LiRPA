@@ -121,10 +121,13 @@ def backward_general(
         # Initially, l.lA or l.uA will be set to C for this node.
         if l.lA is not None or l.uA is not None:
             if verbose:
-                logger.debug(f'  Bound backward to {l}'
-                            f' (lA shape {l.lA.shape if l.lA is not None else None},'
-                            f' uA shape {l.uA.shape if l.uA is not None else None},'
-                            f' out shape {l.output_shape})')
+                logger.debug(f'  Bound backward to {l} (out shape {l.output_shape})')
+                if l.lA is not None:
+                    logger.debug('    lA type %s shape %s',
+                                 type(l.lA), list(l.lA.shape))
+                if l.uA is not None:
+                    logger.debug('    uA type %s shape %s',
+                                 type(l.uA), list(l.uA.shape))
 
             if _print_time:
                 start_time = time.time()
@@ -311,9 +314,13 @@ def get_sparse_C(
                 newC = 'Patches'
                 reduced_dim = True
             # We sum over the channel direction, so need to multiply that.
-            elif (sparse_conv_intermediate_bounds and unstable_size <= minimum_sparsity * dim and alpha_is_sparse is None) or alpha_is_sparse:
-                # When we already have sparse alpha for this layer, we always use sparse C. Otherwise we determine it by sparsity.
-                # Create an abstract C matrix, the unstable_idx are the non-zero elements in specifications for all batches.
+            elif (sparse_conv_intermediate_bounds
+                  and unstable_size <= minimum_sparsity * dim
+                  and alpha_is_sparse is None) or alpha_is_sparse:
+                # When we already have sparse alpha for this layer, we always
+                # use sparse C. Otherwise we determine it by sparsity.
+                # Create an abstract C matrix, the unstable_idx are the non-zero
+                # elements in specifications for all batches.
                 # The shape of patches is [unstable_size, batch, C, H, W].
                 newC = Patches(
                     shape=[unstable_size, batch_size, *node.output_shape[1:-2], 1, 1],
@@ -330,7 +337,8 @@ def get_sparse_C(
                 *node.output_shape[1:-2], 1, 1], 1,
                 output_shape=[batch_size, *node.output_shape[1:]])
     elif isinstance(node, (BoundAdd, BoundSub)) and node.mode == "patches":
-        # FIXME: BoundAdd does not always have patches. Need to use a better way to determine patches mode.
+        # FIXME: BoundAdd does not always have patches. Need to use a better way
+        # to determine patches mode.
         # FIXME: We should not hardcode BoundAdd here!
         if sparse_intermediate_bounds:
             if crown_batch_size < 1e9:
@@ -341,8 +349,11 @@ def get_sparse_C(
                 # Do nothing, no bounds will be computed.
                 reduced_dim = True
                 unstable_idx = []
-            elif (sparse_conv_intermediate_bounds and unstable_size <= minimum_sparsity * dim and alpha_is_sparse is None) or alpha_is_sparse:
-                # When we already have sparse alpha for this layer, we always use sparse C. Otherwise we determine it by sparsity.
+            elif (sparse_conv_intermediate_bounds
+                  and unstable_size <= minimum_sparsity * dim
+                  and alpha_is_sparse is None) or alpha_is_sparse:
+                # When we already have sparse alpha for this layer, we always
+                # use sparse C. Otherwise we determine it by sparsity.
                 num_channel = node.output_shape[-3]
                 # Identity patch size: (ouc_c, 1, 1, 1, out_c, 1, 1).
                 patches = (

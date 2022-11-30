@@ -1,4 +1,5 @@
 """ Bivariate operators"""
+import copy
 from .base import *
 from .nonlinear import BoundSqrt, BoundReciprocal
 from .clampmult import multiply_by_A_signs
@@ -295,16 +296,6 @@ class BoundMul(Bound):
         for vi in v:
             assert isinstance(vi, Tensor), "build solver for BoundMul only with tensors for now"
         self.solver_vars = v[0] * v[1]
-
-    @staticmethod
-    def infer_batch_dim(batch_size, *x):
-        if x[0] == -1:
-            return x[1]
-        elif x[1] == -1:
-            return x[0]
-        else:
-            assert x[0] == x[1]
-            return x[0]
 
 
 class BoundDiv(Bound):

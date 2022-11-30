@@ -1,9 +1,7 @@
 import os
 import shutil
-import pdb
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from auto_LiRPA.utils import logger
 
 class LSTMCore(nn.Module):
@@ -58,7 +56,7 @@ class LSTM(nn.Module):
         os.mkdir(output_dir)
         path = os.path.join(output_dir, "model")
         torch.save(self.core.state_dict(), path)
-        with open(os.path.join(self.dir, "checkpoint"), "w") as file: 
+        with open(os.path.join(self.dir, "checkpoint"), "w") as file:
             file.write(str(epoch))
         logger.info("LSTM saved: %s" % output_dir)
 
@@ -66,7 +64,7 @@ class LSTM(nn.Module):
         param_group = []
         for p in self.core.named_parameters():
             param_group.append(p)
-        param_group = [{"params": [p[1] for p in param_group], "weight_decay": 0.}]    
+        param_group = [{"params": [p[1] for p in param_group], "weight_decay": 0.}]
         return torch.optim.Adam(param_group, lr=self.lr)
 
     def get_input(self, batch):
@@ -78,4 +76,4 @@ class LSTM(nn.Module):
         self.core.train()
 
     def eval(self):
-        self.core.eval()    
+        self.core.eval()

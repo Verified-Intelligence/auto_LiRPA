@@ -3,13 +3,12 @@ import random
 import torch
 import numpy as np
 
-"""
-Superclass for unit test cases in auto_LiRPA.
-"""
+
 class TestCase(unittest.TestCase):
+    """Superclass for unit test cases in auto_LiRPA."""
     def __init__(self, methodName='runTest', seed=1, ref_path=None, generate=False):
         super().__init__(methodName)
-        
+
         self.addTypeEqualityFunc(np.ndarray, 'assertArrayEqual')
         self.addTypeEqualityFunc(torch.Tensor, 'assertTensorEqual')
 
@@ -23,27 +22,27 @@ class TestCase(unittest.TestCase):
         random.seed(seed)
         np.random.seed(seed)
 
-    """
-    Load the reference result if it exists
-    """
     def setUp(self):
-        self.reference = torch.load(self.ref_path) if self.ref_path else None
+        """Load the reference result if it exists."""
+        if self.generate:
+            self.reference = None
+        else:
+            self.reference = torch.load(self.ref_path) if self.ref_path else None
 
-    """
-    Save result for future comparison
-    """
     def save(self):
+        """Save result for future comparison."""
         print('Saving result to', self.ref_path)
         torch.save(self.result, self.ref_path)
 
-    """
-    This function can be called at the end of each test. 
-    If `self.generate == True`, save results for future comparison; otherwise, 
-    compare the current results `self.result` with the loaded reference 
-    `self.reference`. Results are expected to be a list or tuple of 
-    `torch.Tensor` instances. 
-    """
     def check(self):
+        """Save or check the results.
+
+        This function can be called at the end of each test.
+        If `self.generate == True`, save results for future comparison;
+        otherwise, compare the current results `self.result` with the loaded
+        reference `self.reference`. Results are expected to be a list or tuple
+        of `torch.Tensor` instances.
+        """
         if self.generate:
             self.save()
         else:
@@ -58,4 +57,4 @@ class TestCase(unittest.TestCase):
     def assertTensorEqual(self, a, b, msg=None):
         self.assertIsInstance(a, torch.Tensor, 'First argument is not an torch.Tensor')
         self.assertIsInstance(b, torch.Tensor, 'Second argument is not an torch.Tensor')
-        return torch.allclose(a, b)  
+        return torch.allclose(a, b)

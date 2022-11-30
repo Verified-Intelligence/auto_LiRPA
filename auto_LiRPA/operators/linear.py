@@ -1,10 +1,11 @@
 """ Linear (possibly with weight perturbation) or Dot product layers """
+from torch import Tensor
 from .base import *
 from .bivariate import BoundMul
-from ..patches import Patches
+from .gradient_modules import LinearGrad
+from ..patches import Patches, inplace_unfold
 from .solver_utils import grb
-from torch import Tensor
-from ..patches import inplace_unfold
+
 
 class BoundLinear(Bound):
     def __init__(self, attr, inputs, output_index, options):
@@ -30,8 +31,8 @@ class BoundLinear(Bound):
 
         self.opt_matmul = options.get('matmul')
 
-    """Handle tranpose and linear coefficients."""
     def _preprocess(self, a, b, c=None):
+        """Handle tranpose and linear coefficients."""
         if self.transA and isinstance(a, Tensor):
             a = a.transpose(-2,-1)
         if self.alpha != 1.0:
@@ -53,8 +54,8 @@ class BoundLinear(Bound):
             res += b
         return res
 
-    """Multiply weight matrix with a diagonal matrix with selected rows."""
     def onehot_mult(self, weight, bias, C, batch_size):
+        """Multiply weight matrix with a diagonal matrix with selected rows."""
 
         if C is None:
             return None, 0.0
@@ -614,6 +615,10 @@ class BoundLinear(Bound):
         self.solver_vars = new_layer_gurobi_vars
         model.update()
 
+    def build_gradient_node(self, grad_upstream):
+        node_grad = LinearGrad(self.inputs[1].param)
+        return node_grad, (grad_upstream,), []
+
 
 class BoundMatMul(BoundLinear):
     # Reuse most functions from BoundLinear.
@@ -621,7 +626,18 @@ class BoundMatMul(BoundLinear):
         super().__init__(attr, inputs, output_index, options)
         self.transA = 0
         self.transB = 0
-        self.requires_input_bounds = [0, 1]
+        self.is_constant_op = False
+        for inp in inputs:
+            if BoundMul._check_const_input(inp):
+                # If any of the two inputs are constant, we do not need input bounds.
+                # FIXME (05/11/2022): this is just a temporary workaround. We need better way to determine whether we need input bounds, not just for BoundConstant.
+                self.is_constant_op = True
+        if self.is_constant_op:
+            # One input is constant; no bounds required.
+            self.requires_input_bounds = [1]
+        else:
+            # Both inputs are perturbed. Need relaxation.
+            self.requires_input_bounds = [0, 1]
 
     def forward(self, x, y):
         self.x_shape = x.shape
@@ -691,11 +707,6 @@ class BoundCumSum(Bound):
     def forward(self, x, axis):
         self.axis = axis
         return torch.cumsum(x, axis)
-
-    def infer_batch_dim(self, batch_size, *x):
-        assert self.axis != x[0]
-        return x[0]
-
 
 class BoundIdentity(Bound):
     def __init__(self, attr, inputs, output_index, options):

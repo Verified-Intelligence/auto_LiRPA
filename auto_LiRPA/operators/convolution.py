@@ -3,6 +3,7 @@ from .base import *
 import numpy as np
 from .solver_utils import grb
 from ..patches import unify_shape, compute_patches_stride_padding, is_shape_used
+from .gradient_modules import Conv2dGrad
 
 
 class BoundConv(Bound):
@@ -25,7 +26,8 @@ class BoundConv(Bound):
         self.mode = options.get("conv_mode", "matrix")
         # denote whether this Conv is followed by a ReLU
         # if self.relu_followed is False, we need to manually pad the conv patches.
-        # If self.relu_followed is True, the patches are padded in the ReLU layer and the manual padding is not needed.
+        # If self.relu_followed is True, the patches are padded in the ReLU layer
+        # and the manual padding is not needed.
 
     def forward(self, *x):
         # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
@@ -35,7 +37,8 @@ class BoundConv(Bound):
 
     def bound_backward(self, last_lA, last_uA, *x):
         if self.is_input_perturbed(1):
-            raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
+            raise NotImplementedError(
+                'Weight perturbation for convolution layers has not been implmented.')
 
         lA_y = uA_y = lA_bias = uA_bias = None
         weight = x[1].lower
@@ -47,23 +50,29 @@ class BoundConv(Bound):
                 # Conv layer does not support the OneHotC fast path. We have to create a dense matrix instead.
                 shape = last_A.shape  # [spec, batch, C, H, W]
                 dim = int(prod(shape[2:]))
-                dense_last_A = torch.zeros(size=(shape[0], shape[1], dim), device=last_A.device, dtype=weight.dtype)
+                dense_last_A = torch.zeros(
+                    size=(shape[0], shape[1], dim), device=last_A.device, dtype=weight.dtype)
                 # last_A.index has size (spec, batch), its values are the index of the one-hot non-zero elements in A.
                 # last_A.coeffs is the value of the non-zero element.
-                dense_last_A = torch.scatter(dense_last_A, dim=2, index=last_A.index.unsqueeze(-1), src=last_A.coeffs.unsqueeze(-1))
+                dense_last_A = torch.scatter(
+                    dense_last_A, dim=2, index=last_A.index.unsqueeze(-1),
+                    src=last_A.coeffs.unsqueeze(-1))
                 # We created a large A matrix and it will be handled below.
                 last_A = dense_last_A.view(shape[0], shape[1], *shape[2:])
 
             if type(last_A) == Tensor:
                 shape = last_A.size()
                 # when (W−F+2P)%S != 0, construct the output_padding
-                output_padding0 = int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 * \
-                                self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0])
-                output_padding1 = int(self.input_shape[3]) - (int(self.output_shape[3]) - 1) * self.stride[1] + 2 * \
-                                self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0])
-                next_A = F.conv_transpose2d(last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
-                                            stride=self.stride, padding=self.padding, dilation=self.dilation,
-                                            groups=self.groups, output_padding=(output_padding0, output_padding1))
+                output_padding0 = (
+                    int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 *
+                    self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0]))
+                output_padding1 = (
+                    int(self.input_shape[3]) - (int(self.output_shape[3]) - 1) * self.stride[1] + 2 *
+                    self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0]))
+                next_A = F.conv_transpose2d(
+                    last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
+                    stride=self.stride, padding=self.padding, dilation=self.dilation,
+                    groups=self.groups, output_padding=(output_padding0, output_padding1))
                 next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
                 if self.has_bias:
                     # sum_bias = (last_A.sum((3, 4)) * x[2].lower).sum(2)
@@ -75,18 +84,27 @@ class BoundConv(Bound):
                 # Here we build and propagate a Patch object with (patches, stride, padding)
                 assert type(last_A) == Patches
                 if last_A.identity == 0:
-                    if not self.relu_followed:  # FIXME (09/20): Don't call it relu_followed. Instead, make this a property of A, called "padded" and propagate this property.
+                    # FIXME (09/20): Don't call it relu_followed. Instead, make this a property of A, called "padded" and propagate this property.
+                    if not self.relu_followed:
                         # The last_A.patches was not padded, so we need to pad them here.
                         # If this Conv layer is followed by a ReLU layer, then the padding was already handled there and there is no need to pad again.
-                        one_d = torch.ones(tuple(1 for i in self.output_shape[1:]), device=last_A.patches.device, dtype=weight.dtype).expand(self.output_shape[1:])
+                        one_d = torch.ones(
+                            tuple(1 for i in self.output_shape[1:]),
+                            device=last_A.patches.device, dtype=weight.dtype
+                        ).expand(self.output_shape[1:])
                         # Add batch dimension.
                         one_d = one_d.unsqueeze(0)
                         # After unfolding, the shape is (1, out_h, out_w, in_c, h, w)
-                        one_d_unfolded = inplace_unfold(one_d, kernel_size=last_A.patches.shape[-2:], stride=last_A.stride, padding=last_A.padding, inserted_zeros=last_A.inserted_zeros, output_padding=last_A.output_padding)
+                        one_d_unfolded = inplace_unfold(
+                            one_d, kernel_size=last_A.patches.shape[-2:],
+                            stride=last_A.stride, padding=last_A.padding,
+                            inserted_zeros=last_A.inserted_zeros,
+                            output_padding=last_A.output_padding)
                         if last_A.unstable_idx is not None:
                             # Move out_h, out_w dimension to the front for easier selection.
                             one_d_unfolded_r = one_d_unfolded.permute(1, 2, 0, 3, 4, 5)
-                            # for sparse patches the shape is (unstable_size, batch, in_c, h, w). Batch size is 1 so no need to select here.
+                            # for sparse patches the shape is (unstable_size, batch, in_c, h, w).
+                            # Batch size is 1 so no need to select here.
                             one_d_unfolded_r = one_d_unfolded_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
                         else:
                             # Append the spec dimension.
@@ -103,16 +121,23 @@ class BoundConv(Bound):
                     else:
                         sum_bias = 0
 
-                    flattened_patches = patches.reshape(-1, patches.size(-3), patches.size(-2), patches.size(-1))
-                    pieces = F.conv_transpose2d(flattened_patches, insert_zeros(weight, last_A.inserted_zeros), stride=self.stride)
+                    flattened_patches = patches.reshape(
+                        -1, patches.size(-3), patches.size(-2), patches.size(-1))
+                    pieces = F.conv_transpose2d(
+                        flattened_patches, insert_zeros(weight, last_A.inserted_zeros)
+                        , stride=self.stride)
                     # New patch size: (out_c, batch, out_h, out_w, c, h, w) or (unstable_size, batch, c, h, w).
-                    pieces = pieces.view(*patches.shape[:-3], pieces.size(-3), pieces.size(-2), pieces.size(-1))
+                    pieces = pieces.view(
+                        *patches.shape[:-3], pieces.size(-3), pieces.size(-2),
+                        pieces.size(-1))
 
                 elif last_A.identity == 1:
                     # New patches have size [out_c, batch, out_h, out_w, c, h, w] if it is not sparse.
                     # New patches have size [unstable_size, batch, c, h, w] if it is sparse.
                     if last_A.unstable_idx is not None:
-                        pieces = weight.view(weight.size(0), 1, weight.size(1), weight.size(2), weight.size(3))
+                        pieces = weight.view(
+                            weight.size(0), 1, weight.size(1), weight.size(2),
+                            weight.size(3))
                         # Select based on the output channel (out_h and out_w are irrelevant here).
                         pieces = pieces[last_A.unstable_idx[0]]
                         # Expand the batch dimnension.
@@ -126,7 +151,9 @@ class BoundConv(Bound):
                             sum_bias = 0
                     else:
                         assert weight.size(0) == last_A.shape[0]
-                        pieces = weight.view(weight.size(0), 1, 1, 1, weight.size(1), weight.size(2), weight.size(3)).expand(-1, *last_A.shape[1:4], -1, -1, -1)
+                        pieces = weight.view(
+                            weight.size(0), 1, 1, 1, weight.size(1), weight.size(2),
+                            weight.size(3)).expand(-1, *last_A.shape[1:4], -1, -1, -1)
                         # The bias (x[2].lower) has shape (out_c,) need to make it (out_c, batch, out_h, out_w).
                         # Here we should transpose sum_bias to set the batch dim to 1, aiming to keep it consistent with the matrix version
                         if self.has_bias:
@@ -140,13 +167,18 @@ class BoundConv(Bound):
                 inserted_zeros = last_A.inserted_zeros if last_A is not None else 0
                 output_padding = last_A.output_padding if last_A is not None else (0, 0, 0, 0)
 
-                padding, stride, output_padding = compute_patches_stride_padding(self.input_shape, padding, stride, self.padding, self.stride, inserted_zeros, output_padding)
+                padding, stride, output_padding = compute_patches_stride_padding(
+                    self.input_shape, padding, stride, self.padding, self.stride,
+                    inserted_zeros, output_padding)
 
-                if inserted_zeros == 0 and not is_shape_used(output_padding) and pieces.shape[-1] > self.input_shape[-1]:  # the patches is too large and from now on, we will use matrix mode instead of patches mode.
+                if (inserted_zeros == 0 and not is_shape_used(output_padding)
+                    and pieces.shape[-1] > self.input_shape[-1]):  # the patches is too large and from now on, we will use matrix mode instead of patches mode.
                     # This is our desired matrix: the input will be flattend to (batch_size, input_channel*input_x * input_y) and multiplies on this matrix.
                     # After multiplication, the desired output is (batch_size, out_channel*output_x*output_y).
                     # A_matrix has size (batch, out_c*out_h*out_w, in_c*in_h*in_w)
-                    A_matrix = patches_to_matrix(pieces, self.input_shape[1:], stride, padding, last_A.output_shape, last_A.unstable_idx)
+                    A_matrix = patches_to_matrix(
+                        pieces, self.input_shape[1:], stride, padding,
+                        last_A.output_shape, last_A.unstable_idx)
                     # print(f'Converting patches to matrix: old shape {pieces.shape}, size {pieces.numel()}; new shape {A_matrix.shape}, size {A_matrix.numel()}')
                     if isinstance(sum_bias, Tensor) and last_A.unstable_idx is None:
                         sum_bias = sum_bias.transpose(0, 1)
@@ -154,7 +186,11 @@ class BoundConv(Bound):
                     A_matrix = A_matrix.transpose(0,1)  # Spec dimension at the front.
                     return A_matrix, sum_bias
                 # print(f'Conv returns patches with size={pieces.size()}, stride={stride}, padding={padding}, inserted_zeros={inserted_zeros}, output_padding={output_padding}')
-                return Patches(pieces, stride, padding, pieces.shape, unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape, inserted_zeros=last_A.inserted_zeros, output_padding=output_padding), sum_bias
+                return Patches(pieces, stride, padding, pieces.shape,
+                               unstable_idx=last_A.unstable_idx,
+                               output_shape=last_A.output_shape,
+                               inserted_zeros=last_A.inserted_zeros,
+                               output_padding=output_padding), sum_bias
             else:
                 raise NotImplementedError()
 
@@ -371,6 +407,13 @@ class BoundConv(Bound):
             uw = center_w + deviation_w,
             ub = center_b + deviation_b)
 
+    def build_gradient_node(self, grad_upstream):
+        node_grad = Conv2dGrad(
+            self, self.inputs[1].param, self.stride, self.padding,
+            self.dilation, self.groups)
+        return node_grad, (grad_upstream,), []
+
+
 class BoundConvTranspose(Bound):
     def __init__(self, attr, inputs, output_index, options):
         super().__init__(attr, inputs, output_index, options)
@@ -461,15 +504,6 @@ class BoundConvTranspose(Bound):
                     # New patches have size [unstable_size, batch, c, h, w] if it is sparse.
                     if last_A.unstable_idx is not None:
                         raise NotImplementedError()
-                        pieces = weight.view(weight.size(0), 1, weight.size(1), weight.size(2), weight.size(3))
-                        # Select based on the output channel (out_h and out_w are irrelevant here).
-                        pieces = pieces[last_A.unstable_idx[0]]
-                        # Expand the batch dimnension.
-                        pieces = pieces.expand(-1, last_A.shape[1], -1, -1, -1)
-                        # Do the same for the bias.
-                        sum_bias = x[2].lower[last_A.unstable_idx[0]].unsqueeze(-1)
-                        # bias has shape (unstable_size, batch).
-                        sum_bias = sum_bias.expand(-1, last_A.shape[1])
                     else:
                         assert weight.size(0) == last_A.shape[0]
                         pieces = weight.view(weight.size(0), 1, 1, 1, weight.size(1), weight.size(2), weight.size(3)).expand(-1, *last_A.shape[1:4], -1, -1, -1)
@@ -549,19 +583,6 @@ class BoundConvTranspose(Bound):
             deviation = deviation.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         else: # Here we calculate the L0 norm IBP bound using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
             raise NotImplementedError()
-            norm, eps, ratio = Interval.get_perturbation(v[0])
-            mid = h_U
-            k = int(eps)
-            weight_sum = torch.sum(weight.abs(), 1)
-            deviation = torch.sum(torch.topk(weight_sum.view(weight_sum.shape[0], -1), k)[0], dim=1) * ratio
-
-            if self.has_bias:
-                center = F.conv2d(mid, weight, v[2][0], self.stride, self.padding, self.dilation, self.groups)
-            else:
-                center = F.conv2d(mid, weight, None, self.stride, self.padding, self.dilation, self.groups)
-
-            ss = center.shape
-            deviation = deviation.repeat(ss[2] * ss[3]).view(-1, ss[1]).t().view(ss[1], ss[2], ss[3])
 
         center = F.conv_transpose2d(mid, weight, bias, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups, output_padding=self.output_padding)
 

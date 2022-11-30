@@ -42,8 +42,4 @@ class BoundSoftmax(Bound):
         exp_L, exp_U = torch.exp(h_L - shift), torch.exp(h_U - shift)
         lower = exp_L / (torch.sum(exp_U, dim=self.axis, keepdim=True) - exp_U + exp_L + epsilon)
         upper = exp_U / (torch.sum(exp_L, dim=self.axis, keepdim=True) - exp_L + exp_U + epsilon)
-        return lower, upper  
-
-    def infer_batch_dim(self, batch_size, *x):
-        assert self.axis != x[0]
-        return x[0]
+        return lower, upper

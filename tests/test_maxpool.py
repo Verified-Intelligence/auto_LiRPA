@@ -10,26 +10,13 @@ from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import Flatten
 from testcase import TestCase
 
-def MadryCNN():
-    return nn.Sequential(
-        nn.Conv2d(1, 32, 5, stride=1, padding=2),
-        nn.ReLU(),
-        nn.MaxPool2d(2, stride=2),
-        nn.Conv2d(32, 64, 5, stride=1, padding=2),
-        nn.ReLU(),
-        nn.MaxPool2d(2, stride=2),
-        Flatten(),
-        nn.Linear(64*7*7,1024),
-        nn.ReLU(),
-        nn.Linear(1024, 10)
-    )
 
 class Model(nn.Module):
     def __init__(self, kernel_size=4, stride=4, padding=0, conv_padding=0):
         super(Model, self).__init__()
-        self.n_n_conv2d = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 1, 'padding': [0, 0], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
+        self.n_n_conv2d = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 1, 'padding': conv_padding, 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
         self.n_n_maxpool = nn.MaxPool2d(**{'kernel_size': [kernel_size, kernel_size], 'ceil_mode': False, 'stride': [stride, stride], 'padding': [padding, padding]})
-        self.n_n_conv2d_2 = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 8, 'padding': [conv_padding, conv_padding], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
+        self.n_n_conv2d_2 = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 1, 'padding': [conv_padding, conv_padding], 'kernel_size': (2, 2), 'stride': [1, 1], 'in_channels': 1, 'bias': True})
         self.n_n_maxpool_2 = nn.MaxPool2d(**{'kernel_size': [kernel_size, kernel_size], 'ceil_mode': False, 'stride': [stride, stride], 'padding': [padding, padding]})
         self.n_n_flatten_Flatten = nn.Flatten(**{'start_dim': 1})
 
@@ -44,14 +31,14 @@ class Model(nn.Module):
         t_maxpool = self.n_n_maxpool(t_conv2d_relu)[:, :, :, :]
         t_conv2d_max = self.n_n_conv2d_2(t_maxpool)
         t_conv2d_max = F.relu(t_conv2d_max)
-        t_maxpool_2 = self.n_n_maxpool_2(t_conv2d_max)
-        t_flatten_Transpose = t_maxpool_2.permute(*[0, 2, 3, 1])
+        # t_maxpool_2 = self.n_n_maxpool_2(t_conv2d_max)
+        t_flatten_Transpose = t_conv2d_max.permute(*[0, 2, 3, 1])
         t_flatten_Flatten = self.n_n_flatten_Flatten(t_flatten_Transpose)
         t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Flatten, 2)
         t_flatten_Unsqueeze = torch.unsqueeze(t_flatten_Unsqueeze, 3)
 
         if self.n_n_dense is None:
-            self.n_n_dense = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 10, 'padding': [0, 0], 'kernel_size': (1, 1), 'stride': [1, 1], 'in_channels': t_flatten_Unsqueeze.shape[1], 'bias': True})
+            self.n_n_dense = nn.Conv2d(**{'groups': 1, 'dilation': [1, 1], 'out_channels': 2, 'padding': [0, 0], 'kernel_size': (1, 1), 'stride': [1, 1], 'in_channels': t_flatten_Unsqueeze.shape[1], 'bias': True})
         t_dense = self.n_n_dense(t_flatten_Unsqueeze)
         t_activation_Flatten = self.n_n_activation_Flatten(t_dense)
 
@@ -69,7 +56,7 @@ class TestMaxPool(TestCase):
         N = 2
 
         for kernel_size in [3,4]:
-            for padding in [0]:
+            for padding in [0,1]:
                     for conv_padding in [0,1]:
                         print(kernel_size, padding, kernel_size, conv_padding)
 
@@ -116,5 +103,5 @@ class TestMaxPool(TestCase):
 
 
 if __name__ == '__main__':
-    testcase = TestMaxPool(generate=True)
+    testcase = TestMaxPool(generate=False)
     testcase.test()

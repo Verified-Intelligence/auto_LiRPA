@@ -1,8 +1,5 @@
 import torch
-import random
 import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
 import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
@@ -11,9 +8,10 @@ sys.path.append('../examples/vision')
 import models
 from testcase import TestCase
 
-class TestResnetPatches(TestCase): 
+
+class TestResnetPatches(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1234, ref_path='data/resnet_patches_test_data',
             generate=generate)
 
@@ -27,10 +25,10 @@ class TestResnetPatches(TestCase):
             self.reference = torch.load(self.ref_path)
 
         for model_ori in model_oris:
-            conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'        
-                
+            conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'
+
             normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
-            test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
+            test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True,
                             transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
             N = 1
             n_classes = 10

@@ -1,0 +1,2 @@
+onnxruntime>=1.12
+git+https://github.com/KaidiXu/onnx2pytorch.git

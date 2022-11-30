@@ -1,10 +1,7 @@
-from auto_LiRPA.beta_crown import print_optimized_beta
 import torch
-from torch import Tensor
 import warnings
 from .bound_ops import *
 from .utils import *
-from .backward_bound import batched_backward
 from .linear_bound import LinearBound
 from .perturbations import PerturbationLpNorm
 
@@ -32,7 +29,7 @@ def forward_general(self, C=None, node=None, concretize=False, offset=0):
             self.forward_general(node=l_pre, offset=offset)
     inp = [l_pre.linear for l_pre in node.inputs]
     node._start = '_forward'
-    if (C is not None and isinstance(node, BoundLinear) and 
+    if (C is not None and isinstance(node, BoundLinear) and
             not node.is_input_perturbed(1) and not node.is_input_perturbed(2)):
         linear = node.bound_forward(self.dim_in, *inp, C=C)
         C_merged = True
@@ -75,16 +72,14 @@ def forward_general(self, C=None, node=None, concretize=False, offset=0):
                     prev_dim_in += self.root[i].dim
         linear.lower, linear.upper = lower, upper
 
-        if C is None:          
+        if C is None:
             node.linear = linear
             node.lower, node.upper = lower, upper
-        
+
         if self.bound_opts['forward_refinement']:
             need_refinement = False
             for out in node.output_name:
                 out_node = self[out]
-                if getattr(out_node, 'nonlinear', False):
-                    need_refinement = True
                 for i in getattr(out_node, 'requires_input_bounds', []):
                     if out_node.inputs[i] == node:
                         need_refinement = True
@@ -97,7 +92,7 @@ def forward_general(self, C=None, node=None, concretize=False, offset=0):
 def forward_general_dynamic(
         self, C=None, node=None, concretize=False, offset=0):
     max_dim = self.bound_opts['forward_max_dim']
-    
+
     if C is None:
         if hasattr(node, 'linear'):
             assert not concretize
@@ -142,7 +137,7 @@ def forward_general_dynamic(
                 return node.lower, node.upper
             else:
                 if offset > 0:
-                    lb = torch.zeros_like(node.lower)                
+                    lb = torch.zeros_like(node.lower)
                 else:
                     lb = node.lower
                 node.linear = LinearBound(None, lb, None, lb, node.lower, node.upper)
@@ -158,7 +153,7 @@ def forward_general_dynamic(
         linear_inp.upper = getattr(l_pre, 'upper', None)
         inp.append(linear_inp)
     node._start = '_forward'
-    if (C is not None and isinstance(node, BoundLinear) and 
+    if (C is not None and isinstance(node, BoundLinear) and
             not node.is_input_perturbed(1) and not node.is_input_perturbed(2)):
         linear = node.bound_dynamic_forward(
             *inp, C=C, max_dim=max_dim, offset=offset)
@@ -211,7 +206,7 @@ def forward_general_dynamic(
 
         if C is None:
             node.lower, node.upper = lower, upper
-        
+
         return lower, upper
     else:
         return linear
@@ -220,7 +215,7 @@ def forward_general_dynamic(
 def clean_memory(self, node):
     """ Remove linear bounds that are no longer needed. """
     # TODO add an option to retain these bounds
-    
+
     for inp in node.inputs:
         if hasattr(inp, 'linear') and inp.linear is not None:
             clean = True
@@ -236,7 +231,7 @@ def clean_memory(self, node):
 
 
 def forward_refinement(self, node):
-    """ Refine forward bounds with backward bound propagation 
+    """ Refine forward bounds with backward bound propagation
     (only refine unstable positions). """
     unstable_size_before = torch.logical_and(node.lower < 0, node.upper > 0).sum()
     if unstable_size_before == 0:
@@ -274,10 +269,10 @@ def init_forward(self, root, dim_in):
                     raise NotImplementedError(
                         'For dynamic forward bounds, only Linf (box) perturbations are supported, and x_L and x_U must be explicitly provided.')
                 root[i].linear.x_L = (
-                    ptb.x_L_sparse.view(batch_size, -1) if ptb.sparse 
+                    ptb.x_L_sparse.view(batch_size, -1) if ptb.sparse
                     else ptb.x_L.view(batch_size, -1))
                 root[i].linear.x_U = (
-                    ptb.x_U_sparse.view(batch_size, -1) if ptb.sparse 
+                    ptb.x_U_sparse.view(batch_size, -1) if ptb.sparse
                     else ptb.x_U.view(batch_size, -1))
             else:
                 lw = torch.zeros(shape[0], dim_in, *shape[2:]).to(root[i].linear.lw)
@@ -303,4 +298,3 @@ def init_forward(self, root, dim_in):
                 w = None
             root[i].linear = LinearBound(w, b, w, b, b, b)
             root[i].lower = root[i].upper = b
-            root[i].interval = (root[i].lower, root[i].upper)

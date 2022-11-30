@@ -1,14 +1,14 @@
-""" Convolution, pooling and padding operators"""
-from multiprocessing.sharedctypes import Value
+"""Pooling operators."""
+from collections import OrderedDict
 from .base import *
-from .activation import BoundOptimizableActivation
+from .activation_base import BoundOptimizableActivation
 import numpy as np
 from .solver_utils import grb
 
 
 class BoundMaxPool(BoundOptimizableActivation):
     #FIXME clean up needed
-    
+
     def __init__(self, attr, inputs, output_index, options):
         super().__init__(attr, inputs, output_index, options)
         assert ('pads' not in attr) or (attr['pads'][0] == attr['pads'][2])
@@ -48,9 +48,9 @@ class BoundMaxPool(BoundOptimizableActivation):
                 warnings.warn("MaxPool's optimization is not supported for forward mode")
                 continue
             self.alpha[ns] = torch.empty(
-                [1, size_s, self.input_shape[0], self.input_shape[1], 
-                self.output_shape[-2], self.output_shape[-1], 
-                self.kernel_size[0], self.kernel_size[1]], 
+                [1, size_s, self.input_shape[0], self.input_shape[1],
+                self.output_shape[-2], self.output_shape[-1],
+                self.kernel_size[0], self.kernel_size[1]],
                 dtype=torch.float, device=ref.device, requires_grad=True)
             self.init[ns] = False
 
@@ -65,8 +65,6 @@ class BoundMaxPool(BoundOptimizableActivation):
 
         if self.stride[0] != self.kernel_size[0]:
             raise ValueError("self.stride ({}) != self.kernel_size ({})".format(self.stride, self.kernel_size))
-        if self.padding[0] != 0:
-            raise ValueError("BoundMaxPool doesn't support padding != 0")
 
         shape = self.input_shape
         batch_size = x.lower.shape[0]
@@ -87,7 +85,7 @@ class BoundMaxPool(BoundOptimizableActivation):
 
         if paddings == (0,0,0,0):
             delete_upper = torch.scatter(
-                torch.flatten(x.upper, -2), -1, 
+                torch.flatten(x.upper, -2), -1,
                 torch.flatten(max_lower_index, -2), -np.inf).view(upper_d.shape)
         else:
             delete_upper = torch.scatter(torch.flatten(F.pad(x.upper, paddings), -2), -1, torch.flatten(max_lower_index, -2), -np.inf).view(upper_d.shape)
@@ -121,7 +119,7 @@ class BoundMaxPool(BoundOptimizableActivation):
 
                 # [batch, C, k, k, out_H, out_W]
                 alpha_data = lower_d_unfold.view(lower_d.shape[0], lower_d.shape[1], self.kernel_size[0], self.kernel_size[1], self.output_shape[-2], self.output_shape[-1])
-                
+
                 # [batch, C, out_H, out_W, k, k]
                 alpha.data.copy_(alpha_data.permute((0,1,4,5,2,3)).clone().detach())
                 self.init[start_node.name] = True
@@ -147,7 +145,7 @@ class BoundMaxPool(BoundOptimizableActivation):
         # For the upper bound, we set the bias term to concrete upper bounds for maxpool neurons that are not linear.
         max_upper_, _ = F.max_pool2d(x.upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
         upper_b[max_upper > max_lower] = max_upper_[max_upper > max_lower]
-        
+
         def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
             if last_A is None:
                 return None, 0
@@ -166,31 +164,63 @@ class BoundMaxPool(BoundOptimizableActivation):
 
                 # Here we should comfirm that the maxpool patches are not overlapped.
                 shape = last_A.size()
+
+                padding = [self.padding[0], self.padding[0], self.padding[1], self.padding[1]]
+                d_pos = F.pad(d_pos, padding)
+                d_neg = F.pad(d_neg, padding)
+
                 pos_A = F.interpolate(pos_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-                if self.input_shape[-2] != pos_A.shape[-2] and self.input_shape[-1] != pos_A.shape[-1]:
-                    pos_A = F.pad(pos_A, (0, self.input_shape[-2] - pos_A.shape[-2], 0, self.input_shape[-1] - pos_A.shape[-1]))
+                if d_pos.shape[-2] > pos_A.shape[-2] or d_pos.shape[-1] > pos_A.shape[-1]:
+                    if not (d_pos.shape[-2] > pos_A.shape[-2] and d_pos.shape[-1] > pos_A.shape[-1]):
+                        raise NotImplementedError("Asymmetric padding of maxpool not implemented.")
+                    pos_A = F.pad(pos_A, (0, d_pos.shape[-2] - pos_A.shape[-2], 0, d_pos.shape[-1] - pos_A.shape[-1]))
+                else:
+                    d_pos = F.pad(d_pos, (0, pos_A.shape[-2] - d_pos.shape[-2], 0, pos_A.shape[-1] - d_pos.shape[-1]))
                 pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
 
                 neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-                if self.input_shape[-2] != neg_A.shape[-2] and self.input_shape[-1] != neg_A.shape[-1]:
-                    neg_A = F.pad(neg_A, (0, self.input_shape[-2] - neg_A.shape[-2], 0, self.input_shape[-1] - neg_A.shape[-1]))
+                if d_neg.shape[-2] > neg_A.shape[-2] or d_neg.shape[-1] > neg_A.shape[-1]:
+                    if not (d_neg.shape[-2] > neg_A.shape[-2] and d_neg.shape[-1] > neg_A.shape[-1]):
+                        raise NotImplementedError("Asymmetric padding of maxpool not implemented.")
+                    neg_A = F.pad(neg_A, (0, d_neg.shape[-2] - neg_A.shape[-2], 0, d_neg.shape[-1] - neg_A.shape[-1]))
+                else:
+                    d_neg = F.pad(d_neg, (0, neg_A.shape[-2] - d_neg.shape[-2], 0, neg_A.shape[-1] - d_neg.shape[-1]))
                 neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
 
                 next_A = self.jit_mutiply(pos_A, neg_A, d_pos, d_neg)
+                if self.padding[0] > 0 or self.padding[1] > 0:
+                    next_A = next_A[...,self.padding[0]:-self.padding[0], self.padding[1]:-self.padding[1]]
             elif isinstance(last_A, Patches):
+                # The last_A.patches was not padded, so we need to pad them here.
+                # If this Conv layer is followed by a ReLU layer, then the padding was already handled there and there is no need to pad again.
+                one_d = torch.ones(tuple(1 for i in self.output_shape[1:]), device=last_A.patches.device, dtype=last_A.patches.dtype).expand(self.output_shape[1:])
+                # Add batch dimension.
+                one_d = one_d.unsqueeze(0)
+                # After unfolding, the shape is (1, out_h, out_w, in_c, h, w)
+                one_d_unfolded = inplace_unfold(one_d, kernel_size=last_A.patches.shape[-2:], stride=last_A.stride, padding=last_A.padding, inserted_zeros=last_A.inserted_zeros, output_padding=last_A.output_padding)
+                if last_A.unstable_idx is not None:
+                    # Move out_h, out_w dimension to the front for easier selection.
+                    one_d_unfolded_r = one_d_unfolded.permute(1, 2, 0, 3, 4, 5)
+                    # for sparse patches the shape is (unstable_size, batch, in_c, h, w). Batch size is 1 so no need to select here.
+                    one_d_unfolded_r = one_d_unfolded_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
+                else:
+                    # Append the spec dimension.
+                    one_d_unfolded_r = one_d_unfolded.unsqueeze(0)
+                patches = last_A.patches * one_d_unfolded_r
+
                 if b_pos is not None:
                     patch_pos = Patches(
-                        last_A.patches.clamp(min=0), last_A.stride, last_A.padding, 
-                        last_A.shape, unstable_idx=last_A.unstable_idx, 
+                        patches.clamp(min=0), last_A.stride, last_A.padding,
+                        last_A.shape, unstable_idx=last_A.unstable_idx,
                         output_shape=last_A.output_shape)
                     bias = bias + self.get_bias(patch_pos, b_pos)
                 if b_neg is not None:
                     patch_neg = Patches(
-                        last_A.patches.clamp(max=0), last_A.stride, last_A.padding, 
-                        last_A.shape, unstable_idx=last_A.unstable_idx, 
-                        output_shape=last_A.output_shape)                    
+                        patches.clamp(max=0), last_A.stride, last_A.padding,
+                        last_A.shape, unstable_idx=last_A.unstable_idx,
+                        output_shape=last_A.output_shape)
                     bias = bias + self.get_bias(patch_neg, b_neg)
-                
+
                 # bias = bias.transpose(0,1)
                 shape = last_A.shape
                 pos_A = last_A.patches.clamp(min=0)
@@ -199,20 +229,20 @@ class BoundMaxPool(BoundOptimizableActivation):
                 def upsample(last_patches, last_A):
                     if last_A.unstable_idx is None:
                         patches = F.interpolate(
-                            last_patches.view(shape[0] * shape[1] * shape[2], *shape[3:]), 
+                            last_patches.view(shape[0] * shape[1] * shape[2], *shape[3:]),
                             scale_factor=[1,]+self.kernel_size)
                         patches = patches.view(shape[0], shape[1], shape[2], *patches.shape[1:])
                     else:
                         patches = F.interpolate(
                             last_patches, scale_factor=[1,] + self.kernel_size)
                     return Patches(
-                        patches, stride=last_A.stride, padding=last_A.padding, 
-                        shape=patches.shape, unstable_idx=last_A.unstable_idx, 
+                        patches, stride=last_A.stride, padding=last_A.padding,
+                        shape=patches.shape, unstable_idx=last_A.unstable_idx,
                         output_shape=last_A.output_shape)
 
                 pos_A = upsample(pos_A, last_A)
                 neg_A = upsample(neg_A, last_A)
-                
+
                 stride = self.stride[0] * last_A.stride
                 if isinstance(last_A.padding, int):
                     padding = last_A.padding * self.stride[0] + self.padding[0]
@@ -266,11 +296,11 @@ class BoundMaxPool(BoundOptimizableActivation):
                 tot_kernel_size = self.kernel_size ** 2
             else:
                 raise ValueError(f'Unsupported kernel size {self.kernel_size}')
-            w_pooled = (F.avg_pool2d(w_new.view(-1, *w_new.shape[2:]), 
-                self.kernel_size, self.stride, self.padding, 
+            w_pooled = (F.avg_pool2d(w_new.view(-1, *w_new.shape[2:]),
+                self.kernel_size, self.stride, self.padding,
                 ceil_mode=self.ceil_mode) * tot_kernel_size)
             w_pooled = w_pooled.reshape(w_new.shape[0], -1, *w_pooled.shape[1:])
-            b_pooled = F.avg_pool2d(b_new, self.kernel_size, self.stride, self.padding, 
+            b_pooled = F.avg_pool2d(b_new, self.kernel_size, self.stride, self.padding,
                 ceil_mode=self.ceil_mode) * tot_kernel_size + b
             return w_pooled, b_pooled
 
@@ -444,7 +474,8 @@ class BoundAveragePool(Bound):
             if isinstance(last_A, torch.Tensor):
                 shape = last_A.size()
                 # propagate A to the next layer, with batch concatenated together
-                next_A = F.interpolate(last_A.view(shape[0] * shape[1], *shape[2:]),
+                next_A = F.interpolate(
+                    last_A.reshape(shape[0] * shape[1], *shape[2:]),
                     scale_factor=self.kernel_size) / (prod(self.kernel_size))
                 next_A = F.pad(next_A, (0, self.input_shape[-2] - next_A.shape[-2], 0, self.input_shape[-1] - next_A.shape[-1]))
                 next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
@@ -504,7 +535,7 @@ class BoundAveragePool(Bound):
         lA, lbias = _bound_oneside(last_lA)
         uA, ubias = _bound_oneside(last_uA)
         return [(lA, uA)], lbias, ubias
-    
+
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         # e.g., last layer input gurobi vars (3,32,32)
         gvars_array = np.array(v[0])
@@ -513,7 +544,7 @@ class BoundAveragePool(Bound):
         # this layer shape (1,32,6,6)
         this_layer_shape = self.output_shape
         assert this_layer_shape[2] ==  ((2 * self.padding[0] + pre_layer_shape[2] - (self.stride[0] - 1))//self.stride[0])
-        
+
         value = 1.0/(self.kernel_size[0] * self.kernel_size[1])
         new_layer_gurobi_vars = []
         neuron_idx = 0

@@ -1,4 +1,4 @@
-""" RNN """
+"""RNN."""
 from .base import *
 
 
@@ -7,6 +7,11 @@ class BoundRNN(Bound):
         super().__init__(attr, inputs, output_index, options)
         self.complex = True
         self.output_index = output_index
+        raise NotImplementedError(
+            'torch.nn.RNN is not supported at this time.'
+            'Please implement your RNN with torch.nn.RNNCell and a manual for-loop.'
+            'See an example of LSTM:'
+            'https://github.com/Verified-Intelligence/auto_LiRPA/blob/10a9b30/examples/sequence/lstm.py#L9')
 
     def forward(self, x, weight_input, weight_recurrent, bias, sequence_length, initial_h):
         assert (torch.sum(torch.abs(initial_h)) == 0)
@@ -16,7 +21,7 @@ class BoundRNN(Bound):
 
         class BoundRNNImpl(nn.Module):
             def __init__(self, input_size, hidden_size,
-                         weight_input, weight_recurrent, bias, output_index, options):
+                         weight_input, weight_recurrent, bias, output_index):
                 super().__init__()
 
                 self.input_size = input_size
@@ -34,10 +39,9 @@ class BoundRNN(Bound):
 
                 self.output_index = output_index
 
-            def forward(self, x):
+            def forward(self, x, hidden):
                 length = x.shape[0]
                 outputs = []
-                hidden = torch.zeros(x.shape[1], self.hidden_size).to(x)
                 for i in range(length):
                     hidden = self.cell(x[i, :], hidden)
                     outputs.append(hidden.unsqueeze(0))
@@ -52,6 +56,6 @@ class BoundRNN(Bound):
             self.input_size, self.hidden_size,
             weight_input, weight_recurrent, bias,
             self.output_index)
-        self.input = (x,)
+        self.input = (x, initial_h)
 
-        return self.model(self.input)
+        return self.model(*self.input)

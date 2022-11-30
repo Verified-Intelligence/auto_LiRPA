@@ -1,4 +1,5 @@
 """ Normalization operators"""
+import copy
 from .base import *
 from .solver_utils import grb
 

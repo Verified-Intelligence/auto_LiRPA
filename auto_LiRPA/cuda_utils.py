@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import torch
 from torch.utils.cpp_extension import load, BuildExtension, CUDAExtension
 from setuptools import setup
@@ -24,7 +23,7 @@ if __name__ == "__main__" and len(sys.argv) > 1:
     setup(
         name='auto_LiRPA_cuda_utils',
         ext_modules=[CUDAExtension('auto_LiRPA_cuda_utils', [
-            'auto_LiRPA/cuda/cuda_utils.cpp', 
+            'auto_LiRPA/cuda/cuda_utils.cpp',
             'auto_LiRPA/cuda/cuda_kernels.cu'
         ])],
         cmdclass={'build_ext': BuildExtension.with_options()},
@@ -35,7 +34,7 @@ if torch.cuda.is_available() and os.environ.get('AUTOLIRPA_ENABLE_CUDA_BUILD', F
     try:
         import auto_LiRPA_cuda_utils as _cuda_utils
     except:
-        print('CUDA modules have not been installed')        
+        print('CUDA modules have not been installed')
         try:
             print('Building native CUDA modules...')
             code_dir = os.path.dirname(os.path.abspath(__file__))
@@ -50,11 +49,11 @@ if torch.cuda.is_available() and os.environ.get('AUTOLIRPA_ENABLE_CUDA_BUILD', F
                 print(sys.exc_info()[2])
             else:
                 print('Set environment variable AUTOLIRPA_DEBUG_CUDA_BUILD=1 to view build log.')
-            _cuda_utils = DummyCudaClass() 
+            _cuda_utils = DummyCudaClass()
 else:
     if os.environ.get('AUTOLIRPA_ENABLE_CUDA_BUILD', False):
         print('CUDA unavailable. Some features are disabled.')
-    _cuda_utils = DummyCudaClass() 
+    _cuda_utils = DummyCudaClass()
 
 double2float = _cuda_utils.double2float
 

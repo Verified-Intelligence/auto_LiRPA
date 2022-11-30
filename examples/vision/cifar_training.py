@@ -13,7 +13,7 @@ from torch.nn import CrossEntropyLoss
 import models
 from auto_LiRPA import BoundedModule, BoundedTensor, BoundDataParallel, CrossEntropyWrapper
 from auto_LiRPA.bound_ops import BoundExp
-from auto_LiRPA.eps_scheduler import AdaptiveScheduler, FixedScheduler, SmoothedScheduler
+from auto_LiRPA.eps_scheduler import LinearScheduler, SmoothedScheduler
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
 
@@ -44,7 +44,7 @@ parser.add_argument("--lr", type=float, default=5e-4, help='learning rate')
 parser.add_argument("--lr_decay_rate", type=float, default=0.1, help='learning rate decay rate')
 parser.add_argument("--lr_decay_milestones", nargs='+', type=int, default=[1400, 1700], help='learning rate dacay milestones')
 parser.add_argument("--scheduler_name", type=str, default="SmoothedScheduler",
-                    choices=["LinearScheduler", "AdaptiveScheduler", "SmoothedScheduler"], help='epsilon scheduler')
+                    choices=["LinearScheduler", "SmoothedScheduler"], help='epsilon scheduler')
 parser.add_argument("--scheduler_opts", type=str, default="start=101,length=801,mid=0.4", help='options for epsilon scheduler')
 parser.add_argument("--bound_opts", type=str, default=None, choices=["same-slope", "zero-lb", "one-lb"],
                     help='bound options for relu')

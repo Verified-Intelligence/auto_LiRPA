@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
-from testcase import TestCase  
+from testcase import TestCase
 
 class cnn_MNIST(nn.Module):
     def __init__(self):
@@ -25,15 +25,15 @@ class cnn_MNIST(nn.Module):
         x = self.fc2(x)
         return 0.5 * x
 
-class TestConstant(TestCase): 
+class TestConstant(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1, ref_path='data/constant_test_data',
             generate=generate)
 
     def test(self):
         model = cnn_MNIST()
-        checkpoint = torch.load("../examples/vision/pretrain/mnist_cnn_small.pth", map_location="cpu")
+        checkpoint = torch.load("../examples/vision/pretrained/mnist_cnn_small.pth", map_location="cpu")
         model.load_state_dict(checkpoint)
 
         N = 2
@@ -49,7 +49,7 @@ class TestConstant(TestCase):
         pred = model(image)
         lb, ub = model.compute_bounds()
 
-        assert lb.shape == ub.shape == torch.Size((2, 10))    
+        assert lb.shape == ub.shape == torch.Size((2, 10))
 
         self.result = (lb, ub)
         self.check()
@@ -58,4 +58,4 @@ if __name__ == '__main__':
     # Change to generate=True when genearting reference results
     testcase = TestConstant(generate=False)
     testcase.setUp()
-    testcase.test()        
+    testcase.test()

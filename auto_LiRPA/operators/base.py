@@ -1,17 +1,9 @@
 """ Base class and functions for implementing bound operators"""
-import copy
-import os
-import time
-import math
 import warnings
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 import numpy as np
-from itertools import chain
-from numpy.lib.arraysetops import isin
-from collections import OrderedDict
 
 from ..perturbations import *
 from ..utils import *
@@ -25,10 +17,11 @@ epsilon = 1e-12
 
 
 def not_implemented_op(node, func):
-    message = ("Function `{}` of `{}` is not supported yet."
-            " Please help to open an issue at https://github.com/KaidiXu/auto_LiRPA"
-            " or implement this function in auto_LiRPA/bound_ops.py"
-            " or auto_LiRPA/operators by yourself.".format(func, node))
+    message = (
+        f'Function `{func}` of `{node}` is not supported yet.'
+        ' Please help to open an issue at https://github.com/Verified-Intelligence/auto_LiRPA'
+        ' or implement this function in auto_LiRPA/bound_ops.py'
+        ' or auto_LiRPA/operators by yourself.')
     raise NotImplementedError(message)
 
 
@@ -154,6 +147,10 @@ class Bound(nn.Module):
         """ Clear attributes when there is a new input to the network"""
         pass
 
+    @property
+    def input_name(self):
+        return [node.name for node in self.inputs]
+
     def forward(self, *x):
         r"""
         Function for standard/clean forward.
@@ -197,10 +194,11 @@ class Bound(nn.Module):
         else:
             raise NotImplementedError('default_interval_propagate only supports no more than 1 input node')
 
-
     def bound_forward(self, dim_in, *x):
         r"""
-        Function for forward mode bound propagation. Forward mode LiRPA computs a `LinearBound`
+        Function for forward mode bound propagation.
+
+        Forward mode LiRPA computs a `LinearBound`
         instance representing the linear bound for each involved node.
         Major attributes of `LinearBound` include
         `lw`, `uw`, `lb`, `ub`, `lower`, and `upper`.
@@ -247,12 +245,6 @@ class Bound(nn.Module):
         """
         return not_implemented_op(self, 'bound_backward')
 
-    def infer_batch_dim(self, batch_size, *x):
-        # Default implementation assuming the batch dimension is always at 0.
-        # Do not use it if the operator can alter the shape
-        assert x[0] in [0, -1]
-        return x[0]
-
     def broadcast_backward(self, A, x):
         shape = x.output_shape
         batch_dim = max(self.batch_dim, 0)
@@ -285,6 +277,23 @@ class Bound(nn.Module):
         else:
             pass
         return A
+
+    def build_gradient_node(self, grad_upstream):
+        r"""
+        Function for building the gradient node to bound the Jacobian.
+
+        Args:
+            grad_upstream: Upstream gradient in the gradient back-propagation.
+
+        Returns:
+            node_grad (Bound): Gradient node.
+
+            grad_input (list): Inputs to the gradient node. Values do not
+            matter. We only want the shapes.
+
+            grad_extra_nodes (list): Extra nodes needed for the gradient.
+        """
+        return not_implemented_op(self, 'bound_forward')
 
     def get_bias(self, A, bias):
         if A is None:

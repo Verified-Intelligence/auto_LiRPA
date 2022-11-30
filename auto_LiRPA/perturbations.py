@@ -67,8 +67,12 @@ class Perturbation:
         raise NotImplementedError
 
 
-"""Perturbation constrained by the L_0 norm (assuming input data is in the range of 0-1)."""
 class PerturbationL0Norm(Perturbation):
+    """Perturbation constrained by the L_0 norm.
+
+    Assuming input data is in the range of 0-1.
+    """
+
     def __init__(self, eps, x_L=None, x_U=None, ratio=1.0):
         self.eps = eps
         self.x_U = x_U
@@ -426,7 +430,7 @@ class PerturbationSynonym(Perturbation):
         batch_size, length, dim_word = x.shape[0], x.shape[1], x.shape[2]
 
         max_pos = 1
-        can_be_replaced = np.zeros((batch_size, length), dtype=np.bool)
+        can_be_replaced = np.zeros((batch_size, length), dtype=bool)
 
         self._build_substitution(batch)
 

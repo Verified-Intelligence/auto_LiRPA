@@ -32,7 +32,7 @@ class cnn_MNIST(nn.Module):
 
 model = cnn_MNIST()
 # Load the pretrained weights
-checkpoint = torch.load(os.path.join(os.path.dirname(__file__),"pretrain/mnist_cnn_small.pth"))
+checkpoint = torch.load(os.path.join(os.path.dirname(__file__),"pretrained/mnist_cnn_small.pth"))
 model.load_state_dict(checkpoint)
 
 ## Step 2: Prepare dataset as usual

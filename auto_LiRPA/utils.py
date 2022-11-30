@@ -1,5 +1,4 @@
 import logging
-import pickle
 import time
 import torch
 import torch.nn as nn
@@ -11,10 +10,9 @@ from collections import defaultdict, namedtuple
 from collections.abc import Sequence
 from functools import reduce
 import operator
-import math
 import warnings
 from typing import Tuple
-from .patches import Patches, insert_zeros
+from .patches import Patches
 
 logging.basicConfig(
     format='%(levelname)-8s %(asctime)-12s %(message)s',
@@ -163,16 +161,16 @@ class MultiTimer(object):
 
 class Flatten(nn.Module):
     def forward(self, x):
-        return x.view(x.size(0), -1)        
+        return x.view(x.size(0), -1)
 
 class Unflatten(nn.Module):
     def __init__(self, wh):
         super().__init__()
         self.wh = wh # width and height of the feature maps
     def forward(self, x):
-        return x.view(x.size(0), -1, self.wh, self.wh)              
+        return x.view(x.size(0), -1, self.wh, self.wh)
 
-def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):    
+def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
     parameters = []
     for param_group in optimizer.param_groups:
         for param in param_group['params']:
@@ -180,7 +178,7 @@ def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
             if param.grad is not None:
                 param.grad.data /= gradient_accumulation_steps
     if grad_clip is not None:
-        return torch.nn.utils.clip_grad_norm_(parameters, grad_clip)                
+        return torch.nn.utils.clip_grad_norm_(parameters, grad_clip)
 
 def recursive_map (seq, func):
     for item in seq:
@@ -196,7 +194,7 @@ def unpack_inputs(inputs, device=None):
         inputs = list(inputs.values())
     if isinstance(inputs, tuple) or isinstance(inputs, list):
         res = []
-        for item in inputs: 
+        for item in inputs:
             res += unpack_inputs(item, device=device)
         return res
     else:
@@ -208,7 +206,7 @@ def isnan(x):
     if isinstance(x, Patches):
         return False
     return torch.isnan(x).any()
-    
+
 def prod(x):
     return reduce(operator.mul, x, 1)
 
@@ -245,10 +243,10 @@ def check_padding(x, padding):
 
 def get_spec_matrix(X, y, num_classes):
     with torch.no_grad():
-        c = (torch.eye(num_classes).type_as(X)[y].unsqueeze(1) 
+        c = (torch.eye(num_classes).type_as(X)[y].unsqueeze(1)
             - torch.eye(num_classes).type_as(X).unsqueeze(0))
         I = (~(y.unsqueeze(1) == torch.arange(num_classes).type_as(y).unsqueeze(0)))
-        c = (c[I].view(X.size(0), num_classes - 1, num_classes))  
+        c = (c[I].view(X.size(0), num_classes - 1, num_classes))
     return c
 
 def unravel_index(

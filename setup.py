@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 from pathlib import Path
 
 # Check PyTorch version
-pytorch_version_l = '1.8.0'
+pytorch_version_l = '1.11.0'
 pytorch_version_u = '1.13.0' # excluded
 msg_install_pytorch = (f'It is recommended to manually install PyTorch '
                     f'(>={pytorch_version_u},<{pytorch_version_u}) suitable '
@@ -40,7 +40,7 @@ setup(
     install_requires=[
         f'torch>={pytorch_version_l},<{pytorch_version_u}',
         'torchvision>=0.9,<0.14',
-        'numpy>=1.16',
+        'numpy>=1.20',
         'packaging>=20.0',
         'pytest>=5.0',
         'pylint>=2.15',

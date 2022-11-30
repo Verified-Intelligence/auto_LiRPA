@@ -7,6 +7,7 @@ from contextlib import ExitStack
 import torch
 from torch import optim
 from .cuda_utils import double2float
+from .utils import logger
 
 
 def _set_alpha(optimizable_activations, parameters, alphas, lr):
@@ -293,9 +294,8 @@ def _to_default_dtype(
     return total_loss, x, full_ret
 
 
-def _update_best_ret(
-        full_ret_bound, best_ret_bound, full_ret, best_ret, need_update, idx):
-    """Update best_ret_bound and best_ret by comparing with new results."""
+def _get_idx_mask(idx, full_ret_bound, best_ret_bound):
+    """Get index for improved elements."""
     assert idx in [0, 1], (
         '0 means updating lower bound, 1 means updating upper bound')
     if idx == 0:
@@ -305,10 +305,20 @@ def _update_best_ret(
 
     improved_idx = None
     if idx_mask.any():
-        need_update = True
         # we only pick up the results improved in a batch
         improved_idx = idx_mask.nonzero(as_tuple=True)[0]
-        # total_loss = total_loss.to(best_ret_l)
+    return idx_mask, improved_idx
+
+
+def _update_best_ret(
+        full_ret_bound, best_ret_bound, full_ret, best_ret, need_update, idx):
+    """Update best_ret_bound and best_ret by comparing with new results."""
+    assert idx in [0, 1], (
+        '0 means updating lower bound, 1 means updating upper bound')
+    idx_mask, improved_idx = _get_idx_mask(idx, full_ret_bound, best_ret_bound)
+
+    if improved_idx is not None:
+        need_update = True
         if idx == 0:
             best_ret_bound[improved_idx] = torch.maximum(
                 full_ret_bound[improved_idx], best_ret_bound[improved_idx])
@@ -326,14 +336,13 @@ def _update_best_ret(
 
 
 def _update_optimizable_activations(
-        optimizable_activations, pruning_in_iteration,
-        intermediate_layer_bounds, fix_intermediate_layer_bounds,
-        best_intermediate_bounds, idx, local_idx, alpha, best_alphas):
+        optimizable_activations, intermediate_layer_bounds,
+        fix_intermediate_layer_bounds, best_intermediate_bounds,
+        reference_idx, idx, alpha, best_alphas):
     """
     Update bounds and alpha of optimizable_activations.
     """
     for node in optimizable_activations:
-        reference_idx = local_idx if pruning_in_iteration else idx
         # Update best intermediate layer bounds only when they are optimized.
         # If they are already fixed in intermediate_layer_bounds, then do
         # nothing.
@@ -606,6 +615,7 @@ def get_optimized_bounds(
                 ret[0], float('-inf'), x, best_ret)
             best_ret_u = _save_ret_first_time(
                 ret[1], float('inf'), x, best_ret)
+            ret_0 = ret[0].detach().clone() if bound_lower else ret[1].detach().clone()
 
             for node in optimizable_activations:
                 new_intermediate = [
@@ -705,7 +715,6 @@ def get_optimized_bounds(
         else:
             loss = (total_loss * stop_criterion.logical_not()).sum()
 
-
         stop_criterion_final = isinstance(
             stop_criterion, torch.Tensor) and stop_criterion.all()
 
@@ -732,12 +741,12 @@ def get_optimized_bounds(
                     ret_upd = _update_best_ret(
                         full_ret_u, best_ret_u, full_ret, best_ret, need_update,
                         idx=1)
-                    best_ret_u, best_ret, idx_mask, idx, need_update = ret_upd
+                    best_ret_u, best_ret, _, _, need_update = ret_upd
                 if best_ret_l is not None:
                     ret_upd = _update_best_ret(
                         full_ret_l, best_ret_l, full_ret, best_ret, need_update,
                         idx=0)
-                    best_ret_l, best_ret, idx_mask, idx, need_update = ret_upd
+                    best_ret_l, best_ret, _, _, need_update = ret_upd
             else:
                 # Not saving the best, just keep the last iteration.
                 if full_ret[0] is not None:
@@ -748,45 +757,54 @@ def get_optimized_bounds(
                 # FIXME: A should also be updated by idx.
                 best_ret = [best_ret[0], best_ret[1], full_ret[2]]
 
+            if need_update:
+                patience = 0  # bounds improved, reset patience
+            else:
+                patience += 1
+
             # Save variables if this is the best iteration.
             # To save computational cost, we only check keep_best at the first
             # (in case divergence) and second half iterations
             # or before early stop by either stop_criterion or
             # early_stop_patience reached
-            # if i < 1 or i > iteration / 2 or stop_criterion_final or
-            # patience == early_stop_patience:
             if (i < 1 or i > int(iteration * start_save_best)
                     or stop_criterion_final or patience == early_stop_patience):
-                if need_update:
-                    patience = 0  # bounds improved, reset patience
-                    local_idx = None
+
+                # compare with the first iteration results and get improved indexes
+                if bound_lower:
+                    idx_mask, idx = _get_idx_mask(0, full_ret_l, ret_0)
+                    ret_0[idx] = full_ret_l[idx]
+                else:
+                    idx_mask, idx = _get_idx_mask(1, full_ret_u, ret_0)
+                    ret_0[idx] = full_ret_u[idx]
+
+                if idx is not None:
                     # for update propose, we condition the idx to update only
                     # on domains preserved
                     if pruning_in_iteration:
                         # local sparse index of preserved samples where
-                        # idx = true
+                        # idx == true
                         local_idx = idx_mask[preserve_mask].nonzero().view(-1)
                         # idx is global sparse index of preserved samples where
-                        # idx = true
+                        # idx == true
                         new_idx = torch.zeros_like(
-                            idx_mask, dtype=torch.bool, device=idx.device)
+                            idx_mask, dtype=torch.bool, device=x[0].device)
                         new_idx[preserve_mask] = idx_mask[preserve_mask]
                         idx = new_idx.nonzero().view(-1)
+                        reference_idx = local_idx
+                    else:
+                        reference_idx = idx
 
                     _update_optimizable_activations(
-                        optimizable_activations, pruning_in_iteration,
-                        intermediate_layer_bounds,
-                        fix_intermediate_layer_bounds,
-                        best_intermediate_bounds, idx, local_idx, alpha,
-                        best_alphas)
+                        optimizable_activations, intermediate_layer_bounds,
+                        fix_intermediate_layer_bounds, best_intermediate_bounds,
+                        reference_idx, idx, alpha, best_alphas)
 
                     if beta and single_node_split:
                         _update_best_beta(
                             self, enable_opt_interm_bounds, betas,
                             optimizable_activations, best_betas, idx)
 
-                else:
-                    patience += 1
 
         if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
             print(f'****** iter [{i}]',
@@ -797,7 +815,7 @@ def get_optimized_bounds(
             break
 
         if patience > early_stop_patience:
-            print(
+            logger.debug(
                 f'Early stop at {i}th iter due to {early_stop_patience}'
                 ' iterations no improvement!')
             break

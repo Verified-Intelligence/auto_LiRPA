@@ -1,6 +1,5 @@
 # auto_LiRPA: Automatic Linear Relaxation based Perturbation Analysis for Neural Networks
 
-![](https://travis-ci.com/KaidiXu/auto_LiRPA.svg?token=HM3jb55xV1sMRsVKBr8b&branch=master&status=started)
 [![Documentation Status](https://readthedocs.org/projects/auto-lirpa/badge/?version=latest)](https://auto-lirpa.readthedocs.io/en/latest/?badge=latest)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://PaperCode.cc/AutoLiRPA-Demo)
 [![Video Introduction](https://img.shields.io/badge/play-video-red.svg)](http://PaperCode.cc/AutoLiRPA-Video)
@@ -13,6 +12,7 @@
 
 ## What's New?
 
+- Bound computation for higher-order computational graphs to support bounding Jacobian, Jacobian-vector products, and [local Lipschitz constants](https://arxiv.org/abs/2210.07394). (11/2022)
 - Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2022](https://sites.google.com/view/vnn2022). Our library supports the large CIFAR100, TinyImageNet and ImageNet models in VNN-COMP 2022. (09/2022)
 - Implementation of **general cutting planes** ([GCP-CROWN](https://arxiv.org/pdf/2208.05740.pdf)), support of more activation functions and improved performance and scalability. (09/2022)
 - Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) **won** [VNN-COMP 2021](https://sites.google.com/view/vnn2021) **with the highest total score**, outperforming 11 SOTA verifiers. α,β-CROWN uses the `auto_LiRPA` library as its core bound computation library. (09/2021)
@@ -91,7 +91,7 @@ user-defined ranges.  We get guaranteed output ranges (bounds):
 
 ## Installation
 
-Python 3.7+ and PyTorch 1.8+ are required.
+Python 3.7+ and PyTorch 1.11+ are required.
 PyTorch 1.11 is recommended, although other recent versions might also work.
 It is highly recommended to have a pre-installed PyTorch
 that matches your system and our version requirement.
@@ -159,10 +159,12 @@ We provide [a wide range of examples](doc/src/examples.md) of using `auto_LiRPA`
 * [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/src/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
 * [Certifiably Robust Language Classifier using **Transformers**](doc/src/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/src/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
+* [Bounding **Jacobian** and **local Lipschitz constants**](examples/vision/jacobian.py)
 
 `auto_LiRPA` has also be used in the following works:
 * [**α,β-CROWN for complete neural network verification**](https://github.com/huanzhang12/alpha-beta-CROWN)
 * [**Fast certified robust training**](https://github.com/shizhouxing/Fast-Certified-Robust-Training)
+* [**Computing local Lipschitz constants**](https://github.com/shizhouxing/Local-Lipschitz-Constants)
 
 ## Full Documentations
 
@@ -183,7 +185,7 @@ The general LiRPA based bound propagation algorithm was originally proposed in o
 NeurIPS 2020
 Kaidi Xu\*, Zhouxing Shi\*, Huan Zhang\*, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya Kailkhura, Xue Lin, Cho-Jui Hsieh (\* Equal contribution)
 
-The `auto_LiRPA` library is further extended to allow optimized bound (α-CROWN), split constraints (β-CROWN) and general constraints (GCP-CROWN):
+The `auto_LiRPA` library is further extended to allow optimized bound (α-CROWN), split constraints (β-CROWN) general constraints (GCP-CROWN), and higher-order computational graphs:
 
 * [Fast and Complete: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers](https://arxiv.org/pdf/2011.13824.pdf).
 ICLR 2021.
@@ -195,6 +197,10 @@ Shiqi Wang\*, Huan Zhang\*, Kaidi Xu\*, Suman Jana, Xue Lin, Cho-Jui Hsieh and Z
 
 * [GCP-CROWN: General Cutting Planes for Bound-Propagation-Based Neural Network Verification](https://arxiv.org/abs/2208.05740).
 Huan Zhang\*, Shiqi Wang\*, Kaidi Xu\*, Linyi Li, Bo Li, Suman Jana, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution).
+
+* [Efficiently Computing Local Lipschitz Constants of Neural Networks via Bound Propagation](https://arxiv.org/abs/2210.07394).
+NeurIPS 2022.
+Zhouxing Shi, Yihan Wang, Huan Zhang, Zico Kolter, Cho-Jui Hsieh.
 
 Certified robust training using `auto_LiRPA` is improved to allow much shorter warmup and faster training:
 * [Fast Certified Robust Training with Short Warmup](https://arxiv.org/pdf/2103.17268.pdf).

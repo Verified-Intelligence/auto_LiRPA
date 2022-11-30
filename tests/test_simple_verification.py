@@ -28,7 +28,7 @@ class TestSimpleVerification(TestCase):
     def test(self):
       model = mnist_model()
       checkpoint = torch.load(
-        '../examples/vision/pretrain/mnist_a_adv.pth',
+        '../examples/vision/pretrained/mnist_a_adv.pth',
         map_location=torch.device('cpu'))
       model.load_state_dict(checkpoint)
 

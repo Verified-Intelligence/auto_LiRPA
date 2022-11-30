@@ -12,7 +12,6 @@ Verified-acc*.npy
 vnn-comp_*.npz
 *.tar.gz
 verifier_log_*
-*.pth
 *.pt
 .idea
 *.so

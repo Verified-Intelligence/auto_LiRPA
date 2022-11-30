@@ -10,9 +10,6 @@ class BoundConstant(Bound):
     def forward(self):
         return self.value.to(self.device)
 
-    def infer_batch_dim(self, batch_size, *x):
-        return -1
-
     def bound_backward(self, last_lA, last_uA):
         def _bound_oneside(A):
             if A is None:
@@ -40,7 +37,7 @@ class BoundConstant(Bound):
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.value
-        
+
 
 class BoundPrimConstant(Bound):
     def __init__(self, attr, input, output_index, options):
@@ -91,13 +88,6 @@ class BoundConstantOfShape(Bound):
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(v)
 
-    def infer_batch_dim(self, batch_size, *x):
-        # FIXME Should avoid referring to batch_size; Treat `torch.Size` results differently
-        if self.x[0] == batch_size:
-            return 0
-        else:
-            return -1
-
 class BoundRange(Bound):
     def __init__(self, attr, inputs, output_index, options):
         super().__init__(attr, inputs, output_index, options)
@@ -109,10 +99,6 @@ class BoundRange(Bound):
         else:
             return torch.arange(start, end, step, device=self.device)
 
-    def infer_batch_dim(self, batch_size, *x):
-        assert x[0] == x[1] == x[2] == -1
-        return -1
-
 class BoundATenDiag(Bound):
     def __init__(self, attr, inputs, output_index, options):
         super().__init__(attr, inputs, output_index, options)
@@ -123,9 +109,6 @@ class BoundATenDiag(Bound):
 
     def interval_propagate(self, *v):
         return Interval.make_interval(torch.diag(v[0][0], v[1][0]), torch.diag(v[0][1], v[1][0]), v[0])
-
-    def infer_batch_dim(self, batch_size, *x):
-        return 1  # This is not a batch operation.
 
 class BoundATenDiagonal(Bound):
     def __init__(self, attr, inputs, output_index, options):

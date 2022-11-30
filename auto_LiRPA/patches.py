@@ -146,6 +146,17 @@ class Patches:
                 output_shape=self.output_shape, unstable_idx=self.unstable_idx)
             return A1_matrix.transpose(0, 1) + matrix
 
+    @property
+    def device(self):
+        if self.patches is not None:
+            return self.patches.device
+        if self.unstable_idx is not None:
+            if isinstance(self.unstable_idx, tuple):
+                return self.unstable_idx[0].device
+            else:
+                return self.unstable_idx.device
+        raise RuntimeError("Patches object is unintialized and cannot determine its device.")
+
     def create_similar(self, patches=None, stride=None, padding=None, identity=None,
                        unstable_idx=None, output_shape=None, inserted_zeros=None, output_padding=None,
                        input_shape=None):
@@ -392,7 +403,8 @@ def inplace_unfold(image, kernel_size, stride=1, padding=0, inserted_zeros=0, ou
 def maybe_unfold_patches(d_tensor, last_A, alpha_lookup_idx=None):
     """
     Utility function to handle patch mode bound propagation in activation functions.
-    In patches mode, we need to unfold lower and upper slopes (as input "d_tensor"). In matrix mode we simply return.
+    In patches mode, we need to unfold lower and upper slopes (as input "d_tensor").
+    In matrix mode we simply return.
     """
     if d_tensor is None or last_A is None or isinstance(last_A, Tensor):
         return d_tensor

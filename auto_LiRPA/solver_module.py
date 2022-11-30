@@ -1,9 +1,3 @@
-import multiprocessing
-import multiprocessing.pool
-import sys
-import os
-
-import torch
 from .bound_ops import *
 
 
@@ -41,7 +35,7 @@ def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
         assert intermediate_layer_bounds is not None
         # Set the model to use new intermediate layer bounds, ignore the original ones.
         self._set_input(x, intermediate_layer_bounds=intermediate_layer_bounds)
- 
+
     root = [self[name] for name in self.root_name]
 
     # create interval ranges for input and other weight parameters
@@ -73,16 +67,16 @@ def _build_solver_general(self, node, C=None, model_type="mip", solver_pkg="guro
         if C is not None and isinstance(node, BoundLinear) and\
                 not node.is_input_perturbed(1) and self.final_name == node.name:
             # when node is the last layer
-            # merge the last BoundLinear node with the specification, 
+            # merge the last BoundLinear node with the specification,
             # available when weights of this layer are not perturbed
-            solver_vars = node.build_solver(*inp, model=self.model, C=C, 
+            solver_vars = node.build_solver(*inp, model=self.model, C=C,
                     model_type=model_type, solver_pkg=solver_pkg)
         else:
-            solver_vars = node.build_solver(*inp, model=self.model, C=None, 
+            solver_vars = node.build_solver(*inp, model=self.model, C=None,
                     model_type=model_type, solver_pkg=solver_pkg)
         # just return output node gurobi vars
         return solver_vars
-    
+
 
 def _build_solver_input(self, node):
     ## Do the input layer, which is a special case

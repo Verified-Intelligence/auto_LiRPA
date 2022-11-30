@@ -107,19 +107,23 @@ def _IBP_loss_fusion(self, node, C):
 
 def check_IBP_intermediate(self, node):
     """ Check if we use IBP bounds to compute intermediate bounds on this node.
-        Basically we check if we can get bounds by only visiting operators in
-        `self.ibp_intermediate`.
 
-        Currently, assume all eligible operators have exactly one input. """
+    We check if we can get bounds by only visiting operators in
+    `self.ibp_intermediate`. Currently, assume all eligible operators have
+    exactly one input.
+    """
+
     nodes = []
     while not hasattr(node, 'lower') or not hasattr(node, 'upper'):
         if type(node) not in self.ibp_intermediate:
             return False
+        assert len(node.inputs) == 1, (
+            'Nodes in self.ibp_intermediate cannot have more than one input')
         nodes.append(node)
-        node = node.inputs[0]
+        node = node.inputs[0]  # FIXME: this cannot handle multiple inputs.
     nodes.reverse()
     for n in nodes:
-        node.interval = self.IBP_general(n)
+        n.interval = self.IBP_general(n)
     return True
 
 

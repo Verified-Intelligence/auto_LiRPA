@@ -1,7 +1,6 @@
 """Test one dimensional activation functions (e.g., ReLU, tanh, exp, sin, etc)"""
 import torch
 import torch.nn as nn
-import os
 from testcase import TestCase
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
@@ -23,7 +22,7 @@ class Test1DActivation(TestCase):
 
     def create_test(self, act_func, low, high, ntests=10000, nsamples=1000, method='IBP'):
         print(f'Testing activation {act_func}')
-        
+
         model = test_model(act_func)
         image = torch.zeros(1, ntests)
         bounded_model = BoundedModule(model, image)
