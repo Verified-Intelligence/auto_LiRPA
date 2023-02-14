@@ -1263,7 +1263,7 @@ class BoundedModule(nn.Module):
                 # Use plain tuple defaulting to Linf perturbation.
                 root[i].interval = (value, value)
                 root[i].forward_value = root[i].value = value
-                root[i].lower = root[i].upper = value
+                root[i].center = root[i].lower = root[i].upper = value
 
             root[i].lower, root[i].upper = root[i].interval
 
