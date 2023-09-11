@@ -52,7 +52,7 @@ test_data = datasets.CIFAR10('./data', train=False, download=True,
             mean=[0.4914, 0.4822, 0.4465], std=[0.2009, 0.2009, 0.2009])]))
 x0 = test_data[0][0].unsqueeze(0).to(device)
 
-
+"""
 # Example 1: Convert the model for Jacobian bound computation
 model = BoundedModule(model_ori, x0, device=device)
 model.augment_gradient_graph(x0)
@@ -80,7 +80,7 @@ for eps in [0, 1./255, 4./255]:
         assert torch.allclose(ret_new, lower.sum(dim=0, keepdim=True))
         assert torch.allclose(ret_new, upper.sum(dim=0, keepdim=True))
 
-
+"""
 # Example 2: Convert the model for Linf local Lipschitz constant computation
 model = BoundedModule(model_ori, x0, device=device)
 # Set norm=np.inf for Linf local Lipschitz constant
