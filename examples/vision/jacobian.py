@@ -99,7 +99,7 @@ for eps in [0, 1./255, 4./255]:
     result = model.compute_jacobian_bounds(x)
     print(f'Linf local Lipschitz constant for eps={eps:.5f}', result)
 
-
+"""
 # Example 3: Convert the model for Jacobian-Vector Product (JVP) computation
 model = BoundedModule(model_ori, x0, device=device)
 vector = torch.randn(x0.shape).to(x0)
@@ -123,3 +123,4 @@ for eps in [0, 1./255, 4./255]:
     lower, upper = model.compute_jacobian_bounds(x)
     print(f'JVP lower bound for eps={eps:.5f}', lower.view(-1))
     print(f'JVP upper bound for eps={eps:.5f}', upper.view(-1))
+    """
