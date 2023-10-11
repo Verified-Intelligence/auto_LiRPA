@@ -7,7 +7,7 @@ import numpy as np
 from lstm import LSTM
 from data_utils import load_data, get_batches
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
-from auto_LiRPA.utils import AverageMeter, logger, get_spec_matrix
+from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
@@ -15,17 +15,17 @@ parser.add_argument("--load", type=str, default=None)
 parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
 parser.add_argument("--norm", type=int, default=np.inf)
 parser.add_argument("--eps", type=float, default=0.1)
-parser.add_argument("--num_epochs", type=int, default=20)  
+parser.add_argument("--num_epochs", type=int, default=20)
 parser.add_argument("--batch_size", type=int, default=512)
 parser.add_argument("--num_slices", type=int, default=8)
 parser.add_argument("--hidden_size", type=int, default=256)
-parser.add_argument("--num_classes", type=int, default=10) 
+parser.add_argument("--num_classes", type=int, default=10)
 parser.add_argument("--input_size", type=int, default=784)
 parser.add_argument("--lr", type=float, default=1e-2)
 parser.add_argument("--dir", type=str, default="model", help="directory to load or save the model")
 parser.add_argument("--num_epochs_warmup", type=int, default=10, help="number of epochs for the warmup stage when eps is linearly increased from 0 to the full value")
 parser.add_argument("--log_interval", type=int, default=10, help="interval of printing the log during training")
-args = parser.parse_args()   
+args = parser.parse_args()
 
 
 ## Train or test one batch.
@@ -52,7 +52,7 @@ def step(model, ptb, batch, eps=args.eps, train=False):
 
     # Report accuracy and robust accuracy.
     acc = (torch.argmax(logits, dim=-1) == y).float().mean()
-    acc_robust = 1 - torch.mean((lb < 0).any(dim=1).float())    
+    acc_robust = 1 - torch.mean((lb < 0).any(dim=1).float())
 
     if train:
         loss.backward()
@@ -62,10 +62,10 @@ def step(model, ptb, batch, eps=args.eps, train=False):
 
 ## Train one epoch.
 def train(epoch):
+    meter = MultiAverageMeter()
     model.train()
     # Load data for a epoch.
     train_batches = get_batches(data_train, args.batch_size)
-    for a in avg: a.reset()       
 
     eps_inc_per_step = 1.0 / (args.num_epochs_warmup * len(train_batches))
 
@@ -73,36 +73,38 @@ def train(epoch):
         # We increase eps linearly every batch.
         eps = args.eps * min(eps_inc_per_step * ((epoch - 1) * len(train_batches) + i + 1), 1.0)
         # Call the main training loop.
-        acc, acc_robust, loss = res = step(model, ptb, batch, eps=eps, train=True)
+        acc, acc_robust, loss = step(model, ptb, batch, eps=eps, train=True)
         # Optimize the loss.
         torch.nn.utils.clip_grad_norm_(model.core.parameters(), 5.0)
         optimizer.step()
-        optimizer.zero_grad()       
-        # Print training statistics.
-        for k in range(3):
-            avg[k].update(res[k], len(batch))  
+        optimizer.zero_grad()
+        meter.set_batch_size(len(batch))
+        meter.update('acc', acc)
+        meter.update('acc_rob', acc_robust)
+        meter.update('loss', loss)
         if (i + 1) % args.log_interval == 0:
-            logger.info("Epoch {}, training step {}/{}: acc {:.3f}, robust acc {:.3f}, loss {:.3f}, eps {:.3f}".format(
-                epoch, i + 1, len(train_batches), avg_acc.avg, avg_acc_robust.avg, avg_loss.avg, eps))
+            logger.info("Epoch %d, training step %d/%d: %s, eps {:.3f}".format(
+                epoch, i + 1, len(train_batches), meter, eps))
     model.save(epoch)
 
 
 ## Test accuracy and robust accuracy.
 def test(epoch, batches):
+    meter = MultiAverageMeter()
     model.eval()
-    for a in avg: a.reset()    
-    for i, batch in enumerate(batches):
-        acc, acc_robust, loss = res = step(model, ptb, batch)
-        for k in range(3):
-            avg[k].update(res[k], len(batch))                 
-    logger.info("Epoch {} test: acc {:.3f}, robust acc {:.3f}, loss {:.5f}".format(
-        epoch, avg_acc.avg, avg_acc_robust.avg, avg_loss.avg))
+    for batch in batches:
+        acc, acc_robust, loss = step(model, ptb, batch)
+        meter.set_batch_size(len(batch))
+        meter.update('acc', acc)
+        meter.udpate('acc_rob', acc_robust)
+        meter.update('loss', loss)
+    logger.info("Epoch %d test: {%s}".format(epoch, meter))
 
 # Load MNIST dataset
 logger.info("Loading data...")
 data_train, data_test = load_data()
 logger.info("Dataset sizes: {}/{}".format(len(data_train), len(data_test)))
-test_batches = get_batches(data_test, args.batch_size) 
+test_batches = get_batches(data_test, args.batch_size)
 
 # Set all random seeds.
 random.seed(args.seed)
@@ -112,17 +114,14 @@ torch.cuda.manual_seed_all(args.seed)
 
 # Create a LSTM sequence classifier.
 logger.info("Creating LSTM model...")
-model = LSTM(args).to(args.device)   
+model = LSTM(args).to(args.device)
 X, y = model.get_input(test_batches[0])
 # Create the perturbation object once here, and we can reuse it.
-ptb = PerturbationLpNorm(norm=args.norm, eps=args.eps) 
+ptb = PerturbationLpNorm(norm=args.norm, eps=args.eps)
 # Convert the LSTM to BoundedModule
 X = BoundedTensor(X, ptb)
 model.core = BoundedModule(model.core, (X,), device=args.device)
 optimizer = model.build_optimizer()
-
-# Averaging accuracym robust accuracy and loss.
-avg_acc, avg_acc_robust, avg_loss = avg = [AverageMeter() for i in range(3)]
 
 # Main training loop.
 for t in range(model.checkpoint, args.num_epochs):

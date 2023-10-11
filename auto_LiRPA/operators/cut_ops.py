@@ -192,7 +192,7 @@ class CutModule():
         tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
         tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
         new_upper_d = pi / (pi + tao + 1e-10)
-        # need to customize the upper bound slope and lbias for (1) unstable relus and 
+        # need to customize the upper bound slope and lbias for (1) unstable relus and
         # (2) relus that are used with upper boundary relaxation
         # original upper bound slope is u/(u-l) also equal to pi/(pi+tao) if no beta_mm_coeffs[0]
         # now the upper bound slope should be pi/(p+tao) updated with beta_mm_coeffs[0]
@@ -294,7 +294,7 @@ class CutModule():
         beta_mm_coeffs = self.general_beta_coeffs_mm(general_beta, arelu_coeffs, A, current_layer_shape)
         # unstable_this_layer = torch.logical_and(x.lower < 0, x.upper > 0).unsqueeze(0)
         # I is the unstable index in this relu layer: (batch, *layer shape)
-        # if there is node in cut constraint that is stable, also need to count its effect 
+        # if there is node in cut constraint that is stable, also need to count its effect
         # self.arelu_coeffs: (num_constrs, flattened current layer)
         unstable_or_cut_index = I.logical_or(arelu_coeffs.sum(0).view(I[0:1].shape) != 0)
 
@@ -389,7 +389,7 @@ class CutModule():
 
                 # assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
 
-                # # need to customize the upper bound slope and lbias for (1) unstable relus and 
+                # # need to customize the upper bound slope and lbias for (1) unstable relus and
                 # # (2) relus that are used with upper boundary relaxation
                 # # original upper bound slope is u/(u-l) also equal to pi/(pi+tao) if no beta_mm_coeffs[0]
                 # # now the upper bound slope should be pi/(p+tao) updated with beta_mm_coeffs[0]

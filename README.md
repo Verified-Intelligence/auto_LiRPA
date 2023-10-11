@@ -12,10 +12,12 @@
 
 ## What's New?
 
+- New activation function (sin, cos, tan, GeLU) with optimizable bounds (α-CROWN) and [branch and bound support](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf) for non-ReLU activation functions. We achieve significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks. (09/2023)
+- [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2023](https://sites.google.com/view/vnn2023). (08/2023)
 - Bound computation for higher-order computational graphs to support bounding Jacobian, Jacobian-vector products, and [local Lipschitz constants](https://arxiv.org/abs/2210.07394). (11/2022)
-- Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2022](https://sites.google.com/view/vnn2022). Our library supports the large CIFAR100, TinyImageNet and ImageNet models in VNN-COMP 2022. (09/2022)
+- Our neural network verification tool [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2022](https://sites.google.com/view/vnn2022). Our library supports the large CIFAR100, TinyImageNet and ImageNet models in VNN-COMP 2022. (09/2022)
 - Implementation of **general cutting planes** ([GCP-CROWN](https://arxiv.org/pdf/2208.05740.pdf)), support of more activation functions and improved performance and scalability. (09/2022)
-- Our neural network verification tool [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git)) **won** [VNN-COMP 2021](https://sites.google.com/view/vnn2021) **with the highest total score**, outperforming 11 SOTA verifiers. α,β-CROWN uses the `auto_LiRPA` library as its core bound computation library. (09/2021)
+- Our neural network verification tool [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) **won** [VNN-COMP 2021](https://sites.google.com/view/vnn2021) **with the highest total score**, outperforming 11 SOTA verifiers. α,β-CROWN uses the `auto_LiRPA` library as its core bound computation library. (09/2021)
 - [Optimized CROWN/LiRPA](https://arxiv.org/pdf/2011.13824.pdf) bound (α-CROWN) for ReLU, **sigmoid**, **tanh**, and **maxpool** activation functions, which can significantly outperform regular CROWN bounds. See [simple_verification.py](examples/vision/simple_verification.py#L59) for an example. (07/31/2021)
 - Handle split constraints for ReLU neurons ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for complete verifiers. (07/31/2021)
 - A memory efficient GPU implementation of backward (CROWN) bounds for
@@ -46,12 +48,12 @@ Our library supports the following algorithms:
 
 * Backward mode LiRPA bound propagation ([CROWN](https://arxiv.org/pdf/1811.00866.pdf)/[DeepPoly](https://files.sri.inf.ethz.ch/website/papers/DeepPoly.pdf))
 * Backward mode LiRPA bound propagation with optimized bounds ([α-CROWN](https://arxiv.org/pdf/2011.13824.pdf))
-* Backward mode LiRPA bound propagation with split constraints ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf))
+* Backward mode LiRPA bound propagation with split constraints ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for ReLU, and ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) for general nonlinear functions
 * Generalized backward mode LiRPA bound propagation with general cutting plane constraints ([GCP-CROWN](https://arxiv.org/pdf/2208.05740.pdf))
 * Forward mode LiRPA bound propagation ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920))
 * Forward mode LiRPA bound propagation with optimized bounds (similar to [α-CROWN](https://arxiv.org/pdf/2011.13824.pdf))
 * Interval bound propagation ([IBP](https://arxiv.org/pdf/1810.12715.pdf))
-* Hybrid approaches, e.g., Forward+Backward, IBP+Backward ([CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf)), [α,β-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/huanzhang12/alpha-beta-CROWN.git))
+* Hybrid approaches, e.g., Forward+Backward, IBP+Backward ([CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf)), [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git))
 
 Our library allows automatic bound derivation and computation for general
 computational graphs, in a similar manner that gradients are obtained in modern
@@ -99,7 +101,7 @@ See [PyTorch Get Started](https://pytorch.org/get-started).
 Then you can install `auto_LiRPA` via:
 
 ```bash
-git clone https://github.com/KaidiXu/auto_LiRPA
+git clone https://github.com/Verified-Intelligence/auto_LiRPA
 cd auto_LiRPA
 python setup.py install
 ```
@@ -159,10 +161,10 @@ We provide [a wide range of examples](doc/src/examples.md) of using `auto_LiRPA`
 * [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/src/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
 * [Certifiably Robust Language Classifier using **Transformers**](doc/src/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/src/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
-* [Bounding **Jacobian** and **local Lipschitz constants**](examples/vision/jacobian.py)
+* [Bounding **Jacobian** and **local Lipschitz constants**](examples/vision/jacobian_new.py)
 
 `auto_LiRPA` has also be used in the following works:
-* [**α,β-CROWN for complete neural network verification**](https://github.com/huanzhang12/alpha-beta-CROWN)
+* [**α,β-CROWN for complete neural network verification**](https://github.com/Verified-Intelligence/alpha-beta-CROWN)
 * [**Fast certified robust training**](https://github.com/shizhouxing/Fast-Certified-Robust-Training)
 * [**Computing local Lipschitz constants**](https://github.com/shizhouxing/Local-Lipschitz-Constants)
 
@@ -177,7 +179,7 @@ For more documentations, please refer to:
 
 ## Publications
 
-Please kindly cite our papers if you use the `auto_LiRPA` library. Full [BibTeX entries](doc/examples.md#bibtex-entries) can be found [here](doc/examples.md#bibtex-entries).
+Please kindly cite our papers if you use the `auto_LiRPA` library. Full [BibTeX entries](doc/src/examples.md#bibtex-entries) can be found [here](doc/src/examples.md#bibtex-entries).
 
 The general LiRPA based bound propagation algorithm was originally proposed in our paper:
 
@@ -207,26 +209,30 @@ Certified robust training using `auto_LiRPA` is improved to allow much shorter w
 NeurIPS 2021.
 Zhouxing Shi\*, Yihan Wang\*, Huan Zhang, Jinfeng Yi and Cho-Jui Hsieh (\* Equal contribution).
 
+Branch and bound for non-ReLU and general activation functions:
+* [Formal Verification for Neural Networks with General Nonlinearities via Branch-and-Bound](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf).
+Zhouxing Shi\*, Qirui Jin\*, Zico Kolter, Suman Jana, Cho-Jui Hsieh, Huan Zhang (\* Equal contribution).
+
 ## Developers and Copyright
 
-| [Kaidi Xu](https://kaidixu.com/) | [Zhouxing Shi](https://shizhouxing.github.io/) | [Huan Zhang](https://huan-zhang.com/) | [Yihan Wang](https://yihanwang617.github.io/) | [Shiqi Wang](https://www.cs.columbia.edu/~tcwangshiqi/) |
-|:--:|:--:| :--:| :--:| :--:|
-| <img src="https://kaidixu.files.wordpress.com/2020/07/profile2-1.jpg" width="125" /> | <img src="https://shizhouxing.github.io/photo.jpg" width="115" /> | <img src="https://huan-zhang.appspot.com/images/Huan_Zhang_photo.jpg" width="125" /> | <img src="https://upload.wikimedia.org/wikipedia/commons/8/89/Portrait_Placeholder.png" width="125" height="125" /> | <img src="https://www.cs.columbia.edu/~tcwangshiqi/images/shiqiwang.jpg" width="125" /> |
-
 Team lead:
-* Huan Zhang (huan@huan-zhang.com), CMU
+* Huan Zhang (huan@huan-zhang.com), UIUC
 
-Main developers:
+Current developers:
 * Zhouxing Shi (zshi@cs.ucla.edu), UCLA
-* Kaidi Xu (kx46@drexel.edu), Drexel University
-
-Contributors:
-* Yihan Wang (yihanwang@ucla.edu), UCLA
-* Shiqi Wang (sw3215@columbia.edu), Columbia University
 * Linyi Li (linyi2@illinois.edu), UIUC
-* Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
+* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
+* Kaidi Xu (kx46@drexel.edu), Drexel University
+* Xiangru Zhong (xiangruzh0915@gmail.com), Sun Yat-sen University
+* Qirui Jin (qiruijin@umich.edu), University of Michigan
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
+* Zhuowen Yuan (realzhuowen@gmail.com), UIUC
 
-We thank the [commits](https://github.com/KaidiXu/auto_LiRPA/commits) and [pull requests](https://github.com/KaidiXu/auto_LiRPA/pulls) from community contributors.
+Past developers:
+* Shiqi Wang (sw3215@columbia.edu), Columbia University
+* Yihan Wang (yihanwang@ucla.edu), UCLA
+* Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
+
+We thank the [commits](https://github.com/Verified-Intelligence/auto_LiRPA/commits) and [pull requests](https://github.com/Verified-Intelligence/auto_LiRPA/pulls) from community contributors.
 
 Our library is released under the BSD 3-Clause license.

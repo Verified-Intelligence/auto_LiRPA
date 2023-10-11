@@ -16,42 +16,25 @@
 
 from __future__ import absolute_import, division, print_function
 
-import argparse
-import csv
 import os
-import random
-import sys
-import shutil
-import scipy
-import pickle
-import pdb
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
-                              TensorDataset)
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn import CrossEntropyLoss, MSELoss
-from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import matthews_corrcoef, f1_score
 
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE, WEIGHTS_NAME, CONFIG_NAME
-from pytorch_pretrained_bert.tokenization import BertTokenizer
-from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
-
-from Transformer.modeling import BertForSequenceClassification, BertConfig
+from Transformer.modeling import BertForSequenceClassification
+from pytorch_pretrained_bert.modeling import BertConfig
 from Transformer.utils import convert_examples_to_features
 from language_utils import build_vocab
 from auto_LiRPA.utils import logger
+
 
 class Transformer(nn.Module):
     def __init__(self, args, data_train):
         super().__init__()
         self.args = args
         self.max_seq_length = args.max_sent_length
-        self.drop_unk = args.drop_unk        
+        self.drop_unk = args.drop_unk
         self.num_labels = args.num_classes
-        self.label_list = range(args.num_classes) 
+        self.label_list = range(args.num_classes)
         self.device = args.device
         self.lr = args.lr
 
@@ -86,19 +69,19 @@ class Transformer(nn.Module):
     def save(self, epoch):
         self.model.model_from_embeddings = self.model_from_embeddings
         path = os.path.join(self.dir, "ckpt_{}".format(epoch))
-        torch.save({ 
-            'state_dict_embeddings': self.model.embeddings.state_dict(), 
-            'state_dict_model_from_embeddings': self.model.model_from_embeddings.state_dict(), 
+        torch.save({
+            'state_dict_embeddings': self.model.embeddings.state_dict(),
+            'state_dict_model_from_embeddings': self.model.model_from_embeddings.state_dict(),
             'epoch': epoch
         }, path)
         logger.info("Model saved to {}".format(path))
-        
+
     def build_optimizer(self):
         # update the original model with the converted model
         self.model.model_from_embeddings = self.model_from_embeddings
         param_group = [
             {"params": [p[1] for p in self.model.named_parameters()], "weight_decay": 0.},
-        ]    
+        ]
         return torch.optim.Adam(param_group, lr=self.lr)
 
     def train(self):
@@ -106,7 +89,7 @@ class Transformer(nn.Module):
         self.model_from_embeddings.train()
 
     def eval(self):
-        self.model.eval() 
+        self.model.eval()
         self.model_from_embeddings.eval()
 
     def get_input(self, batch):
@@ -115,7 +98,7 @@ class Transformer(nn.Module):
 
         input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long).to(self.device)
         input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long).to(self.device)
-        segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long).to(self.device)       
+        segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long).to(self.device)
         label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long).to(self.device)
         tokens = [f.tokens for f in features]
 
@@ -126,6 +109,6 @@ class Transformer(nn.Module):
 
     def forward(self, batch):
         embeddings, extended_attention_mask, tokens, label_ids = self.get_input(batch)
-        logits = self.model_from_embeddings(embeddings, extended_attention_mask)        
+        logits = self.model_from_embeddings(embeddings, extended_attention_mask)
         preds = torch.argmax(logits, dim=1)
         return preds

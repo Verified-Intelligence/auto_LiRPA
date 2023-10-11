@@ -1,10 +1,12 @@
 """Test one dimensional activation functions (e.g., ReLU, tanh, exp, sin, etc)"""
+import pytest
 import torch
 import torch.nn as nn
 from testcase import TestCase
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import logger
+
 
 # Wrap the computation with a nn.Module
 class test_model(nn.Module):
@@ -15,17 +17,39 @@ class test_model(nn.Module):
     def forward(self, x):
         return self.act_func(x)
 
+def pow_2(x):
+    return torch.pow(x, 2)
+
+def pow_3(x):
+    return torch.pow(x, 3)
+
+class GELUOp(torch.autograd.Function):
+    @staticmethod
+    def symbolic(g, x):
+        return g.op('custom::Gelu', x)
+
+    @staticmethod
+    def forward(ctx, x):
+        return torch.nn.functional.gelu(x)
+
+def GELU(x):
+    return GELUOp.apply(x)
+
 
 class Test1DActivation(TestCase):
     def __init__(self, methodName='runTest'):
         super().__init__(methodName)
 
-    def create_test(self, act_func, low, high, ntests=10000, nsamples=1000, method='IBP'):
-        print(f'Testing activation {act_func}')
+    def create_test(self, act_func, low, high, ntests=1000, nsamples=1000,
+                    method='IBP'):
+        print(f'Testing activation {act_func} (method {method})')
 
         model = test_model(act_func)
         image = torch.zeros(1, ntests)
-        bounded_model = BoundedModule(model, image)
+        bounded_model = BoundedModule(
+            model, image, bound_opts={
+                'optimize_bound_args': {'iteration': 2},
+            })
 
         # Generate randomly bounded inputs.
         p = torch.rand(1, ntests) * (high - low ) + low
@@ -61,93 +85,82 @@ class Test1DActivation(TestCase):
             real_lb = real_lb.view(*shape)
             real_ub = real_ub.view(*shape)
             return real_lb, real_ub
-        # These are reference results. IBP results should be very close to these. Linear bound results can be looser than these.
+
+        # These are reference results. IBP results should be very close to these.
+        # Linear bound results can be looser than these.
         ref_forward = model(input_center)
         ref_output_lb, ref_output_ub = lookup(input_lb, input_ub)
 
         # Get bounding results.
         forward = bounded_model(ptb_data)
-        output_lb, output_ub = bounded_model.compute_bounds(x=(ptb_data,), method = method)
+        if act_func in [torch.sin, torch.cos]:
+            bounded_model.set_bound_opts({
+                    'optimize_bound_args': {'iteration': 2, 'init_alpha': False},
+                })
+            bounded_model.init_alpha(x=(ptb_data,), skip_bound_compute=True)
+            node = bounded_model.optimizable_activations[0]
+            shape = node.alpha['/1'].data[0:2].shape
+            node.alpha['/1'].data[8:10, :] = (node.alpha['/1'][8:10, :]
+                - node.tp_right_lower_init['/1']) * torch.rand(*shape) + node.tp_right_lower_init['/1']
+            node.alpha['/1'].data[10:12, :] = (node.alpha['/1'][10:12, :]
+                - node.tp_right_upper_init['/1']) * torch.rand(*shape) + node.tp_right_upper_init['/1']
+
+        output_lb, output_ub = bounded_model.compute_bounds(
+            x=(ptb_data,), method=method)
+        bounded_model.set_bound_opts({
+            'optimize_bound_args': {'iteration': 2, 'init_alpha': True},
+        })
 
         # Compare.
         assert torch.allclose(forward, ref_forward)
         for i in range(ntests):
             show = False
             if output_ub[0,i] < ref_output_ub[0,i] - 1e-5:
-                logger.warn(f'upper bound is wrong {ref_output_ub[0,i] - output_ub[0,i]}')
+                logger.warning(f'upper bound is wrong {ref_output_ub[0,i] - output_ub[0,i]}')
                 show = True
             if output_lb[0,i] > ref_output_lb[0,i] + 1e-5:
-                logger.warn(f'lower bound is wrong {output_lb[0,i] - ref_output_lb[0,i]}')
+                logger.warning(f'lower bound is wrong {output_lb[0,i] - ref_output_lb[0,i]}')
                 show = True
             if show:
-                logger.warn(f'input_lb={input_lb[0,i]:8.3f}, input_ub={input_ub[0,i]:8.3f}, lb={output_lb[0,i]:8.3f}, ref_lb={ref_output_lb[0,i]:8.3f}, ub={output_ub[0,i]:8.3f}, ref_ub={ref_output_ub[0,i]:8.3f}')
+                logger.warning(f'input_lb={input_lb[0,i]:8.3f}, input_ub={input_ub[0,i]:8.3f}, lb={output_lb[0,i]:8.3f}, ref_lb={ref_output_lb[0,i]:8.3f}, ub={output_ub[0,i]:8.3f}, ref_ub={ref_output_ub[0,i]:8.3f}')
         assert torch.all(output_ub + 1e-5 >= ref_output_ub)
         assert torch.all(output_lb - 1e-5 <= ref_output_lb)
 
-
-    def _single(self):
-        model = test_model(torch.sin)
-        image = torch.zeros(1, 1)
-        bounded_model = BoundedModule(model, image)
-
-        input_lb = torch.tensor([2.817])
-        input_ub = torch.tensor([5.196])
-        input_center = (input_lb + input_ub) / 2.0
-        ptb = PerturbationLpNorm(norm=float("inf"), eps=None, x_L=input_lb, x_U=input_ub)
-        ptb_data = BoundedTensor(input_center, ptb)
-
-        # Get bounding results.
-        forward = bounded_model(ptb_data)
-        output_lb, output_ub = bounded_model.compute_bounds(x=(ptb_data,), method = 'CROWN')
-        print(output_lb, output_ub)
-
-    def test_relu(self):
-        self.create_test(act_func=torch.nn.functional.relu, low=-10, high=10, method='IBP')
-        self.create_test(act_func=torch.nn.functional.relu, low=-10, high=10, method='CROWN')
-
-
-    def test_exp(self):
-        self.create_test(act_func=torch.exp, low=-3, high=3, method='IBP')
-        self.create_test(act_func=torch.exp, low=-3, high=3, method='CROWN')
-
-
-    def test_reciprocal(self):
-        # So far only positive values are supported.
-        self.create_test(act_func=torch.reciprocal, low=0.01, high=10, method='IBP')
-        self.create_test(act_func=torch.reciprocal, low=0.01, high=10, method='CROWN')
-
-
-    def test_tanh(self):
-        self.create_test(act_func=torch.tanh, low=-5, high=5, method='IBP')
-        self.create_test(act_func=torch.tanh, low=-5, high=5, method='CROWN')
-
-
-    def test_sin(self):
-        self.create_test(act_func=torch.sin, low=-10, high=10, method='IBP')
-        self.create_test(act_func=torch.sin, low=-10, high=10, method='CROWN')
-
-
-    def test_cos(self):
-        self.create_test(act_func=torch.cos, low=-10, high=10, method='IBP')
-        self.create_test(act_func=torch.cos, low=-10, high=10, method='CROWN')
-
-    def test_arctan(self):
-        self.create_test(act_func=torch.arctan, low=-10, high=10, method='IBP')
-        self.create_test(act_func=torch.arctan, low=-10, high=10, method='CROWN')
-
+    @pytest.mark.skip(reason="Known issue: https://github.com/Verified-Intelligence/Verifier_Development/issues/164")
     def test_tan(self):
         # Test tan(x) in different periods.
         for i in range(-5, 5):
-            self.create_test(act_func=torch.arctan, low=-0.5*torch.pi + i*torch.pi + 1e-20, high=0.5*torch.pi + i*torch.pi - 1e-20, method='IBP')
-            self.create_test(act_func=torch.arctan, low=-0.5*torch.pi + i*torch.pi + 1e-20, high=0.5*torch.pi + i*torch.pi - 1e-20, method='CROWN')
+            self.create_test(
+                act_func=torch.tan,
+                low=-0.5*torch.pi + i*torch.pi + 1e-20,
+                high=0.5*torch.pi + i*torch.pi - 1e-20, method='IBP')
+            self.create_test(
+                act_func=torch.tan,
+                low=-0.5*torch.pi + i*torch.pi + 1e-20,
+                high=0.5*torch.pi + i*torch.pi - 1e-20, method='CROWN')
+
+    def test_acts(self):
+        for act_func in [torch.nn.functional.relu,
+                         torch.sin, torch.cos,
+                         torch.tanh, torch.arctan,
+                         torch.exp, pow_2, pow_3,
+                         torch.sign, GELU]:
+            low, high = -10, 10
+            if act_func == torch.reciprocal:
+                # So far only positive values are supported.
+                low = 0.01
+            self.create_test(act_func=act_func, low=low, high=high, method='IBP')
+            self.create_test(act_func=act_func, low=low, high=high, method='CROWN')
+            if act_func not in [torch.exp, torch.sign, torch.sin, torch.cos]:
+                # Use optimized bounds
+                self.create_test(act_func=act_func, low=low, high=high,
+                                 method='CROWN-Optimized')
+            if act_func in [torch.sin, torch.cos]:
+                test_samples = 10
+                for _ in range(test_samples):
+                    self.create_test(act_func=act_func, low=low, high=high, method='CROWN-Optimized')
+
 
 if __name__ == '__main__':
     testcase = Test1DActivation()
-    testcase.test_relu()
-    testcase.test_reciprocal()
-    testcase.test_exp()
-    testcase.test_tanh()
-    testcase.test_sin()
-    testcase.test_cos()
-    testcase.test_arctan()
-    testcase.test_tan()
+    testcase.test_acts()

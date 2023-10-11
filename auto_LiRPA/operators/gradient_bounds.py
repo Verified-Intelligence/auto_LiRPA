@@ -1,7 +1,6 @@
 """ Bound classes for gradient operators """
 import torch
 import torch.nn.functional as F
-import numpy as np
 from auto_LiRPA.patches import Patches, inplace_unfold
 from .base import Bound, Interval
 from .activation_base import BoundActivation
@@ -44,7 +43,7 @@ def _maybe_unfold(d_tensor, last_A):
 
 
 class BoundReluGrad(BoundActivation):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.requires_input_bounds = [3]
         self.recurjac = options.get('recurjac', False)
@@ -54,6 +53,8 @@ class BoundReluGrad(BoundActivation):
         return (preact > 0).float()
 
     def forward(self, g, g_relu, g_relu_rev, preact):
+        if g.ndim == preact.ndim + 1:
+            preact = preact.unsqueeze(1)
         return g * relu_grad(preact)
 
     def interval_propagate(self, *v):
@@ -61,11 +62,15 @@ class BoundReluGrad(BoundActivation):
         preact_lower, preact_upper = v[3]
         relu_grad_lower = relu_grad(preact_lower)
         relu_grad_upper = relu_grad(preact_upper)
+        if g_lower.ndim == relu_grad_lower.ndim + 1:
+            relu_grad_lower = relu_grad_lower.unsqueeze(1)
+            relu_grad_upper = relu_grad_upper.unsqueeze(1)
         lower = torch.min(g_lower * relu_grad_lower, g_lower * relu_grad_upper)
         upper = torch.max(g_upper * relu_grad_lower, g_upper * relu_grad_upper)
         return lower, upper
 
-    def bound_backward(self, last_lA, last_uA, g, g_relu, g_relu_rev, preact):
+    def bound_backward(self, last_lA, last_uA, g, g_relu, g_relu_rev, preact,
+                       **kwargs):
         mask_active = (preact.lower > 0).float()
         mask_inactive = (preact.upper < 0).float()
         mask_unstable = 1 - mask_active - mask_inactive
@@ -159,7 +164,7 @@ class BoundReluGrad(BoundActivation):
 
 
 class BoundConv2dGrad(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.stride = attr['stride']
         self.padding = attr['padding']
@@ -180,7 +185,7 @@ class BoundConv2dGrad(Bound):
             stride=self.stride, padding=self.padding, dilation=self.dilation,
             groups=self.groups, output_padding=self.output_padding)
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         assert not self.is_input_perturbed(1)
 
         lA_y = uA_y = lA_bias = uA_bias = None
@@ -297,7 +302,7 @@ class BoundConv2dGrad(Bound):
         weight = v[1][0]
         bias = v[2][0] if self.has_bias else None
 
-        if norm == np.inf:
+        if norm == torch.inf:
             mid = (h_U + h_L) / 2.0
             diff = (h_U - h_L) / 2.0
             weight_abs = weight.abs()

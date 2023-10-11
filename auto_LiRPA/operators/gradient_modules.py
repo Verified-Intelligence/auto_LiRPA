@@ -55,7 +55,8 @@ class LinearGrad(Module):
         self.weight = weight
 
     def forward(self, grad_last):
-        return F.linear(grad_last, self.weight.t())
+        weight = self.weight.to(grad_last).t()
+        return F.linear(grad_last, weight)
 
 
 class ReLUGradOp(Function):
@@ -65,7 +66,7 @@ class ReLUGradOp(Function):
     """
     @staticmethod
     def symbolic(_, g, g_relu, g_relu_rev, preact):
-        return _.op('grad::Relu', g, g_relu, g_relu_rev, preact)
+        return _.op('grad::Relu', g, g_relu, g_relu_rev, preact).setType(g.type())
 
     @staticmethod
     def forward(ctx, g, g_relu, g_relu_rev, preact):
@@ -81,17 +82,10 @@ class ReLUGrad(Module):
 
 class ReshapeGrad(Module):
     def forward(self, grad_last, inp):
-        return grad_last.reshape(
-            grad_last.size(0), *inp.shape[1:])
-
-
-class FlattenGrad(Module):
-    def __init__(self, in_shape):
-        super().__init__()
-        self.in_shape = in_shape
-
-    def forward(self, grad_last):
-        return torch.reshape(grad_last, [-1] + list(self.in_shape))
+        if grad_last.numel() == inp.numel():
+            return grad_last.reshape(grad_last.shape[0], *inp.shape[1:])
+        else:
+            return grad_last.reshape(*grad_last.shape[:2], *inp.shape[1:])
 
 
 class Conv2dGradOp(Function):
@@ -102,7 +96,7 @@ class Conv2dGradOp(Function):
         return g.op(
             'grad::Conv2d', x, w, stride_i=stride, padding_i=padding,
             dilation_i=dilation, groups_i=groups, output_padding0_i=output_padding0,
-            output_padding1_i=output_padding1)
+            output_padding1_i=output_padding1).setType(x.type())
 
     @staticmethod
     def forward(

@@ -15,6 +15,14 @@ Node = namedtuple('Node', (
 def get_node_name(node):
     return node.debugName()
 
+def get_node_attribute(node, attribute_name):
+    if hasattr(torch.onnx.symbolic_helper, '_node_get'):
+        # Pytorch >= 1.13.
+        return torch.onnx.symbolic_helper._node_get(node, attribute_name)
+    else:
+        # Pytorch <= 1.12. This will call _node_getitem in torch.onnx.utils.
+        return node[attribute_name]
+
 def parse_graph(graph, inputs, params):
     input_all = []
     input_used = []
@@ -42,10 +50,9 @@ def parse_graph(graph, inputs, params):
 
     nodesOP = []
     for n in graph.nodes():
-        attrs = {k: n[k] for k in n.attributeNames()}
+        attrs = {k: get_node_attribute(n, k) for k in n.attributeNames()}
         n_inputs = [name_with_scope(i) for i in n.inputs()]
         for i, out in enumerate(list(n.outputs())):
-
             nodesOP.append(Node(**{'name': name_with_scope(out),
                                 'op': n.kind(),
                                 'inputs': n_inputs,
@@ -87,7 +94,7 @@ def parse_graph(graph, inputs, params):
             perturbation = inputs_and_params[i][1].ptb
         else:
             perturbation = None
-        if n.type().sizes() != list(inputs_and_params[i][1].size()):
+        if i > 0 and n.type().sizes() != list(inputs_and_params[i][1].size()):
             raise RuntimeError("Input tensor shapes do not much: {} != {}".format(
                 n.type().sizes(), list(inputs_and_params[i][1].size())))
         nodesIn[i] = Node(**{'name': name_with_scope(n),
@@ -114,7 +121,7 @@ def _get_jit_params(module, param_exclude, param_include):
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if param_exclude is not None and param_exclude.match(k) is not None:
-            print('\nremove input element {} from nodesIn\n'.format(k))
+            print(f'\nremove input element {k} from nodesIn\n')
             continue
         if param_include is not None and param_include.match(k) is None:
             continue
@@ -124,9 +131,9 @@ def _get_jit_params(module, param_exclude, param_include):
 
     return params
 
-"""Construct a template for the module output with `None` representing places
-to be filled with tensor results"""
 def get_output_template(out):
+    """Construct a template for the module output with `None` representing places
+    to be filled with tensor results"""
     if isinstance(out, torch.Tensor):
         return None
     elif isinstance(out, list):
@@ -145,9 +152,16 @@ def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=No
     params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
     trace, out = torch.jit._get_trace_graph(module, inputs)
     _set_opset_version(12)
+
+    # Assuming that the first node in the graph is the primary input node.
+    # It must have a batch dimension.
+    primary_input = get_node_name(next(iter(trace.inputs())))
     trace_graph = _optimize_graph(
-        trace, torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK, params_dict={})
-    logger.debug('trace_graph: {}'.format(trace_graph))
+        trace, torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+        params_dict={},
+        input_names=[primary_input],
+        dynamic_axes={primary_input: {0: 'batch'}})
+    logger.debug('trace_graph: %s', trace_graph)
 
     if int(os.environ.get('AUTOLIRPA_DEBUG_GRAPH', 0)) > 0:
         print("Graph before ONNX convertion:")

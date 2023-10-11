@@ -1,4 +1,5 @@
 import copy
+from typing import List
 import numpy as np
 import warnings
 from collections import OrderedDict, deque
@@ -13,10 +14,11 @@ from .parse_graph import parse_module
 from .perturbations import *
 from .utils import *
 from .patches import Patches
-
+from .optimized_bounds import default_optimize_bound_args
 
 
 warnings.simplefilter('once')
+
 
 class BoundedModule(nn.Module):
     """Bounded module with support for automatically computing bounds.
@@ -70,13 +72,20 @@ class BoundedModule(nn.Module):
             'forward_max_dim': int(1e9),
             # Do not share alpha for conv layers.
             'use_full_conv_alpha': True,
+            'disabled_optimization': [],
             # Threshold for number of unstable neurons for each layer to disable
             #  use_full_conv_alpha.
             'use_full_conv_alpha_thresh': 512,
             'verbosity': 1 if verbose else 0,
+            'optimize_graph': {'optimizer': None},
         }
         default_bound_opts.update(bound_opts)
         self.bound_opts = default_bound_opts
+        optimize_bound_args = default_optimize_bound_args
+        optimize_bound_args.update(
+            self.bound_opts.get('optimize_bound_args', {}))
+        self.bound_opts.update({'optimize_bound_args': optimize_bound_args})
+
         self.verbose = verbose
         self.custom_ops = custom_ops if custom_ops is not None else {}
         if device == 'auto':
@@ -93,6 +102,7 @@ class BoundedModule(nn.Module):
 
         self.optimizable_activations = []
         self.relus = []  # save relu layers for convenience
+        self.layers_with_constraint = []
 
         state_dict_copy = copy.deepcopy(model.state_dict())
         object.__setattr__(self, 'ori_state_dict', state_dict_copy)
@@ -102,70 +112,8 @@ class BoundedModule(nn.Module):
         self.bound_opts.update({'final_shape': self.final_shape})
         self._convert(model, global_input)
         self._mark_perturbed_nodes()
-
-        # set the default values here
-        optimize_bound_args = {
-            'enable_alpha_crown': True,  # Enable optimization of alpha.
-            'enable_beta_crown': False,  # Enable beta split constraint.
-            'iteration': 20,  # Number of alpha/beta optimization iterations.
-            # Share some alpha variables to save memory at the cost of slightly
-            # looser bounds.
-            'use_shared_alpha': False,
-            # Optimize coeffs during intermediate_refinement.
-            'opt_coeffs': False,
-            # Optimize constraint bias during intermediate_refinement.
-            'opt_bias': False,
-            # Optimizer used for alpha and beta optimization.
-            'optimizer': 'adam',
-            # Save best results of alpha/beta/bounds during optimization.
-            'keep_best': True,
-            # Only optimize bounds of last layer during alpha/beta CROWN.
-            'fix_intermediate_layer_bounds': True,
-            # Learning rate for the optimizable parameter alpha in alpha-CROWN.
-            'lr_alpha': 0.5,
-            # Learning rate for the optimizable parameter beta in beta-CROWN.
-            'lr_beta': 0.05,
-            'lr_cut_beta': 5e-3,  # Learning rate for optimizing cut betas.
-            # Initial alpha variables by calling CROWN once.
-            'init_alpha': True,
-            # Only split single nodes in branch and bound.
-            'single_node_split': True,
-            # Learning rate for intermediate layer beta for refinement.
-            'lr_intermediate_beta': 0.1,
-            'lr_coeffs': 0.01,  # Learning rate for coeffs for refinement
-            # Optimize constraint bias in compute bounds.
-            'intermediate_beta': False,
-            # Layers to be refined, separated by commas.
-            # -1 means preactivation before last relu.
-            'intermediate_refinement_layers': [-1],
-            # When batch size is not 1, this reduction function is applied to
-            # reduce the bounds into a scalar.
-            'loss_reduction_func': reduction_sum,
-            # Criteria function of early stop.
-            'stop_criterion_func': lambda x: False,
-            # Learning rate decay factor during bounds optimization.
-            'lr_decay': 0.98,
-            # Number of iterations that we will start considering early stop
-            # if tracking no improvement.
-            'early_stop_patience': 10,
-            # Start to save optimized best bounds
-            # when current_iteration > int(iteration*start_save_best)
-            'start_save_best': 0.5,
-            # Use double fp (float64) at the last iteration in alpha/beta CROWN.
-            'use_float64_in_last_iteration': False,
-            # Prune verified domain within iteration.
-            'pruning_in_iteration': False,
-            # Percentage of the minimum domains that can apply pruning.
-            'pruning_in_iteration_threshold': 0.2,
-            # For specification that will output multiple bounds for one
-            # property, we use this function to prune them.
-            'multi_spec_keep_func': lambda x: True
-        }
-
-        # change by bound_opts
-        optimize_bound_args.update(
-            self.bound_opts.get('optimize_bound_args', {}))
-        self.bound_opts.update({'optimize_bound_args': optimize_bound_args})
+        self._optimize_graph()
+        self._expand_jacobian()
 
         self.next_split_hint = []  # Split hints, used in beta optimization.
         # Beta values for all intermediate bounds.
@@ -177,48 +125,61 @@ class BoundedModule(nn.Module):
         self.cut_used = False
         # a placeholder for cut timestamp, which would be a non-positive int
         self.cut_timestamp = -1
-
-        # List of operators. When we are computing intermediate bounds for these
-        # ops, we simply use IBP to propagate bounds from its input nodes,
-        # instead of CROWN.
-        # NOTE Currently only operators with a single input can be supported.
-        self.ibp_intermediate = [
-                BoundRelu,
-                BoundNeg,
-                BoundTranspose,
-                BoundSin,
-                BoundCos,
-                BoundTan,
-                BoundAtan]
-
         # a placeholder to save the latest samplewise mask for
         # pruning-in-iteration optimization
         self.last_update_preserve_mask = None
+
+    def nodes(self) -> List[Bound]:
+        return self._modules.values()
+
+    def get_enabled_opt_act(self):
+        # Optimizable activations that are actually used and perturbed
+        return [
+            n for n in self.optimizable_activations
+            if n.used and n.perturbed and not getattr(n, 'is_linear_op', False)
+        ]
+
+    def get_optimizable_activations(self):
+        for node in self.nodes():
+            if (isinstance(node, BoundOptimizableActivation)
+                    and node.optimizable
+                    and len(getattr(node, 'requires_input_bounds', [])) > 0
+                    and node not in self.optimizable_activations):
+                disabled = False
+                for item in self.bound_opts.get('disable_optimization', []):
+                    if item.lower() in str(type(node)).lower():
+                        disabled = True
+                if disabled:
+                    logging.info('Disabled optimization for %s', node)
+                    continue
+                if node not in self.optimizable_activations:
+                    self.optimizable_activations.append(node)
+            if isinstance(node, BoundRelu) and node not in self.relus:
+                self.relus.append(node)
 
     def get_perturbed_optimizable_activations(self):
         return [n for n in self.optimizable_activations if n.perturbed]
 
     def get_splittable_activations(self):
-        """
-        Activation functions that can be split during branch and bound.
-        """
-        # TODO: Add other activation functions in a sysmatic manner.
-        # Do not hard code relus or other functions.
-        # A node must be perturbed, otherwise it is a constant and no need
-        # to perturb.
-        return [n for n in self.relus if n.perturbed]
+        """Activation functions that can be split during branch and bound."""
+        return [n for n in self.nodes() if n.perturbed and n.splittable]
 
     def get_layers_requiring_bounds(self):
-        """
-        Layer names whose intermediate layer bounds are required.
-        """
+        """Layer names whose intermediate layer bounds are required."""
         intermediate_layers = []
-        for node in self.modules():
+        for node in self.nodes():
+            if not node.used or not node.perturbed:
+                continue
             for i in getattr(node, 'requires_input_bounds', []):
                 input_node = node.inputs[i]
-                if input_node.used and input_node.perturbed:
+                if (input_node not in intermediate_layers
+                        and input_node.perturbed):
+                    # If not perturbed, it may not have the batch dimension.
+                    # So we do not include it, and it is unnecessary.
                     intermediate_layers.append(input_node)
-
+            if (node.name in self.layers_with_constraint
+                    and node not in intermediate_layers):
+                intermediate_layers.append(node)
         return intermediate_layers
 
     def check_incompatible_nodes(self, model):
@@ -314,8 +275,7 @@ class BoundedModule(nn.Module):
         if '_parameters' not in self.__dict__:
             raise AttributeError(
                 'cannot assign parameter before Module.__init__() call')
-
-        elif not isinstance(name, torch._six.string_classes):
+        elif not isinstance(name, str):
             raise TypeError('parameter name should be a string. '
                             f'Got {torch.typename(name)}')
         elif name == '':
@@ -347,11 +307,12 @@ class BoundedModule(nn.Module):
                 new_dict[self.node_name_map[k]] = v
         return super().load_state_dict(new_dict, strict=strict)
 
-    def _named_members(self, get_members_fn, prefix='', recurse=True):
+    def _named_members(self, get_members_fn, prefix='', recurse=True, **kwargs):  # pylint: disable=unused-argument
         r"""Helper method for yielding various names + members of modules."""
         memo = set()
         modules = self.named_modules(prefix=prefix) if recurse else [
                                      (prefix, self)]
+        # TODO: support the "remove_duplicate" argument, new in pytorch 2.0.
         for module_prefix, module in modules:
             members = get_members_fn(module)
             for k, v in members:
@@ -366,22 +327,21 @@ class BoundedModule(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        for node in self._modules.values():
+        for node in self.nodes():
             node.train(mode=mode)
 
     def eval(self):
         super().eval()
-        for node in self._modules.values():
+        for node in self.nodes():
             node.eval()
 
     def to(self, *args, **kwargs):
         # Moves and/or casts some attributes except pytorch will do by default.
-        for node in self._modules.values():
+        for node in self.nodes():
             for attr in ['lower', 'upper', 'forward_value', 'd', 'lA',]:
                 if hasattr(node, attr):
                     this_attr = getattr(node, attr)
                     if isinstance(this_attr, torch.Tensor):
-                        # print(node, attr)
                         this_attr = this_attr.to(*args, **kwargs)
                         setattr(node, attr, this_attr)
 
@@ -394,7 +354,13 @@ class BoundedModule(nn.Module):
         return super().to(*args, **kwargs)
 
     def __getitem__(self, name):
-        return self._modules[name]
+        module = self._modules[name]
+        # We never create modules that are None, the assert fixes type hints
+        assert module is not None
+        return module
+
+    def roots(self):
+        return [self[name] for name in self.root_names]
 
     def final_node(self):
         return self[self.final_name]
@@ -446,31 +412,15 @@ class BoundedModule(nn.Module):
             output: The output of the model, or if `final_node_name` is not
             `None`, return the value on the corresponding node instead.
         """
-        self._set_input(*x, clear_forward_only=clear_forward_only,
+        self.set_input(*x, clear_forward_only=clear_forward_only,
                 reset_perturbed_nodes=reset_perturbed_nodes)
         if final_node_name:
             return self.get_forward_value(self[final_node_name])
         else:
-            out = deque([self.get_forward_value(self[n])
-                        for n in self.output_name])
-
-            def _fill_template(template):
-                if template is None:
-                    return out.popleft()
-                elif isinstance(template, (list, tuple)):
-                    res = []
-                    for t in template:
-                        res.append(_fill_template(t))
-                    return tuple(res) if isinstance(template, tuple) else res
-                elif isinstance(template, dict):
-                    res = {}
-                    for key in template:
-                        res[key] = _fill_template(template[key])
-                    return res
-                else:
-                    raise NotImplementedError
-
-            return _fill_template(self.output_template)
+            return fill_template(
+                deque([self.get_forward_value(self[n])
+                       for n in self.output_name]),
+                self.output_template)
 
     def _mark_perturbed_nodes(self):
         """Mark the graph nodes and determine which nodes need perturbation."""
@@ -491,12 +441,7 @@ class BoundedModule(nn.Module):
             # BoundParams object, depending on ptb.
             for name_next in node.output_name:
                 node_next = self[name_next]
-                if isinstance(node, BoundShape):
-                    # Some nodes like Shape, even connected,
-                    # do not really propagate bounds.
-                    # TODO: make this a property of node?
-                    pass
-                else:
+                if not node_next.never_perturbed:
                     # The next node is perturbed if it is already perturbed,
                     # or this node is perturbed.
                     node_next.perturbed = node_next.perturbed or node.perturbed
@@ -505,31 +450,17 @@ class BoundedModule(nn.Module):
                 # now put it in queue.
                 if degree_in[name_next] == 0:
                     queue.append(node_next)
-            # Check whether weights are perturbed
-            if isinstance(node, (BoundLinear, BoundConv, BoundBatchNormalization)):
-                weight_perturbation = False
-                for n in node.inputs[1:]:
-                    if hasattr(n, 'perturbation'):
-                        if n.perturbation is not None:
-                            weight_perturbation = True
-                if weight_perturbation:
-                    node.requires_input_bounds = list(range(len(node.inputs)))
-                else:
-                    if isinstance(node, BoundMatMul):
-                        node.requires_input_bounds = [1]
-                    else:
-                        node.requires_input_bounds = []
+            node.update_requires_input_bounds()
 
-        self.splittable_activations =(
-                self.get_splittable_activations())
+        self.get_optimizable_activations()
+        self.splittable_activations = self.get_splittable_activations()
         self.perturbed_optimizable_activations = (
-                self.get_perturbed_optimizable_activations())
+            self.get_perturbed_optimizable_activations())
         return
 
-    def _clear_and_set_new(
-            self, intermediate_layer_bounds, clear_forward_only=False,
-            reset_perturbed_nodes=True):
-        for l in self._modules.values():
+    def _clear_and_set_new(self, interm_bounds, clear_forward_only=False,
+                           reset_perturbed_nodes=True):
+        for l in self.nodes():
             if hasattr(l, 'linear'):
                 if isinstance(l.linear, tuple):
                     for item in l.linear:
@@ -543,22 +474,40 @@ class BoundedModule(nn.Module):
                 if hasattr(l, 'forward_value'):
                     delattr(l, 'forward_value')
             else:
-                for attr in [
-                        'lower', 'upper', 'interval', 'forward_value', 'd',
-                        'lA', 'lower_d']:
+                for attr in ['lower', 'upper', 'interval', 'forward_value', 'd',
+                             'lA', 'lower_d']:
                     if hasattr(l, attr):
+                        # If we use output constraints to tighten bounds, the bound
+                        # computation of every layer will begin at the output layer.
+                        # Thus, it will require to backpropagate through ReLUs *behind*
+                        # the currently bounded one. For those ReLUs, the relaxation
+                        # must depend on the lower and upper bounds of the previous
+                        # iteration. Usually, those would be deleted here, so we must
+                        # save them.
+                        # Keeping them as the .lower and .upper parameters is not
+                        # possible, as the rest of the framework assumes that layers
+                        # that were not bounded in this iteration do not have those
+                        # parameters.
+                        apply_output_constraints_to = (
+                            self.bound_opts['optimize_bound_args']['apply_output_constraints_to']
+                        )
+                        if (
+                            apply_output_constraints_to is not None and
+                            len(apply_output_constraints_to) > 0 and
+                            attr in ['lower', 'upper'] and
+                            isinstance(getattr(l, attr), torch.Tensor)
+                        ):
+                            setattr(l, f'previous_iteration_{attr}', getattr(l, attr).detach())
                         delattr(l, attr)
 
-            for attr in [
-                    'zero_backward_coeffs_l', 'zero_backward_coeffs_u',
-                    'zero_lA_mtx', 'zero_uA_mtx']:
+            for attr in ['zero_backward_coeffs_l', 'zero_backward_coeffs_u',
+                         'zero_lA_mtx', 'zero_uA_mtx']:
                 setattr(l, attr, False)
             # Given an interval here to make IBP/CROWN start from this node
-            if (intermediate_layer_bounds is not None
-                    and l.name in intermediate_layer_bounds.keys()):
-                l.interval = tuple(intermediate_layer_bounds[l.name][:2])
-                l.lower = intermediate_layer_bounds[l.name][0]
-                l.upper = intermediate_layer_bounds[l.name][1]
+            if interm_bounds is not None and l.name in interm_bounds.keys():
+                l.interval = tuple(interm_bounds[l.name][:2])
+                l.lower = interm_bounds[l.name][0]
+                l.upper = interm_bounds[l.name][1]
                 if l.lower is not None:
                     l.lower = l.lower.detach().requires_grad_(False)
                 if l.upper is not None:
@@ -571,11 +520,10 @@ class BoundedModule(nn.Module):
             # Clear operator-specific attributes
             l.clear()
 
-    def _set_input(
-            self, *x, intermediate_layer_bounds=None,
-            clear_forward_only=False, reset_perturbed_nodes=True):
+    def set_input(self, *x, interm_bounds=None,
+                  clear_forward_only=False, reset_perturbed_nodes=True):
         self._clear_and_set_new(
-            intermediate_layer_bounds=intermediate_layer_bounds,
+            interm_bounds=interm_bounds,
             clear_forward_only=clear_forward_only,
             reset_perturbed_nodes=reset_perturbed_nodes)
         inputs_unpacked = unpack_inputs(x)
@@ -594,7 +542,6 @@ class BoundedModule(nn.Module):
 
     def _get_node_input(self, nodesOP, nodesIn, node):
         ret = []
-        ori_names = []
         for i in range(len(node.inputs)):
             for op in nodesOP:
                 if op.name == node.inputs[i]:
@@ -605,7 +552,6 @@ class BoundedModule(nn.Module):
             for io in nodesIn:
                 if io.name == node.inputs[i]:
                     ret.append(io.bound_node)
-                    ori_names.append(io.ori_name)
                     break
             if len(ret) <= i:
                 raise ValueError(f'cannot find inputs of node: {node.name}')
@@ -669,9 +615,8 @@ class BoundedModule(nn.Module):
                 bound_class = BoundParams if isinstance(
                     nodesIn[i].param, nn.Parameter) else BoundBuffers
                 nodesIn[i] = nodesIn[i]._replace(bound_node=bound_class(
-                    ori_name=nodesIn[i].ori_name,
-                    value=nodesIn[i].param,
-                    perturbation=nodesIn[i].perturbation))
+                    ori_name=nodesIn[i].ori_name, value=nodesIn[i].param,
+                    perturbation=nodesIn[i].perturbation, options=self.bound_opts))
 
         unsupported_ops = []
 
@@ -695,7 +640,6 @@ class BoundedModule(nn.Module):
                 logger.error('The node has an unsupported operation: %s',
                              nodesOP[n])
                 continue
-
             attr['device'] = self.device
 
             # FIXME generalize
@@ -735,41 +679,14 @@ class BoundedModule(nn.Module):
         # output element. In this case, we are assuming that we aim to compute
         # the bounds for the first output element by default.
         self.final_name = nodesOut[0].name
-        self.input_name, self.input_index, self.root_name = [], [], []
+        self.input_name, self.input_index, self.root_names = [], [], []
         self.output_name = [n.name for n in nodesOut]
         self.output_template = template
         for node in nodesIn:
             self.add_input_node(node, index=node.input_index)
         self.add_nodes(nodesOP)
         if self.conv_mode == 'patches':
-            self.root_name = [node.name for node in nodesIn]
-
-    # Make sure the nodes already have `name` and `input_name`
-    def add_nodes(self, nodes):
-        nodes = [(node if isinstance(node, Bound) else node.bound_node)
-                  for node in nodes]
-        for node in nodes:
-            self._modules[node.name] = node
-            node.output_name = []
-            if len(node.inputs) == 0:
-                self.root_name.append(node.name)
-        for node in nodes:
-            for l_pre in node.inputs:
-                l_pre.output_name.append(node.name)
-        for node in nodes:
-            if isinstance(node, BoundOptimizableActivation):
-                self.optimizable_activations.append(node)
-            if isinstance(node, BoundRelu):
-                self.relus.append(node)
-
-    def add_input_node(self, node, index=None):
-        self.add_nodes([node])
-        self.input_name.append(node.name)
-        # default value for input_index
-        if index == 'auto':
-            index = max([0] + [(i + 1)
-                        for i in self.input_index if i is not None])
-        self.input_index.append(index)
+            self.root_names: List[str] = [node.name for node in nodesIn]
 
     def rename_nodes(self, nodesOP, nodesIn, rename_dict):
         def rename(node):
@@ -827,8 +744,8 @@ class BoundedModule(nn.Module):
     def _get_node_name_map(self):
         """Build a dict with {ori_name: name, name: ori_name}"""
         self.node_name_map = {}
-        for node in self._modules.values():
-            if isinstance(node, BoundInput) or isinstance(node, BoundParams):
+        for node in self.nodes():
+            if isinstance(node, (BoundInput, BoundParams)):
                 for p in list(node.named_parameters()):
                     if node.ori_name not in self.node_name_map:
                         name = f'{node.name}.{p[0]}'
@@ -881,13 +798,17 @@ class BoundedModule(nn.Module):
             return
         for n in node.inputs:
             self.check_prior_bounds(n)
-        for i in getattr(node, 'requires_input_bounds', []):
-            self.compute_intermediate_bounds(
-                node.inputs[i], prior_checked=True)
+        for i in range(len(node.inputs)):
+            if (i in node.requires_input_bounds or not node.inputs[i].perturbed
+                    or node.inputs[i].name in self.layers_with_constraint):
+                self.compute_intermediate_bounds(
+                    node.inputs[i], prior_checked=True)
         node.prior_checked = True
 
     def compute_intermediate_bounds(self, node, prior_checked=False):
         if getattr(node, 'lower', None) is not None:
+            if node.name in self.layers_with_constraint:
+                node.clamp_interim_bounds()
             return
 
         logger.debug(f'Getting the bounds of {node}')
@@ -922,17 +843,6 @@ class BoundedModule(nn.Module):
             # computed from their input nodes by IBP
             # (such as BoundRelu, BoundNeg)
             logger.debug('IBP propagation for intermediate bounds on %s', node)
-        elif (isinstance(node, BoundReshape)
-                and hasattr(node.inputs[0], 'lower')
-                and hasattr(node.inputs[1], 'value')):
-            # TODO merge this with `check_IBP_intermediate`
-            # Node for input value.
-            val_input = node.inputs[0]
-            # Node for input parameter (e.g., shape, permute)
-            arg_input = node.inputs[1]
-            node.lower = node.forward(val_input.lower, arg_input.value)
-            node.upper = node.forward(val_input.upper, arg_input.value)
-            node.interval = (node.lower, node.upper)
         else:
             # For the first linear layer, IBP can give the same tightness
             # as CROWN.
@@ -973,16 +883,33 @@ class BoundedModule(nn.Module):
                 newC, reduced_dim, unstable_idx, unstable_size = sparse_C
 
                 if unstable_idx is None or unstable_size > 0:
-                    if self.return_A:
-                        node.lower, node.upper, _ = self.backward_general(
-                            C=newC, node=node, unstable_idx=unstable_idx,
-                            unstable_size=unstable_size)
-                    else:
-                        # Compute backward bounds only when there are unstable
-                        # neurons, or when we don't know which neurons are unstable.
-                        node.lower, node.upper = self.backward_general(
-                            C=newC, node=node, unstable_idx=unstable_idx,
-                            unstable_size=unstable_size)
+                    apply_output_constraints_to = (
+                        self.bound_opts['optimize_bound_args']['apply_output_constraints_to']
+                    )
+                    # Special case for BoundRelu when sparse intermediate bounds are disabled
+                    # Currently sparse intermediate bounds are restricted to ReLU models only
+                    skip = False
+                    if unstable_idx is None:
+                        if (len(node.output_name) == 1
+                                and isinstance(self[node.output_name[0]],
+                                               (BoundRelu, BoundSignMerge))
+                                and node.name in self.reference_bounds):
+                            lower, upper = self.reference_bounds[node.name]
+                            fully_stable = torch.logical_or(lower>=0, upper<=0).all()
+                            if fully_stable:
+                                node.lower, node.upper = lower, upper
+                                skip = True
+                    if not skip:
+                        if self.return_A:
+                            node.lower, node.upper, _ = self.backward_general(
+                                node, newC, unstable_idx=unstable_idx,
+                                apply_output_constraints_to=apply_output_constraints_to)
+                        else:
+                            # Compute backward bounds only when there are unstable
+                            # neurons, or when we don't know which neurons are unstable.
+                            node.lower, node.upper = self.backward_general(
+                                node, newC, unstable_idx=unstable_idx,
+                                apply_output_constraints_to=apply_output_constraints_to)
 
                 if reduced_dim:
                     self.restore_sparse_bounds(
@@ -997,32 +924,18 @@ class BoundedModule(nn.Module):
             # Initially, the reference bound and the computed bound can be
             # exactly the same when intermediate layer beta is 0. This will
             # prevent gradients flow. So we need a small guard here.
-            if self.intermediate_constr is not None:
-                # Intermediate layer beta is used.
-                # Note that we cannot just take the reference bounds if
-                # they are better - this makes alphas have zero gradients.
-                new_lower = 0.9 * ref_bounds[0] + 0.1 * node.lower
-                new_upper = 0.9 * ref_bounds[1] + 0.1 * node.upper
-                node.lower = torch.max(new_lower, node.lower)
-                node.upper = torch.min(new_upper, node.upper)
-                # Additionally, if the reference bounds say a neuron is
-                # stable, we always keep it. (FIXME: this is for ReLU only).
-                lower_stable = ref_bounds[0] >= 0.
-                node.lower[lower_stable] = ref_bounds[0][lower_stable]
-                upper_stable = ref_bounds[1] <= 0.
-                node.upper[upper_stable] = ref_bounds[1][upper_stable]
-            else:
-                # Set the intermediate layer bounds using reference bounds,
-                # always choosing the tighter one.
-                node.lower = (
-                    torch.max(ref_bounds[0], node.lower).detach()
-                    - node.lower.detach() + node.lower)
-                node.upper = (
-                    node.upper - (node.upper.detach()
-                    - torch.min(ref_bounds[1], node.upper).detach()))
+            # Set the intermediate layer bounds using reference bounds,
+            # always choosing the tighter one.
+            node.lower = (torch.max(ref_bounds[0], node.lower).detach()
+                          - node.lower.detach() + node.lower)
+            node.upper = (node.upper - (node.upper.detach()
+                          - torch.min(ref_bounds[1], node.upper).detach()))
             # Otherwise, we only use reference bounds to check which neurons
             # are unstable.
 
+        # prior constraint bounds
+        if node.name in self.layers_with_constraint:
+            node.clamp_interim_bounds()
         # FIXME (12/28): we should be consistent, and only use
         # node.interval, do not use node.lower or node.upper!
         node.interval = (node.lower, node.upper)
@@ -1047,7 +960,7 @@ class BoundedModule(nn.Module):
             forward=False, bound_lower=True, bound_upper=True, reuse_ibp=False,
             reuse_alpha=False, return_A=False, needed_A_dict=None,
             final_node_name=None, average_A=False,
-            intermediate_layer_bounds=None, reference_bounds=None,
+            interm_bounds=None, reference_bounds=None,
             intermediate_constr=None, alpha_idx=None,
             aux_reference_bounds=None, need_A_only=False,
             cutter=None, decision_thresh=None,
@@ -1126,7 +1039,7 @@ class BoundedModule(nn.Module):
             use this decision_thresh to dynamically optimize those domains that
             <= the threshold.
 
-            intermediate_layer_bounds: A dictionary of 2-element tuple/list
+            interm_bounds: A dictionary of 2-element tuple/list
             containing lower and upper bounds for intermediate layers.
             The dictionary keys should include the names of the layers whose
             bounds should be set without recomputation. The layer names can be
@@ -1137,7 +1050,7 @@ class BoundedModule(nn.Module):
             you only need to set intermediate layer bounds for certain layers,
             then just include these layers' names in the dictionary.
 
-            reference_bounds: Format is similar to "intermediate_layer_bounds".
+            reference_bounds: Format is similar to "interm_bounds".
             However, these bounds are only used as a reference, and the bounds
             for intermediate layers will still be computed (e.g., using CROWN,
             IBP or other specified methods). The computed bounds will be
@@ -1155,6 +1068,9 @@ class BoundedModule(nn.Module):
             is `True`, return a tuple of lower bound, upper bound, and
             `A` dictionary.
         """
+        # This method only prepares everything by setting all required parameters.
+        # The main logic is located in `_compute_bounds_main`. It may be called
+        # repeatedly for CROWN optimizations.
         logger.debug(f'Compute bounds with {method}')
 
         if needed_A_dict is None: needed_A_dict = {}
@@ -1163,60 +1079,26 @@ class BoundedModule(nn.Module):
                 'At least one of bound_lower and bound_upper must be True')
 
         # Several shortcuts.
+        compute_optimized = False
         method = method.lower() if method is not None else method
         if method == 'ibp':
             # Pure IBP bounds.
-            method = None
-            IBP = True
+            method, IBP = None, True
         elif method in ['ibp+backward', 'ibp+crown', 'crown-ibp']:
-            method = 'backward'
-            IBP = True
+            method, IBP = 'backward', True
         elif method == 'crown':
             method = 'backward'
         elif method == 'forward':
             forward = True
         elif method == 'forward+backward' or method == 'forward+crown':
-            method = 'backward'
-            forward = True
+            method, forward = 'backward', True
         elif method in ['crown-optimized', 'alpha-crown', 'forward-optimized']:
             # Lower and upper bounds need two separate rounds of optimization.
             if method == 'forward-optimized':
                 method = 'forward'
             else:
                 method = 'backward'
-            if bound_lower:
-                ret1 = self.get_optimized_bounds(
-                    x=x, C=C, method=method,
-                    intermediate_layer_bounds=intermediate_layer_bounds,
-                    reference_bounds=reference_bounds, bound_lower=bound_lower,
-                    bound_upper=False, return_A=return_A,
-                    aux_reference_bounds=aux_reference_bounds,
-                    needed_A_dict=needed_A_dict,
-                    final_node_name=final_node_name,
-                    cutter=cutter, decision_thresh=decision_thresh)
-            if bound_upper:
-                ret2 = self.get_optimized_bounds(
-                    x=x, C=C, method=method,
-                    intermediate_layer_bounds=intermediate_layer_bounds,
-                    reference_bounds=reference_bounds, bound_lower=False,
-                    bound_upper=bound_upper, return_A=return_A,
-                    aux_reference_bounds=aux_reference_bounds,
-                    needed_A_dict=needed_A_dict,
-                    final_node_name=final_node_name,
-                    cutter=cutter, decision_thresh=decision_thresh)
-            if bound_lower and bound_upper:
-                if return_A:
-                    # Needs to merge the A dictionary.
-                    lA_dict = ret1[2]
-                    uA_dict = ret2[2]
-                    merged_A = self.merge_A_dict(lA_dict, uA_dict)
-                    return ret1[0], ret2[1], merged_A
-                else:
-                    return ret1[0], ret2[1]
-            elif bound_lower:
-                return ret1  # ret1[1] is None.
-            elif bound_upper:
-                return ret2  # ret2[0] is None.
+            compute_optimized = True
 
         if reference_bounds is None:
             reference_bounds = {}
@@ -1234,98 +1116,60 @@ class BoundedModule(nn.Module):
         A_dict = {} if return_A else None
 
         if x is not None:
-            self._set_input(
-                *x, intermediate_layer_bounds=intermediate_layer_bounds)
+            if isinstance(x, torch.Tensor):
+                x = (x,)
+            self.set_input(*x, interm_bounds=interm_bounds)
 
-        if IBP and method is None and reuse_ibp:
-            # directly return the previously saved ibp bounds
-            return self.ibp_lower, self.ibp_upper
-        root = [self[name] for name in self.root_name]
-        batch_size = root[0].value.shape[0]
+        roots = self.roots()
+        batch_size = roots[0].value.shape[0]
         dim_in = 0
 
-        for i in range(len(root)):
-            value = root[i].forward()
-            if getattr(root[i], 'perturbation', None) is not None:
-                ret_init = root[i].perturbation.init(
+        for i in range(len(roots)):
+            value = roots[i].forward()
+            if getattr(roots[i], 'perturbation', None) is not None:
+                ret_init = roots[i].perturbation.init(
                     value, aux=aux, forward=forward)
-                root[i].linear, root[i].center, root[i].aux = ret_init
+                roots[i].linear, roots[i].center, roots[i].aux = ret_init
                 # This input/parameter has perturbation.
                 # Create an interval object.
-                root[i].interval = Interval(
-                    root[i].linear.lower, root[i].linear.upper,
-                    ptb=root[i].perturbation)
+                roots[i].interval = Interval(
+                    roots[i].linear.lower, roots[i].linear.upper,
+                    ptb=roots[i].perturbation)
                 if forward:
-                    root[i].dim = root[i].linear.lw.shape[1]
-                    dim_in += root[i].dim
+                    roots[i].dim = roots[i].linear.lw.shape[1]
+                    dim_in += roots[i].dim
             else:
                 # This input/parameter does not has perturbation.
                 # Use plain tuple defaulting to Linf perturbation.
-                root[i].interval = (value, value)
-                root[i].forward_value = root[i].value = value
-                root[i].center = root[i].lower = root[i].upper = value
+                roots[i].interval = (value, value)
+                roots[i].forward_value = roots[i].value = value
+                roots[i].center = roots[i].lower = roots[i].upper = value
 
-            root[i].lower, root[i].upper = root[i].interval
+            roots[i].lower, roots[i].upper = roots[i].interval
 
         if forward:
-            self.init_forward(root, dim_in)
+            self.init_forward(roots, dim_in)
 
-        final = self.final_node(
-        ) if final_node_name is None else self[final_node_name]
-        logger.debug(f'Final node {final.__class__.__name__}({final.name})')
-
-        if IBP:
-            self.ibp_lower, self.ibp_upper = self.IBP_general(node=final, C=C)
-
-        if method is None:
-            return self.ibp_lower, self.ibp_upper
-
-        if C is None:
-            # C is an identity matrix by default
-            if final.output_shape is None:
-                raise ValueError(
-                    f'C is not missing while node {final} has no default shape')
-            dim_output = int(prod(final.output_shape[1:]))
-            # TODO: use an eyeC object here.
-            C = torch.eye(dim_output, device=self.device).expand(
-                batch_size, dim_output, dim_output)
-
-        # Reuse previously saved alpha values,
-        # even if they are not optimized now
-        if reuse_alpha:
-            for node in self.optimizable_activations:
-                node.opt_reuse()
-        else:
-            for node in self.optimizable_activations:
-                node.opt_no_reuse()
-
-        # Inject update mask inside the activations
-        # update_mask: None or  bool tensor([batch_size])
-        # If set to a tensor, only update the alpha and beta of selected
-        # element (with element=1).
-
-        if update_mask is None:
-            for node in self.optimizable_activations:
-                node.clean_alpha_beta_update_mask()
-        else:
-            for node in self.optimizable_activations:
-                node.set_alpha_beta_update_mask(update_mask)
-
-        for n in self._modules.values():
-            # Check whether all prior intermediate bounds already exist
-            n.prior_checked = False
-            if isinstance(i, BoundRelu):
-                for node in i.inputs:
+        for n in self.nodes():
+            if isinstance(n, BoundRelu):
+                for node in n.inputs:
                     if isinstance(node, BoundConv):
                         # whether this Conv is followed by a ReLU
                         node.relu_followed = True
 
+            # Inject update mask inside the activations
+            # update_mask: None or bool tensor([batch_size])
+            # If set to a tensor, only update the alpha and beta of selected
+            # element (with element=1).
+            n.alpha_beta_update_mask = update_mask
+
+        final = (self.final_node() if final_node_name is None
+                 else self[final_node_name])
         # BFS to find out whether each node is used given the current final node
         self._set_used_nodes(final)
 
         # FIXME clean
         self.use_forward = forward
-        self.root = root
         self.batch_size = batch_size
         self.dim_in = dim_in
         self.return_A = return_A
@@ -1336,16 +1180,140 @@ class BoundedModule(nn.Module):
         self.aux_reference_bounds = aux_reference_bounds
         self.final_node_name = final.name
 
+        if compute_optimized:
+            kwargs = dict(x=x, C=C, method=method, interm_bounds=interm_bounds,
+                reference_bounds=reference_bounds, return_A=return_A,
+                aux_reference_bounds=aux_reference_bounds,
+                needed_A_dict=needed_A_dict,
+                final_node_name=final_node_name,
+                cutter=cutter, decision_thresh=decision_thresh)
+            if bound_upper:
+                ret2 = self._get_optimized_bounds(bound_side='upper', **kwargs)
+            if bound_lower:
+                ret1 = self._get_optimized_bounds(bound_side='lower', **kwargs)
+            if bound_lower and bound_upper:
+                if return_A:
+                    # Needs to merge the A dictionary.
+                    return ret1[0], ret2[1], self.merge_A_dict(ret1[2], ret2[2])
+                else:
+                    return ret1[0], ret2[1]
+            elif bound_lower:
+                return ret1  # ret1[1] is None.
+            elif bound_upper:
+                return ret2  # ret2[0] is None.
+
+
+        return self._compute_bounds_main(C=C,
+                                         method=method,
+                                         IBP=IBP,
+                                         bound_lower=bound_lower,
+                                         bound_upper=bound_upper,
+                                         reuse_ibp=reuse_ibp,
+                                         reuse_alpha=reuse_alpha,
+                                         average_A=average_A,
+                                         alpha_idx=alpha_idx,
+                                         need_A_only=need_A_only,
+                                         update_mask=update_mask)
+
+    def save_intermediate(self, save_path=None):
+        r"""A function for saving intermediate bounds.
+
+        Please call this function after `compute_bounds`, or it will output
+        IBP bounds by default.
+
+        Args:
+            save_path (str, default `None`): If `None`, the intermediate bounds
+            will not be saved, or it will be saved at the designated path.
+
+        Returns:
+            save_dict (dict): Return a dictionary of lower and upper bounds, with
+            the key being the name of the layer.
+        """
+        save_dict = OrderedDict()
+        for node in self.nodes():
+            if not hasattr(node, 'interval'):
+                ibp_lower, ibp_upper = self.IBP_general(node,
+                    delete_bounds_after_use=True)
+                dim_output = int(prod(node.output_shape[1:]))
+                C = torch.eye(dim_output, device=self.device).expand(
+                    self.batch_size, dim_output, dim_output)
+                crown_lower, crown_upper = self.backward_general(node, C=C)
+                save_dict[node.name] = (
+                    torch.max(crown_lower, ibp_lower),
+                    torch.min(crown_upper, ibp_upper))
+            else:
+                save_dict[node.name] = (node.lower, node.upper)
+
+        if save_path is not None:
+            torch.save(save_dict, save_path)
+        return save_dict
+
+    def _compute_bounds_main(self, C=None, method='backward', IBP=False,
+            bound_lower=True, bound_upper=True, reuse_ibp=False,
+            reuse_alpha=False, average_A=False, alpha_idx=None,
+            need_A_only=False, update_mask=None):
+        """The core implementation of compute_bounds.
+
+        Seperated because compute_bounds may call _get_optimized_bounds which
+        repeatedly calls this method. Otherwise, the preprocessing done in
+        compute_bounds would be executed for each iteration.
+        """
+
+        final = (self.final_node() if self.final_node_name is None
+                 else self[self.final_node_name])
+        logger.debug(f'Final node {final.__class__.__name__}({final.name})')
+
+        if IBP and method is None and reuse_ibp:
+            # directly return the previously saved ibp bounds
+            return self.ibp_lower, self.ibp_upper
+
+        if IBP:
+            self.ibp_lower, self.ibp_upper = self.IBP_general(node=final, C=C)
+
+        if method is None:
+            return self.ibp_lower, self.ibp_upper
+
+        # TODO: if compute_bounds is called with a method that causes alphas to be
+        # optimized, C will be allocated in each iteration. We could allocate it once
+        # in compute_bounds, but e.g. `IBP_general` and code in `_get_optimized_bounds`
+        # relies on the fact that it can be None
+        if C is None:
+            # C is an identity matrix by default
+            if final.output_shape is None:
+                raise ValueError(
+                    f'C is not missing while node {final} has no default shape')
+            dim_output = int(prod(final.output_shape[1:]))
+            # TODO: use an eyeC object here.
+            C = torch.eye(dim_output, device=self.device).expand(
+                self.batch_size, dim_output, dim_output)
+
+        # Reuse previously saved alpha values,
+        # even if they are not optimized now
+        # This must be done here instead of `compute_bounds`, as other code might change
+        # it (e.g. `_get_optimized_bounds`)
+        if reuse_alpha:
+            self.opt_reuse()
+        else:
+            self.opt_no_reuse()
+
+        for node in self.nodes():
+            # All nodes may need to be recomputed
+            node.prior_checked = False
+
         self.check_prior_bounds(final)
 
         if method == 'backward':
+            apply_output_constraints_to = (
+                self.bound_opts['optimize_bound_args']['apply_output_constraints_to']
+            )
             # This is for the final output bound.
             # No need to pass in intermediate layer beta constraints.
             ret = self.backward_general(
-                C=C, node=final,
+                final, C,
                 bound_lower=bound_lower, bound_upper=bound_upper,
                 average_A=average_A, need_A_only=need_A_only,
-                unstable_idx=alpha_idx, update_mask=update_mask)
+                unstable_idx=alpha_idx, update_mask=update_mask,
+                apply_output_constraints_to=apply_output_constraints_to)
             # FIXME when C is specified, lower and upper should not be saved to
             # final.lower and final.upper, because they are not the bounds for
             # the node.
@@ -1360,7 +1328,7 @@ class BoundedModule(nn.Module):
         if final.name != self.last_final_node:
             self.last_final_node = final.name
             self.used_nodes = []
-            for i in self._modules.values():
+            for i in self.nodes():
                 i.used = False
             final.used = True
             queue = deque([final])
@@ -1373,32 +1341,29 @@ class BoundedModule(nn.Module):
                         queue.append(n_pre)
         # Based on "used" and "perturbed" properties, find out which
         # layer requires intermediate layer bounds.
-        self.layers_requiring_bounds = (
-                self.get_layers_requiring_bounds())
-
-    def add_intermediate_perturbation(self, node, perturbation):
-        """Add perturbation to an intermediate node and it is treated as an
-        independent node in bound computation."""
-        node.perturbation = perturbation
-        node.perturbed = True
-        # NOTE This change is currently inreversible
-        if not node.name in self.root_name:
-            self.root_name.append(node.name)
+        self.layers_requiring_bounds = self.get_layers_requiring_bounds()
 
     from .interval_bound import (
         IBP_general, _IBP_loss_fusion, check_IBP_intermediate,
         check_IBP_first_linear)
     from .forward_bound import (
-        forward_general, forward_general_dynamic, init_forward)
+        forward_general, forward_general_dynamic, forward_refinement, init_forward)
     from .backward_bound import (
-        backward_general, get_sparse_C, check_optimized_variable_sparsity,
-        restore_sparse_bounds, get_alpha_crown_start_nodes,
-        get_unstable_locations, batched_backward)
-    from .optimized_bounds import get_optimized_bounds, init_slope
-    from .beta_crown import (
-        beta_bias, save_best_intermediate_betas,
-        print_optimized_beta)
-    from .jacobian import augment_gradient_graph, compute_jacobian_bounds
+        backward_general, get_sparse_C, concretize,
+        check_optimized_variable_sparsity, restore_sparse_bounds,
+        get_alpha_crown_start_nodes, get_unstable_locations, batched_backward,
+        _preprocess_C)
+    from .output_constraints import backward_general_with_output_constraint
+    from .optimized_bounds import (
+        _get_optimized_bounds, init_alpha, update_best_beta,
+        opt_reuse, opt_no_reuse, _to_float64, _to_default_dtype)
+    from .beta_crown import (beta_crown_backward_bound, reset_beta, set_beta,
+                             set_beta_cuts, get_split_nodes)
+    from .jacobian import (augment_gradient_graph, compute_jacobian_bounds,
+                           _expand_jacobian)
+    from .optimize_graph import _optimize_graph
+    from .edit_graph import add_nodes, add_input_node, delete_node, replace_node
 
 
-    from .solver_module import build_solver_module, _build_solver_input, _build_solver_general
+    from .solver_module import (
+        build_solver_module, _build_solver_input, _build_solver_general, _reset_solver_vars)

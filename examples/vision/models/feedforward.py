@@ -19,7 +19,7 @@ class cnn_4layer(nn.Module):
     def forward(self, x):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
 
@@ -33,7 +33,7 @@ class mlp_2layer(nn.Module):
         self.fc2 = nn.Linear(256 * width, 10)
 
     def forward(self, x):
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
@@ -47,7 +47,7 @@ class mlp_3layer(nn.Module):
         self.fc3 = nn.Linear(128 * width, 10)
 
     def forward(self, x):
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -92,18 +92,13 @@ class mlp_5layer(nn.Module):
         self.fc5 = nn.Linear(128 * width, 10)
 
     def forward(self, x):
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        x = F.relu(self.fc4(x))        
+        x = F.relu(self.fc4(x))
         x = self.fc5(x)
         return x
-
-
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size(0), -1)
 
 
 # Model can also be defined as a nn.Sequential
@@ -119,7 +114,7 @@ def cnn_7layer(in_ch=3, in_dim=32, width=64, linear_size=512):
         nn.ReLU(),
         nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,10)
@@ -143,7 +138,7 @@ def cnn_7layer_bn(in_ch=3, in_dim=32, width=64, linear_size=512):
         nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
         nn.BatchNorm2d(2 * width),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,10)
@@ -167,13 +162,13 @@ def cnn_7layer_bn_imagenet(in_ch=3, in_dim=32, width=64, linear_size=512):
         nn.Conv2d(2 * width, 2 * width, 3, stride=2, padding=1),
         nn.BatchNorm2d(2 * width),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(25088, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,200)
     )
     return model
-    
+
 def cnn_6layer(in_ch, in_dim, width=32, linear_size=256):
     model = nn.Sequential(
         nn.Conv2d(in_ch, width, 3, stride=1, padding=1),
@@ -184,7 +179,7 @@ def cnn_6layer(in_ch, in_dim, width=32, linear_size=256):
         nn.ReLU(),
         nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,10)

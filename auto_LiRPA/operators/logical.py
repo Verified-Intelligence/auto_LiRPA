@@ -3,9 +3,6 @@ from .base import *
 
 
 class BoundWhere(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, condition, x, y):
         return torch.where(condition.to(torch.bool), x, y)
 
@@ -14,7 +11,7 @@ class BoundWhere(Bound):
         condition = v[0][0]
         return tuple([torch.where(condition, v[1][j], v[2][j]) for j in range(2)])
 
-    def bound_backward(self, last_lA, last_uA, condition, x, y):
+    def bound_backward(self, last_lA, last_uA, condition, x, y, **kwargs):
         assert torch.allclose(condition.lower.float(), condition.upper.float())
         assert self.from_input
         mask = condition.lower.float()
@@ -33,8 +30,10 @@ class BoundWhere(Bound):
         return [(None, None), (lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
 class BoundNot(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, x):
         return x.logical_not()
+
+
+class BoundEqual(Bound):
+    def forward(self, x, y):
+        return x == y

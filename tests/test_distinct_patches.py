@@ -1,4 +1,3 @@
-from numpy.core.numeric import allclose
 import torch
 import random
 import numpy as np
@@ -9,8 +8,8 @@ from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 import sys
 sys.path.append('../examples/vision')
-import models
 from testcase import TestCase
+
 
 class cnn_4layer_b(nn.Module):
     def __init__(self, paddingA, paddingB):
@@ -38,9 +37,9 @@ class cnn_4layer_b(nn.Module):
         x = self.linear(x)
         return self.fc(F.relu(x))
 
-class TestDistinctPatches(TestCase): 
+class TestDistinctPatches(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1234, ref_path='data/resnet_patches_test_data',
             generate=generate)
 
@@ -56,10 +55,10 @@ class TestDistinctPatches(TestCase):
 
                 model_ori = cnn_4layer_b(paddingA, paddingB)
 
-                conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'        
-                    
+                conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'
+
                 normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
-                test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
+                test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True,
                                 transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
                 N = 1
                 n_classes = 10
@@ -106,7 +105,7 @@ class TestDistinctPatches(TestCase):
 
                 assert torch.allclose(lb, lb_ref)
                 assert torch.allclose(ub, ub_ref)
-        
+
 
 if __name__ == '__main__':
     # Change to generate=True when genearting reference results

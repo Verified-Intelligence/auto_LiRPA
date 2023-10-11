@@ -97,7 +97,7 @@ class Wide_ResNet(nn.Module):
         out = F.relu(out)
         if self.use_pooling:
             out = F.avg_pool2d(out, 8)
-        out = out.view(out.size(0), -1)
+        out = torch.flatten(out, 1)
         out = F.relu(self.linear1(out))
         out = self.linear2(out)
 

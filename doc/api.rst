@@ -5,6 +5,7 @@ API Usage
 
    .. autofunction:: auto_LiRPA.BoundedModule.forward
    .. autofunction:: auto_LiRPA.BoundedModule.compute_bounds
+   .. autofunction:: auto_LiRPA.BoundedModule.save_intermediate
 
 .. autoclass:: auto_LiRPA.bound_ops.Bound
 

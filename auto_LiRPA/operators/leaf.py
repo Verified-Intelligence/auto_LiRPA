@@ -131,7 +131,7 @@ class BoundInput(Bound):
     def bound_forward(self, dim_in):
         assert 0
 
-    def bound_backward(self, last_lA, last_uA):
+    def bound_backward(self, last_lA, last_uA, **kwargs):
         raise ValueError('{} is a BoundInput node and should not be visited here'.format(
             self.name))
 
@@ -140,7 +140,7 @@ class BoundInput(Bound):
             self.name))
 
 class BoundParams(BoundInput):
-    def __init__(self, ori_name, value, perturbation=None):
+    def __init__(self, ori_name, value, perturbation=None, options=None):
         super().__init__(ori_name, None, perturbation)
         self.register_parameter('param', value)
         self.from_input = False
@@ -164,9 +164,10 @@ class BoundParams(BoundInput):
             return self.param.requires_grad_(self.training)
 
 class BoundBuffers(BoundInput):
-    def __init__(self, ori_name, value, perturbation=None):
+    def __init__(self, ori_name, value, perturbation=None, options=None):
         super().__init__(ori_name, None, perturbation)
         self.register_buffer('buffer', value.clone().detach())
+        self.from_input = not options.get('buffers', {}).get('no_batchdim', False)
 
     def forward(self):
         return self.buffer

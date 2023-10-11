@@ -3,10 +3,11 @@ from .base import *
 from ..patches import Patches, patches_to_matrix
 from .linear import BoundLinear
 from .gradient_modules import ReshapeGrad
+from .constant import BoundConstant
 
 
 class BoundReshape(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         # It can be set to `view`, so that `view` instead of `reshape` will be used.
         self.option = options.get('reshape', 'reshape')
@@ -22,7 +23,7 @@ class BoundReshape(Bound):
         else:
             return x.reshape(shape)
 
-    def bound_backward(self, last_lA, last_uA, x, shape):
+    def bound_backward(self, last_lA, last_uA, x, shape, **kwargs):
         def _bound_oneside(A):
             if A is None:
                 return None
@@ -69,6 +70,11 @@ class BoundReshape(Bound):
         ub = x.ub.reshape(batch_size, *self.shape[1:])
         return LinearBound(lw, lb, uw, ub)
 
+    def bound_dynamic_forward(self, x, shape, max_dim=None, offset=0):
+        w = x.lw.reshape(x.lw.shape[0], x.lw.shape[1], *self.shape[1:])
+        b = x.lb.reshape(x.lb.shape[0], *self.shape[1:])
+        return LinearBound(w, b, w, b, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
+
     def interval_propagate(self, *v):
         return Interval.make_interval(
             self.forward(v[0][0], v[1][0]),
@@ -89,17 +95,31 @@ class BoundReshape(Bound):
 
 
 class BoundUnsqueeze(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.axes = attr['axes']
-        assert (len(self.axes) == 1)
-        self.axes = self.axes[0]
+        if 'axes' in attr:
+            self.axes = attr['axes']
+            assert len(self.axes) == 1
+            self.axes = self.axes[0]
+        else:
+            assert isinstance(inputs[1], BoundConstant)
+            assert inputs[1].value.numel() == 1
+            self.axes = inputs[1].value[0]
         self.use_default_ibp = True
 
-    def forward(self, x):
-        return x.unsqueeze(self.axes)
+    def forward(self, *x):
+        return x[0].unsqueeze(self.axes)
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_forward(self, dim_in, x):
+        assert self.axes > 0
+        return LinearBound(
+            x.lw.unsqueeze(self.axes + 1),
+            x.lb.unsqueeze(self.axes),
+            x.uw.unsqueeze(self.axes + 1),
+            x.ub.unsqueeze(self.axies)
+        )
+
+    def bound_backward(self, last_lA, last_uA, x, *args, **kwargs):
         self.axes = self.make_axis_non_negative(self.axes, 'output')
         if self.axes == 0:
             # TODO: unsqueeze on batch dimension can be problematic.
@@ -119,7 +139,7 @@ class BoundUnsqueeze(Bound):
                 uA = None
             return [(lA, uA)], 0, 0
 
-    def bound_forward(self, dim_in, x):
+    def bound_forward(self, dim_in, x, *args):
         self.axes = self.make_axis_non_negative(self.axes, 'output')
         if len(self.input_shape) == 0:
             lw, lb = x.lw.unsqueeze(1), x.lb.unsqueeze(0)
@@ -132,8 +152,9 @@ class BoundUnsqueeze(Bound):
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(v[0])
 
+
 class BoundSqueeze(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.axes = attr['axes']
         assert (len(self.axes) == 1)
@@ -143,14 +164,26 @@ class BoundSqueeze(Bound):
     def forward(self, x):
         return x.squeeze(self.axes)
 
-    def bound_backward(self, last_lA, last_uA, x):
-        assert (self.axes != 0)
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
+        assert self.axes > 0
         return [(last_lA.unsqueeze(self.axes + 1) if last_lA is not None else None,
                  last_uA.unsqueeze(self.axes + 1) if last_uA is not None else None)], 0, 0
 
+    def bound_forward(self, dim_in, x):
+        assert self.axes > 0
+        return LinearBound(
+            x.lw.squeeze(self.axes + 1),
+            x.lb.squeeze(self.axes),
+            x.uw.squeeze(self.axes + 1),
+            x.ub.squeeze(self.axes)
+        )
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(v[0])
+
 
 class BoundFlatten(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.use_default_ibp = True
         self.axis = attr['axis']
@@ -158,7 +191,7 @@ class BoundFlatten(Bound):
     def forward(self, x):
         return torch.flatten(x, self.axis)
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         def _bound_oneside(A):
             if A is None:
                 return None
@@ -168,9 +201,7 @@ class BoundFlatten(Bound):
     def bound_dynamic_forward(self, x, max_dim=None, offset=0):
         w = torch.flatten(x.lw, self.axis + 1)
         b = torch.flatten(x.lb, self.axis)
-        x_L = torch.flatten(x.x_L, self.axis)
-        x_U = torch.flatten(x.x_U, self.axis)
-        return LinearBound(w, b, w, b, x_L=x_L, x_U=x_U, tot_dim=x.tot_dim)
+        return LinearBound(w, b, w, b, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
 
     def bound_forward(self, dim_in, x):
         self.axis = self.make_axis_non_negative(self.axis)
@@ -187,10 +218,14 @@ class BoundFlatten(Bound):
         self.solver_vars = np.array(v[0]).reshape(-1).tolist()
         model.update()
 
+    def build_gradient_node(self, grad_upstream):
+        node_grad = ReshapeGrad()
+        grad_input = (grad_upstream, self.inputs[0].forward_value)
+        return node_grad, grad_input, []
 
 
 class BoundConcat(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.IBP_rets = None
@@ -216,7 +251,7 @@ class BoundConcat(Bound):
         eps = np.array(eps)
         # Supporting two cases: all inputs are Linf norm, or all inputs are L2 norm perturbed.
         # Some inputs can be constants without perturbations.
-        all_inf = all(map(lambda x: x is None or x == np.inf, norms))
+        all_inf = all(map(lambda x: x is None or x == torch.inf, norms))
         all_2 = all(map(lambda x: x is None or x == 2, norms))
 
         h_L = [_v[0] for _v in v]
@@ -235,7 +270,7 @@ class BoundConcat(Bound):
         else:
             raise RuntimeError("BoundConcat does not support inputs with norm {}".format(norms))
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         self.axis = self.make_axis_non_negative(self.axis, 'output')
         assert self.axis > 0
 
@@ -276,9 +311,9 @@ class BoundConcat(Bound):
 BoundConcatFromSequence = BoundConcat
 
 class BoundShape(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.use_default_ibp = True
+        self.never_perturbed = True
 
     @staticmethod
     def shape(x):
@@ -318,11 +353,9 @@ class BoundGather(Bound):
             if indices == -1:
                 indices = x.shape[self.axis] + indices
             return torch.index_select(x, dim=self.axis, index=indices).squeeze(self.axis)
-        elif self.axis == 0:
-            return torch.index_select(
-                x, dim=self.axis, index=indices.view(-1)).reshape(
-                    *indices.shape, x.shape[-1])
-        elif self.indices.ndim == 1:
+        elif indices.ndim == 1:
+            if self.axis == 0:
+                assert not self.perturbed
             # `index_select` requires `indices` to be a 1-D tensor
             return torch.index_select(x, dim=self.axis, index=indices)
 
@@ -330,7 +363,7 @@ class BoundGather(Bound):
                          f'data {x.shape}, indices {indices.shape}, '
                          f'axis {self.axis}')
 
-    def bound_backward(self, last_lA, last_uA, x, indices):
+    def bound_backward(self, last_lA, last_uA, *args, **kwargs):
         assert self.from_input
 
         def _expand_A_with_zeros(A, axis, idx, max_axis_size):
@@ -365,7 +398,7 @@ class BoundGather(Bound):
                     final_A = torch.zeros(*shape[:self.axis + 1], self.input_shape[self.axis], *shape[self.axis + 2:], device=A.device)
                     idx = self.indices.view([*[1]*(self.axis+1), -1, *[1]*len(shape[self.axis + 2:])])
                     idx = idx.repeat([*A.shape[:self.axis+1], 1, *A.shape[self.axis+2:]])
-                    final_A.scatter_(dim=self.axis+1, index=idx, src=A)
+                    final_A.scatter_add_(dim=self.axis+1, index=idx, src=A)
                     return final_A
             elif isinstance(A, Patches):
                 if self.indices.ndim == 0:
@@ -384,7 +417,7 @@ class BoundGather(Bound):
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
     def bound_forward(self, dim_in, x, indices):
-        assert self.indices.ndim == 0  # TODO
+        assert self.indices.numel() == 1 and self.indices.ndim <= 1 # TODO
 
         if isinstance(x, torch.Size):
             lw = uw = torch.zeros(dim_in, device=self.device)
@@ -393,10 +426,15 @@ class BoundGather(Bound):
                 dim=self.axis, index=self.indices).squeeze(self.axis)
         else:
             axis = self.axis + 1
-            lw = torch.index_select(x.lw, dim=self.axis + 1, index=self.indices).squeeze(axis)
-            uw = torch.index_select(x.uw, dim=self.axis + 1, index=self.indices).squeeze(axis)
-            lb = torch.index_select(x.lb, dim=self.axis, index=self.indices).squeeze(self.axis)
-            ub = torch.index_select(x.ub, dim=self.axis, index=self.indices).squeeze(self.axis)
+            lw = torch.index_select(x.lw, dim=self.axis + 1, index=self.indices)
+            uw = torch.index_select(x.uw, dim=self.axis + 1, index=self.indices)
+            lb = torch.index_select(x.lb, dim=self.axis, index=self.indices)
+            ub = torch.index_select(x.ub, dim=self.axis, index=self.indices)
+            if self.indices.ndim == 0:
+                lw = lw.squeeze(axis)
+                uw = uw.squeeze(axis)
+                lb = lb.squeeze(self.axis)
+                ub = ub.squeeze(self.axis)
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
@@ -416,7 +454,7 @@ class BoundGatherElements(Bound):
         self.index = index
         return torch.gather(x, dim=self.axis, index=index)
 
-    def bound_backward(self, last_lA, last_uA, x, index):
+    def bound_backward(self, last_lA, last_uA, x, index, **kwargs):
         assert self.from_input
 
         dim = self._get_dim()
@@ -455,7 +493,7 @@ class BoundGatherElements(Bound):
         return dim
 
 class BoundTranspose(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.perm = attr['perm']
         self.perm_inv_inc_one = [-1] * (len(self.perm) + 1)
@@ -463,11 +501,12 @@ class BoundTranspose(Bound):
         for i in range(len(self.perm)):
             self.perm_inv_inc_one[self.perm[i] + 1] = i + 1
         self.use_default_ibp = True
+        self.ibp_intermediate = True
 
     def forward(self, x):
         return x.permute(*self.perm)
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         def _bound_oneside(last_A):
             if last_A is None:
                 return None
@@ -490,12 +529,23 @@ class BoundTranspose(Bound):
         self.solver_vars = self.forward(*v)
 
 class BoundSlice(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.start = attr["starts"][0] if "starts" in attr else None
         self.end = attr["ends"][0] if "ends" in attr else None
         self.axes = attr["axes"][0] if "axes" in attr else None
         self.use_default_ibp = False
+
+    def __repr__(self):
+        attrs = {}
+        if (len(self.inputs) == 5
+            and all(isinstance(item, BoundConstant) and item.value.numel() == 1
+                    for item in self.inputs[1:])):
+            attrs['start'] = self.inputs[1].value.item()
+            attrs['end'] = self.inputs[2].value.item()
+            attrs['axes'] = self.inputs[3].value.item()
+            attrs['step'] = self.inputs[4].value.item()
+        return super().__repr__(attrs)
 
     def _fixup_params(self, shape, start, end, axes, steps):
         if start < 0:
@@ -531,14 +581,15 @@ class BoundSlice(Bound):
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(*v)
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         def _bound_oneside(A, start, end, axes, steps):
             if A is None:
                 return None
             if isinstance(A, torch.Tensor):
                 # Reuse the batch and spec dimension of A, and replace other shapes with input.
                 A_shape = A.shape[:2] + self.input_shape[1:]
-                new_A = torch.zeros(size=A_shape, device=A.device, requires_grad=A.requires_grad)
+                new_A = torch.zeros(size=A_shape, device=A.device,
+                                    requires_grad=A.requires_grad)
                 # Fill part of the new_A based on start, end, axes and steps.
                 # Skip the spec dimension at the front (axes + 1).
                 dim = axes if axes < 0 else axes + 1
@@ -550,7 +601,9 @@ class BoundSlice(Bound):
                 patches = A.patches
                 # patches shape is [out_c, batch, out_h, out_w, in_c, patch_h, patch_w].
                 new_patches_shape = patches.shape[:4] + (self.input_shape[1], ) + patches.shape[-2:]
-                new_patches = torch.zeros(size=new_patches_shape, device=patches.device, requires_grad=patches.requires_grad)
+                new_patches = torch.zeros(
+                    size=new_patches_shape, device=patches.device,
+                    requires_grad=patches.requires_grad)
                 indices = torch.arange(start, end, device=patches.device)
                 new_patches = torch.index_copy(new_patches, dim=-3, index=indices, source=patches)
                 # Only the in_c dimension is changed.
@@ -593,9 +646,6 @@ class BoundSlice(Bound):
 
 
 class BoundExpand(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, x, y):
         y = y.clone()
         assert y.ndim == 1
@@ -608,8 +658,9 @@ class BoundExpand(Bound):
                 assert x.shape[i] == 1 or x.shape[i] == y[m - n + i]
         return x.expand(*list(y))
 
+
 class BoundSplit(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.split = attr['split']
@@ -620,7 +671,7 @@ class BoundSplit(Bound):
             self.axis = len(x.shape) - 1
         return torch.split(x, self.split, dim=self.axis)[self.output_index]
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         assert self.axis > 0
         pre = sum(self.split[:self.output_index])
         suc = sum(self.split[(self.output_index + 1):])
@@ -649,3 +700,6 @@ class BoundSplit(Bound):
         lb = torch.split(x.lb, self.split, dim=self.axis)[self.output_index]
         ub = torch.split(x.ub, self.split, dim=self.axis)[self.output_index]
         return LinearBound(lw, lb, uw, ub)
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(v[0])

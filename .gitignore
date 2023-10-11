@@ -16,3 +16,8 @@ verifier_log_*
 .idea
 *.so
 release
+*.compiled
+.DS_Store
+*.csv
+*.out
+*.txt

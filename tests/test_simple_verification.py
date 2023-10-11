@@ -48,7 +48,7 @@ class TestSimpleVerification(TestCase):
       method = 'CROWN-Optimized (alpha-CROWN)'
       lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1}})
       _, ub = lirpa_model.compute_bounds(x=(image,), method=method.split()[0])
-      self.assertTensorEqual(ub[0][7], torch.tensor(12.5080))
+      self.assert_tensor_equal(ub[0][7], torch.tensor(12.5080))
 
 if __name__ == '__main__':
     testcase = TestSimpleVerification()

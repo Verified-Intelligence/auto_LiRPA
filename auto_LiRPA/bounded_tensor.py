@@ -1,9 +1,8 @@
 import copy
-import torch
 import torch.nn as nn
-from torch import Tensor as Tensor
-
+from torch import Tensor
 import torch._C as _C
+
 
 class BoundedTensor(Tensor):
     @staticmethod

@@ -31,11 +31,6 @@ class DenseSequential(nn.Sequential):
         return xs[-1]
 
 
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size(0), -1)
-
-
 def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
     def block(in_filters, out_filters, k, downsample):
         if not downsample:
@@ -70,7 +65,7 @@ def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
             conv2 +
             conv3 +
             conv4 +
-            [Flatten(),
+            [nn.Flatten(),
              nn.Linear(mult * 4 * width * 8 * 8, 1000),
              nn.ReLU(),
              nn.Linear(1000, 10)]

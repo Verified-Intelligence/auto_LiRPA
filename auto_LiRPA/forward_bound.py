@@ -5,10 +5,16 @@ from .utils import *
 from .linear_bound import LinearBound
 from .perturbations import PerturbationLpNorm
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .bound_general import BoundedModule
+
 import sys
 sys.setrecursionlimit(1000000)
 
-def forward_general(self, C=None, node=None, concretize=False, offset=0):
+
+def forward_general(self: 'BoundedModule', C=None, node=None, concretize=False,
+                    offset=0):
     if self.bound_opts['dynamic_forward']:
         return self.forward_general_dynamic(C, node, concretize, offset)
 
@@ -56,20 +62,21 @@ def forward_general(self, C=None, node=None, concretize=False, offset=0):
 
     if concretize:
         if lw is not None or uw is not None:
+            roots = self.roots()
             prev_dim_in = 0
             batch_size = lw.shape[0]
             assert (lw.ndim > 1)
             lA = lw.reshape(batch_size, self.dim_in, -1).transpose(1, 2)
             uA = uw.reshape(batch_size, self.dim_in, -1).transpose(1, 2)
-            for i in range(len(self.root)):
-                if hasattr(self.root[i], 'perturbation') and self.root[i].perturbation is not None:
-                    _lA = lA[:, :, prev_dim_in : (prev_dim_in + self.root[i].dim)]
-                    _uA = uA[:, :, prev_dim_in : (prev_dim_in + self.root[i].dim)]
-                    lower = lower + self.root[i].perturbation.concretize(
-                        self.root[i].center, _lA, sign=-1, aux=self.root[i].aux).view(lower.shape)
-                    upper = upper + self.root[i].perturbation.concretize(
-                        self.root[i].center, _uA, sign=+1, aux=self.root[i].aux).view(upper.shape)
-                    prev_dim_in += self.root[i].dim
+            for i in range(len(roots)):
+                if hasattr(roots[i], 'perturbation') and roots[i].perturbation is not None:
+                    _lA = lA[:, :, prev_dim_in : (prev_dim_in + roots[i].dim)]
+                    _uA = uA[:, :, prev_dim_in : (prev_dim_in + roots[i].dim)]
+                    lower = lower + roots[i].perturbation.concretize(
+                        roots[i].center, _lA, sign=-1, aux=roots[i].aux).view(lower.shape)
+                    upper = upper + roots[i].perturbation.concretize(
+                        roots[i].center, _uA, sign=+1, aux=roots[i].aux).view(upper.shape)
+                    prev_dim_in += roots[i].dim
         linear.lower, linear.upper = lower, upper
 
         if C is None:
@@ -85,12 +92,12 @@ def forward_general(self, C=None, node=None, concretize=False, offset=0):
                         need_refinement = True
                         break
             if need_refinement:
-                forward_refinement(self, node)
+                self.forward_refinement(node)
         return lower, upper
 
 
-def forward_general_dynamic(
-        self, C=None, node=None, concretize=False, offset=0):
+def forward_general_dynamic(self: 'BoundedModule', C=None, node=None,
+                            concretize=False, offset=0):
     max_dim = self.bound_opts['forward_max_dim']
 
     if C is None:
@@ -132,7 +139,6 @@ def forward_general_dynamic(
         if not node.perturbed:
             if not hasattr(node, 'lower'):
                 node.lower = node.upper = self.get_forward_value(node)
-            raise NotImplementedError
             if concretize:
                 return node.lower, node.upper
             else:
@@ -212,10 +218,9 @@ def forward_general_dynamic(
         return linear
 
 
-def clean_memory(self, node):
+def clean_memory(self: 'BoundedModule', node):
     """ Remove linear bounds that are no longer needed. """
     # TODO add an option to retain these bounds
-
     for inp in node.inputs:
         if hasattr(inp, 'linear') and inp.linear is not None:
             clean = True
@@ -230,7 +235,7 @@ def clean_memory(self, node):
                 delattr(inp, 'linear')
 
 
-def forward_refinement(self, node):
+def forward_refinement(self: 'BoundedModule', node):
     """ Refine forward bounds with backward bound propagation
     (only refine unstable positions). """
     unstable_size_before = torch.logical_and(node.lower < 0, node.upper > 0).sum()
@@ -250,51 +255,51 @@ def forward_refinement(self, node):
     # TODO also update linear bounds?
 
 
-def init_forward(self, root, dim_in):
+def init_forward(self: 'BoundedModule', roots, dim_in):
     if dim_in == 0:
         raise ValueError("At least one node should have a specified perturbation")
     prev_dim_in = 0
-    # Assumption: root[0] is the input node which implies batch_size
-    batch_size = root[0].value.shape[0]
+    # Assumption: roots[0] is the input node which implies batch_size
+    batch_size = roots[0].value.shape[0]
     dynamic = self.bound_opts['dynamic_forward']
-    for i in range(len(root)):
-        if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
-            shape = root[i].linear.lw.shape
+    for i in range(len(roots)):
+        if hasattr(roots[i], 'perturbation') and roots[i].perturbation is not None:
+            shape = roots[i].linear.lw.shape
             if dynamic:
                 if shape[1] != dim_in:
                     raise NotImplementedError('Dynamic forward bound is not supported yet when there are multiple perturbed inputs.')
-                ptb = root[i].perturbation
+                ptb = roots[i].perturbation
                 if (type(ptb) != PerturbationLpNorm or ptb.norm < np.inf
                         or ptb.x_L is None or ptb.x_U is None):
                     raise NotImplementedError(
                         'For dynamic forward bounds, only Linf (box) perturbations are supported, and x_L and x_U must be explicitly provided.')
-                root[i].linear.x_L = (
+                roots[i].linear.x_L = (
                     ptb.x_L_sparse.view(batch_size, -1) if ptb.sparse
                     else ptb.x_L.view(batch_size, -1))
-                root[i].linear.x_U = (
+                roots[i].linear.x_U = (
                     ptb.x_U_sparse.view(batch_size, -1) if ptb.sparse
                     else ptb.x_U.view(batch_size, -1))
             else:
-                lw = torch.zeros(shape[0], dim_in, *shape[2:]).to(root[i].linear.lw)
-                lw[:, prev_dim_in:(prev_dim_in+shape[1])] = root[i].linear.lw
-                if root[i].linear.lw.data_ptr() == root[i].linear.uw.data_ptr():
+                lw = torch.zeros(shape[0], dim_in, *shape[2:]).to(roots[i].linear.lw)
+                lw[:, prev_dim_in:(prev_dim_in+shape[1])] = roots[i].linear.lw
+                if roots[i].linear.lw.data_ptr() == roots[i].linear.uw.data_ptr():
                     uw = lw
                 else:
-                    uw = torch.zeros(shape[0], dim_in, *shape[2:]).to(root[i].linear.uw)
-                    uw[:, prev_dim_in:(prev_dim_in+shape[1])] = root[i].linear.uw
-                root[i].linear.lw = lw
-                root[i].linear.uw = uw
+                    uw = torch.zeros(shape[0], dim_in, *shape[2:]).to(roots[i].linear.uw)
+                    uw[:, prev_dim_in:(prev_dim_in+shape[1])] = roots[i].linear.uw
+                roots[i].linear.lw = lw
+                roots[i].linear.uw = uw
             if i >= self.num_global_inputs:
-                root[i].forward_value = root[i].forward_value.unsqueeze(0).repeat(
+                roots[i].forward_value = roots[i].forward_value.unsqueeze(0).repeat(
                     *([batch_size] + [1] * self.forward_value.ndim))
             prev_dim_in += shape[1]
         else:
-            b = fv = root[i].forward_value
+            b = fv = roots[i].forward_value
             shape = fv.shape
-            if root[i].from_input:
+            if roots[i].from_input:
                 w = torch.zeros(shape[0], dim_in, *shape[1:], device=self.device)
                 warnings.warn(f'Creating a LinearBound with zero weights with shape {w.shape}')
             else:
                 w = None
-            root[i].linear = LinearBound(w, b, w, b, b, b)
-            root[i].lower = root[i].upper = b
+            roots[i].linear = LinearBound(w, b, w, b, b, b)
+            roots[i].lower = roots[i].upper = b

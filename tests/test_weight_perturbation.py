@@ -11,7 +11,9 @@ from auto_LiRPA.perturbations import *
 
 class TestWeightPerturbation(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, seed=1234, ref_path='data/weight_perturbation_test_data')
+        super().__init__(
+            methodName, seed=1234,
+            ref_path='data/weight_perturbation_test_data', generate=generate)
         self.result = {}
 
     def test_training(self):
@@ -32,20 +34,22 @@ class TestWeightPerturbation(TestCase):
         self.result[lb_name] = lb.detach().data.clone()
         self.result[ub_name] = ub.detach().data.clone()
 
-        assert torch.allclose(self.reference[lb_name], self.result[lb_name], 1e-4, 1e-6)
-        assert torch.allclose(self.reference[ub_name], self.result[ub_name], 1e-4, 1e-6)
-        assert ((self.reference[lb_name] - self.result[lb_name]).pow(2).sum() < 1e-8)
-        assert ((self.reference[ub_name] - self.result[ub_name]).pow(2).sum() < 1e-8)
-
         # test gradient backward propagation
         loss = (ub - lb).abs().sum()
         loss.backward()
-
         # gradient w.r.t input only
         grad = x.grad
         self.result[lb_name+'_grad'] = grad.detach().data.clone()
-        assert torch.allclose(self.reference[lb_name+'_grad'], self.result[lb_name + '_grad'], 1e-4, 1e-6)
-        assert ((self.reference[lb_name + '_grad'] - self.result[lb_name + '_grad']).pow(2).sum() < 1e-8)
+
+        if not self.generate:
+            assert torch.allclose(self.reference[lb_name], self.result[lb_name], 1e-4, 1e-6)
+            assert torch.allclose(self.reference[ub_name], self.result[ub_name], 1e-4, 1e-6)
+            assert ((self.reference[lb_name] - self.result[lb_name]).pow(2).sum() < 1e-8)
+            assert ((self.reference[ub_name] - self.result[ub_name]).pow(2).sum() < 1e-8)
+            assert torch.allclose(self.reference[lb_name+'_grad'],
+                                  self.result[lb_name + '_grad'], 1e-4, 1e-6)
+            assert ((self.reference[lb_name + '_grad']
+                     - self.result[lb_name + '_grad']).pow(2).sum() < 1e-8)
 
     def test_perturbation(self):
         np.random.seed(123) # FIXME This seed is inconsistent with other seeds (1234)
@@ -91,7 +95,7 @@ class TestWeightPerturbation(TestCase):
             self.save()
 
 if __name__ == '__main__':
-    testcase = TestWeightPerturbation()
+    testcase = TestWeightPerturbation(generate=False)
     testcase.setUp()
     testcase.test_perturbation()
     testcase.test_training()

@@ -5,17 +5,18 @@ from auto_LiRPA.linear_bound import LinearBound
 from testcase import TestCase
 
 
-"""Dummy node for testing"""
 class Dummy:
+    """Dummy node for testing"""
     def __init__(self, lower, upper=None, perturbed=False):
         self.lower = lower
         self.upper = upper if upper is not None else lower
         self.perturbed = perturbed
         self.output_shape = lower.shape
 
-class TestBoundOp(TestCase): 
+
+class TestBoundOp(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1, ref_path='data/bound_ops_data',
             generate=generate)
 
@@ -25,20 +26,23 @@ class TestBoundOp(TestCase):
         dim_final = 7
         dim_output = 11
         dim_input = 11
-        
+
         # multiplication of [batch_size, dim_input] and [dim_output, dim_input]^T
         weight = torch.randn(dim_output, dim_input, device=device)
         bias = torch.randn(dim_output, device=device)
         data_in = torch.randn(batch_size, dim_input, device=device)
         data_in_delta = torch.randn(batch_size, dim_input, device=device)
-        dummy_in = Dummy(data_in - torch.abs(data_in_delta), data_in + torch.abs(data_in_delta), True)
+        dummy_in = Dummy(
+            data_in - torch.abs(data_in_delta),
+            data_in + torch.abs(data_in_delta), True)
         dummy_weight = Dummy(weight)
         dummy_bias = Dummy(bias)
 
         op = BoundLinear(
-            attr={}, 
+            attr={},
             inputs=[dummy_in, dummy_weight, dummy_bias],
             output_index=0, options={})
+        op.batch_dim = 0
 
         # test `forward`
         data_out = op(data_in, weight, bias)
@@ -67,26 +71,32 @@ class TestBoundOp(TestCase):
         bound_weight = LinearBound(None, None, None, None, dummy_weight.lower, dummy_weight.upper)
         bound_bias = LinearBound(None, None, None, None, dummy_bias.lower, dummy_bias.upper)
         bound_out = op.bound_forward(dim_final, bound_in, bound_weight, bound_bias)
-        self.assertEqual(bound_out.lw, 
-            bound_in.lw.matmul(weight.t().clamp(min=0)) + bound_in.uw.matmul(weight.t().clamp(max=0)))
-        self.assertEqual(bound_out.uw, 
-            bound_in.uw.matmul(weight.t().clamp(min=0)) + bound_in.lw.matmul(weight.t().clamp(max=0)))
-        self.assertEqual(bound_out.lb, 
-            bound_in.lb.matmul(weight.t().clamp(min=0)) + bound_in.ub.matmul(weight.t().clamp(max=0)) + bias)
-        self.assertEqual(bound_out.ub, 
-            bound_in.ub.matmul(weight.t().clamp(min=0)) + bound_in.lb.matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(
+            bound_out.lw, bound_in.lw.matmul(weight.t().clamp(min=0))
+            + bound_in.uw.matmul(weight.t().clamp(max=0)))
+        self.assertEqual(
+            bound_out.uw, bound_in.uw.matmul(weight.t().clamp(min=0))
+            + bound_in.lw.matmul(weight.t().clamp(max=0)))
+        self.assertEqual(
+            bound_out.lb, bound_in.lb.matmul(weight.t().clamp(min=0))
+            + bound_in.ub.matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(
+            bound_out.ub, bound_in.ub.matmul(weight.t().clamp(min=0))
+            + bound_in.lb.matmul(weight.t().clamp(max=0)) + bias)
 
         # test `interval_propagate`
         bound_in = (
-            torch.randn(*data_in.shape, device=device), 
+            torch.randn(*data_in.shape, device=device),
             torch.randn(*data_in.shape, device=device))
         bound_weight = (bound_weight.lower, bound_weight.upper)
         bound_bias = (bound_bias.lower, bound_bias.upper)
         bound_out = op.interval_propagate(bound_in, bound_weight, bound_bias)
-        self.assertEqual(bound_out[0], 
-            bound_in[0].matmul(weight.t().clamp(min=0)) + bound_in[1].matmul(weight.t().clamp(max=0)) + bias)
-        self.assertEqual(bound_out[1], 
-            bound_in[1].matmul(weight.t().clamp(min=0)) + bound_in[0].matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(bound_out[0],
+                         bound_in[0].matmul(weight.t().clamp(min=0))
+                         + bound_in[1].matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(bound_out[1],
+                         bound_in[1].matmul(weight.t().clamp(min=0))
+                         + bound_in[0].matmul(weight.t().clamp(max=0)) + bias)
 
         # test weight perturbation
         # `bound_backward`
@@ -112,11 +122,13 @@ class TestBoundOp(TestCase):
                     # legacy reference
                     if ref.shape[0] == batch_size:
                         ref = ref.transpose(0, 1)
-                    self.assertEqual(A[i][j], ref) 
+                    self.assertEqual(A[i][j], ref)
         lbias, ubias = lbias.transpose(0, 1), ubias.transpose(0, 1)
         self.assertEqual(lbias, lbias_ref)
         self.assertEqual(ubias, ubias_ref)
-        self.assertEqual(bound_out[0], bound_out_ref[0]) and equal(bound_out[1], bound_out_ref[1])
+        self.assertEqual(bound_out[0], bound_out_ref[0])
+        self.assertEqual(bound_out[1], bound_out_ref[1])
+
 
 if __name__ == '__main__':
     # Change to generate=True when genearting reference results

@@ -13,21 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import torch
-from sklearn.metrics import matthews_corrcoef, f1_score
+
 from language_utils import tokenize, token_to_id
-
-def simple_accuracy(preds, labels):
-    return (preds == labels).mean()
-
-def acc_and_f1(preds, labels):
-    acc = simple_accuracy(preds, labels)
-    f1 = f1_score(y_true=labels, y_pred=preds)
-    return {
-        "acc": acc,
-        "f1": f1,
-        "acc_and_f1": (acc + f1) / 2,
-    }
 
 class InputExample(object):
     def __init__(self, guid, text_a, text_b=None, label=None):
@@ -48,8 +35,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
                                 vocab, drop_unk=False):
                                 #tokenizer):
     """Loads a data file into a list of `InputBatch`s."""
-    label_map = {label : i for i, label in enumerate(label_list)}
-
     features = []
     all_tokens = tokenize(examples, vocab, max_seq_length - 2, drop_unk=drop_unk)
     for i in range(len(all_tokens)):
@@ -77,5 +62,5 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
             segment_ids=segment_ids,
             label_id=example["label"],
             tokens=tokens))
-            
+
     return features

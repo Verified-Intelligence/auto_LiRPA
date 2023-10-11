@@ -15,7 +15,7 @@ class BoundSoftmaxImpl(nn.Module):
 
 # The `option != 'complex'` case is not used in the auto_LiRPA main paper.
 class BoundSoftmax(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.option = options.get('softmax', 'complex')

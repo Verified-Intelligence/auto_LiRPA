@@ -2,30 +2,47 @@
 from .base import *
 
 
-class BoundReduceMax(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+class BoundReduce(Bound):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.axis = attr['axes']
-        # for torch.max, `dim` must be an int
-        if isinstance(self.axis, list):
-            assert len(self.axis) == 1
-            self.axis = self.axis[0]
+        self.axis = attr.get('axes', None)
         self.keepdim = bool(attr['keepdims']) if 'keepdims' in attr else True
         self.use_default_ibp = True
 
+    def _parse_input_and_axis(self, *x):
+        if len(x) > 1:
+            assert not self.is_input_perturbed(1)
+            self.axis = tuple(x[1])
+        self.axis = self.make_axis_non_negative(self.axis)
+        return x[0]
+
+    def _return_bound_backward(self, lA, uA):
+        return [(lA, uA)] + [(None, None)] * (len(self.inputs) - 1), 0, 0
+
+
+class BoundReduceMax(BoundReduce):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
         """Assume that the indexes with the maximum values are not perturbed.
         This generally doesn't hold true, but can still be used for the input shift
         in Softmax of Transformers."""
         self.fixed_max_index = options.get('fixed_reducemax_index', False)
 
-    def forward(self, x):
-        self.axis = self.make_axis_non_negative(self.axis)
-        assert self.axis > 0
+    def _parse_input_and_axis(self, *x):
+        x = super()._parse_input_and_axis(*x)
+        # for torch.max, `dim` must be an int
+        if isinstance(self.axis, tuple):
+            assert len(self.axis) == 1
+            self.axis = self.axis[0]
+        return x
+
+    def forward(self, *x):
+        x = self._parse_input_and_axis(*x)
         res = torch.max(x, dim=self.axis, keepdim=self.keepdim)
         self.indices = res.indices
         return res.values
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, *args, **kwargs):
         if self.fixed_max_index:
             def _bound_oneside(last_A):
                 if last_A is None:
@@ -38,30 +55,32 @@ class BoundReduceMax(Bound):
                 shape = list(last_A.shape)
                 shape[self.axis + 1] *= self.input_shape[self.axis]
                 A = torch.zeros(shape, device=last_A.device)
+                indices = indices.expand(*last_A.shape)
                 A.scatter_(dim=self.axis + 1, index=indices, src=last_A)
                 return A
 
-            return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0
+            return self._return_bound_backward(_bound_oneside(last_lA),
+                                               _bound_oneside(last_uA))
         else:
-            raise NotImplementedError('`bound_backward` for BoundReduceMax with perturbed maximum indexes is not implemented.')
+            raise NotImplementedError(
+                '`bound_backward` for BoundReduceMax with perturbed maximum'
+                'indexes is not implemented.')
 
 
-class BoundReduceMean(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-        self.axis = attr['axes']
-        self.keepdim = bool(attr['keepdims']) if 'keepdims' in attr else True
-        self.use_default_ibp = True
+class BoundReduceMin(BoundReduceMax):
+    def forward(self, *x):
+        x = self._parse_input_and_axis(*x)
+        res = torch.min(x, dim=self.axis, keepdim=self.keepdim)
+        self.indices = res.indices
+        return res.values
 
-    def forward(self, x):
+
+class BoundReduceMean(BoundReduce):
+    def forward(self, *x):
+        x = self._parse_input_and_axis(*x)
         return torch.mean(x, dim=self.axis, keepdim=self.keepdim)
 
-    def bound_backward(self, last_lA, last_uA, x):
-        for i in range(len(self.axis)):
-            if self.axis[i] < 0:
-                self.axis[i] = self.make_axis_non_negative(self.axis[i])
-                assert self.axis[i] > 0
-
+    def bound_backward(self, last_lA, last_uA, *args, **kwargs):
         def _bound_oneside(last_A):
             if last_A is None:
                 return None
@@ -77,10 +96,11 @@ class BoundReduceMean(Bound):
                 last_A = last_A.expand(*shape) / size_axis
             return last_A
 
-        return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0
+        return self._return_bound_backward(_bound_oneside(last_lA),
+                                           _bound_oneside(last_uA))
 
-    def bound_forward(self, dim_in, x):
-        assert (self.keepdim)
+    def bound_forward(self, dim_in, x, *args):
+        assert self.keepdim
         assert (len(self.axis) == 1)
         axis = self.make_axis_non_negative(self.axis[0])
         assert (axis > 0)
@@ -91,25 +111,16 @@ class BoundReduceMean(Bound):
         ub = x.ub.sum(dim=axis, keepdim=True) / size
         return LinearBound(lw, lb, uw, ub)
 
-class BoundReduceSum(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        super().__init__(attr, inputs, output_index, options)
-        self.axis = attr['axes'] if 'axes' in attr else None
-        self.keepdim = bool(attr['keepdims'])
-        self.use_default_ibp = True
 
-    def forward(self, x):
+class BoundReduceSum(BoundReduce):
+    def forward(self, *x):
+        x = self._parse_input_and_axis(*x)
         if self.axis is not None:
             return torch.sum(x, dim=self.axis, keepdim=self.keepdim)
         else:
             return torch.sum(x)
 
-    def bound_backward(self, last_lA, last_uA, x):
-        for i in range(len(self.axis)):
-            if self.axis[i] < 0:
-                self.axis[i] = len(self.input_shape) + self.axis[i]
-                assert self.axis[i] > 0
-
+    def bound_backward(self, last_lA, last_uA, x, *args, **kwargs):
         def _bound_oneside(last_A):
             if last_A is None:
                 return None
@@ -124,9 +135,10 @@ class BoundReduceSum(Bound):
                 last_A = last_A.expand(*shape)
             return last_A
 
-        return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0
+        return self._return_bound_backward(_bound_oneside(last_lA),
+                                           _bound_oneside(last_uA))
 
-    def bound_forward(self, dim_in, x):
+    def bound_forward(self, dim_in, x, *args):
         assert len(self.axis) == 1
         axis = self.make_axis_non_negative(self.axis[0])
         assert axis > 0

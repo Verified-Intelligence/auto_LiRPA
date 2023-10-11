@@ -60,13 +60,13 @@ class LSTM(nn.Module):
         self.checkpoint = 0
 
         if args.load:
-            ckpt = torch.load(args.load, map_location=torch.device(self.device))  
+            ckpt = torch.load(args.load, map_location=torch.device(self.device))
             self.embedding = torch.nn.Embedding(len(self.vocab), self.embedding_size)
             self.model_from_embeddings = LSTMFromEmbeddings(args, len(self.vocab))
             self.model = self.embedding, LSTMFromEmbeddings(args, len(self.vocab))
             self.embedding.load_state_dict(ckpt['state_dict_embedding'])
             self.model_from_embeddings.load_state_dict(ckpt['state_dict_model_from_embeddings'])
-            self.checkpoint = ckpt['epoch']                
+            self.checkpoint = ckpt['epoch']
         else:
             self.embedding = torch.nn.Embedding(len(self.vocab), self.embedding_size)
             self.model_from_embeddings = LSTMFromEmbeddings(args, len(self.vocab))
@@ -79,7 +79,7 @@ class LSTM(nn.Module):
     def save(self, epoch):
         path = os.path.join(self.dir, 'ckpt_{}'.format(epoch))
         torch.save({
-            'state_dict_embedding': self.embedding.state_dict(), 
+            'state_dict_embedding': self.embedding.state_dict(),
             'state_dict_model_from_embeddings': self.model_from_embeddings.state_dict(),
             'epoch': epoch
         }, path)
@@ -91,7 +91,7 @@ class LSTM(nn.Module):
         for m in self.model:
             for p in m.named_parameters():
                 param_group.append(p)
-        param_group = [{"params": [p[1] for p in param_group], "weight_decay": 0.}]    
+        param_group = [{"params": [p[1] for p in param_group], "weight_decay": 0.}]
         return torch.optim.Adam(param_group, lr=self.lr)
 
     def get_input(self, batch):
@@ -123,4 +123,4 @@ class LSTM(nn.Module):
         self.model_from_embeddings.train()
 
     def eval(self):
-        self.model_from_embeddings.eval()    
+        self.model_from_embeddings.eval()

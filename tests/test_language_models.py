@@ -3,14 +3,14 @@ import os
 import argparse
 import pickle
 import torch
-import numpy as np
-import pytest
 from auto_LiRPA.utils import logger
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--gen_ref', action='store_true', help='generate reference results')
 parser.add_argument('--train', action='store_true', help='pre-train the models')
-args, unknown = parser.parse_known_args()   
+parser.add_argument('--keep_results', action='store_true', help='keep intermediate results.')
+parser.add_argument('--load_results', action='store_true', help='load intermediate results without reruning.')
+args, unknown = parser.parse_known_args()
 
 def prepare_data():
     os.system('cd ../examples/language;\
@@ -59,6 +59,10 @@ def read_res():
         return pickle.load(file)
 
 def evaluate():
+    if args.load_results:
+        print("loading intermediate results...")
+        with open("./tmp_language_results.pkl", "rb") as file:
+            return pickle.load(file)
     logger.info('\nEvaluating the trained LSTM')
     print(cmd_lstm_test)
     print()
@@ -68,8 +72,12 @@ def evaluate():
     print(cmd_transformer_test)
     print()
     os.system(cmd_transformer_test)
-    res_transformer = read_res()    
+    res_transformer = read_res()
     os.system("rm {}".format(res_path))
+    if args.keep_results:
+        with open("./tmp_language_results.pkl", "wb") as file:
+            pickle.dump((res_transformer, res_lstm), file)
+        print("intermediate results saved.")
     return res_transformer, res_lstm
 
 def gen_ref():

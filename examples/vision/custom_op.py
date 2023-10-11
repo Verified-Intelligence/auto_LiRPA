@@ -51,7 +51,7 @@ class BoundPlusConstant(Bound):
     def forward(self, x):
         return x + self.const
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, *args, **kwargs):
         """ Backward mode bound propagation """
         print('Calling bound_backward for custom::PlusConstant')
         def _bound_oneside(last_A):

@@ -1,111 +1,122 @@
 import time
 import os
-import warnings
 from collections import OrderedDict
 from contextlib import ExitStack
+from auto_LiRPA.operators.leaf import BoundInput
 
 import torch
 from torch import optim
+from .beta_crown import print_optimized_beta
 from .cuda_utils import double2float
-from .utils import logger
+from .utils import logger, reduction_sum, multi_spec_keep_func_all
+from .opt_pruner import OptPruner
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .bound_general import BoundedModule
+
+
+default_optimize_bound_args = {
+    'enable_alpha_crown': True,  # Enable optimization of alpha.
+    'enable_beta_crown': False,  # Enable beta split constraint.
+
+    'apply_output_constraints_to': None,  # Enable optimization w.r.t. output constraints.
+
+    'iteration': 20,  # Number of alpha/beta optimization iterations.
+    # Share some alpha variables to save memory at the cost of slightly
+    # looser bounds.
+    'use_shared_alpha': False,
+    # Optimizer used for alpha and beta optimization.
+    'optimizer': 'adam',
+    # Save best results of alpha/beta/bounds during optimization.
+    'keep_best': True,
+    # Only optimize bounds of last layer during alpha/beta CROWN.
+    'fix_interm_bounds': True,
+    # Learning rate for the optimizable parameter alpha in alpha-CROWN.
+    'lr_alpha': 0.5,
+    # Learning rate for the optimizable parameter beta in beta-CROWN.
+    'lr_beta': 0.05,
+    'lr_cut_beta': 5e-3,  # Learning rate for optimizing cut betas.
+    # Initial alpha variables by calling CROWN once.
+    'init_alpha': True,
+    'lr_coeffs': 0.01,  # Learning rate for coeffs for refinement
+    # Layers to be refined, separated by commas.
+    # -1 means preactivation before last activation.
+    'intermediate_refinement_layers': [-1],
+    # When batch size is not 1, this reduction function is applied to
+    # reduce the bounds into a scalar.
+    'loss_reduction_func': reduction_sum,
+    # Criteria function of early stop.
+    'stop_criterion_func': lambda x: False,
+    # Learning rate decay factor during bounds optimization.
+    'lr_decay': 0.98,
+    # Number of iterations that we will start considering early stop
+    # if tracking no improvement.
+    'early_stop_patience': 10,
+    # Start to save optimized best bounds
+    # when current_iteration > int(iteration*start_save_best)
+    'start_save_best': 0.5,
+    # Use double fp (float64) at the last iteration in alpha/beta CROWN.
+    'use_float64_in_last_iteration': False,
+    # Prune verified domain within iteration.
+    'pruning_in_iteration': False,
+    # Percentage of the minimum domains that can apply pruning.
+    'pruning_in_iteration_threshold': 0.2,
+    # For specification that will output multiple bounds for one
+    # property, we use this function to prune them.
+    'multi_spec_keep_func': multi_spec_keep_func_all,
+    # Use the newly fixed loss function. By default, it is set to False
+    # for compatibility with existing use cases.
+    # Try to ensure that the parameters always match with the optimized bounds.
+    'deterministic': False,
+}
+
+
+def opt_reuse(self: 'BoundedModule'):
+    for node in self.get_enabled_opt_act():
+        node.opt_reuse()
+
+
+def opt_no_reuse(self: 'BoundedModule'):
+    for node in self.get_enabled_opt_act():
+        node.opt_no_reuse()
 
 
 def _set_alpha(optimizable_activations, parameters, alphas, lr):
-    """
-    Set best_alphas, alphas and parameters list
-    """
+    """Set best_alphas, alphas and parameters list."""
     for node in optimizable_activations:
         alphas.extend(list(node.alpha.values()))
         node.opt_start()
     # Alpha has shape (2, output_shape, batch_dim, node_shape)
     parameters.append({'params': alphas, 'lr': lr, 'batch_dim': 2})
     # best_alpha is a dictionary of dictionary. Each key is the alpha variable
-    # for one relu layer, and each value is a dictionary contains all relu
-    # layers after that layer as keys.
+    # for one activation layer, and each value is a dictionary contains all
+    # activation layers after that layer as keys.
     best_alphas = OrderedDict()
     for m in optimizable_activations:
         best_alphas[m.name] = {}
         for alpha_m in m.alpha:
             best_alphas[m.name][alpha_m] = m.alpha[alpha_m].detach().clone()
-            # We will directly replace the dictionary for each relu layer after
+            # We will directly replace the dictionary for each activation layer after
             # optimization, so the saved alpha might not have require_grad=True.
             m.alpha[alpha_m].requires_grad_()
 
     return best_alphas
 
 
-def _set_beta(
-        self, relus, optimizable_activations, single_node_split,
-        enable_opt_interm_bounds, betas, opt_coeffs, parameters,
-        lr_coeffs, opt_bias, lr_beta, lr_cut_beta, cutter, dense_coeffs_mask):
+def _set_gammas(nodes, parameters):
     """
-    Set betas, best_betas, coeffs, dense_coeffs_mask, best_coeffs, biases
-    and best_biases.
+    Adds gammas to parameters list
     """
-    coeffs = best_coeffs = biases = best_biases = None
-    if len(relus) != len(optimizable_activations):
-        warnings.warn(
-            'Only relu split is supported so far, this model contains other '
-            'optimizable activations that may not apply split.')
-
-    if single_node_split:
-        for node in relus:
-            if enable_opt_interm_bounds and node.sparse_beta is not None:
-                for key in node.sparse_beta.keys():
-                    if node.sparse_beta[key] is not None:
-                        betas.append(node.sparse_beta[key])
-            else:
-                if node.sparse_beta is not None:
-                    betas.append(node.sparse_beta)
-    else:
-        betas = self.beta_params + self.single_beta_params
-        if opt_coeffs:
-            coeffs = [dense_coeffs['dense']
-                for dense_coeffs in self.split_dense_coeffs_params
-            ] + self.coeffs_params
-            dense_coeffs_mask = [dense_coeffs['mask']
-                for dense_coeffs in self.split_dense_coeffs_params]
-            parameters.append({'params': coeffs, 'lr': lr_coeffs})
-            best_coeffs = [coeff.detach().clone() for coeff in coeffs]
-        if opt_bias:
-            biases = self.bias_params
-            parameters.append({'params': biases, 'lr': lr_coeffs})
-            best_biases = [bias.detach().clone() for bias in biases]
-
-    # Beta has shape (batch, max_splits_per_layer)
-    parameters.append({'params': betas, 'lr': lr_beta, 'batch_dim': 0})
-
-    if self.cut_used:
-        # also need to optimize cut betas
-        parameters.append({'params': self.cut_beta_params,
-                          'lr': lr_cut_beta, 'batch_dim': 0})
-        betas = betas + self.cut_beta_params
-
-    if enable_opt_interm_bounds and betas:
-        best_betas = OrderedDict()
-        for m in optimizable_activations:
-            best_betas[m.name] = {}
-            for beta_m, beta in m.sparse_beta.items():
-                best_betas[m.name][beta_m] = beta.detach().clone()
-        if self.cut_used:
-            best_betas['cut'] = []
-            for general_betas in self.cut_beta_params:
-                best_betas['cut'].append(general_betas.detach().clone())
-    else:
-        best_betas = [b.detach().clone() for b in betas]
-
-    if self.cut_used and getattr(cutter, 'opt', False):
-        parameters.append(cutter.get_parameters())
-
-    return (
-        betas, best_betas, coeffs, dense_coeffs_mask, best_coeffs, biases,
-        best_biases)
-
+    gammas = []
+    for node in nodes:
+        if hasattr(node, 'gammas'):
+            gammas.append(node.gammas)
+    gamma_lr = 0.1
+    parameters.append({'params': gammas, 'lr': gamma_lr})
 
 def _save_ret_first_time(bounds, fill_value, x, best_ret):
-    """
-    Save results at the first iteration to best_ret
-    """
+    """Save results at the first iteration to best_ret."""
     if bounds is not None:
         best_bounds = torch.full_like(
             bounds, fill_value=fill_value, device=x[0].device, dtype=x[0].dtype)
@@ -120,138 +131,7 @@ def _save_ret_first_time(bounds, fill_value, x, best_ret):
     return best_bounds
 
 
-@torch.no_grad()
-def _get_preserve_mask(
-        decision_thresh, ret_l, preserve_mask, multi_spec_keep_func):
-    """
-    Get preserve mask by decision_thresh to filter out the satisfied bounds.
-    """
-    if (isinstance(decision_thresh, torch.Tensor)
-            and decision_thresh.numel() > 1):
-        if decision_thresh.shape[-1] == 1:
-            now_preserve_mask = (
-                ret_l <= decision_thresh[preserve_mask]
-            ).view(-1).nonzero().view(-1)
-        else:
-            now_preserve_mask = multi_spec_keep_func(
-                ret_l <= decision_thresh[preserve_mask]).nonzero().view(-1)
-    else:
-        if decision_thresh.shape[-1] == 1:
-            now_preserve_mask = (
-                ret_l <= decision_thresh).view(-1).nonzero().view(-1)
-        else:
-            now_preserve_mask = multi_spec_keep_func(
-                ret_l <= decision_thresh).nonzero().view(-1)
-
-    return now_preserve_mask
-
-
-def _recover_bounds_to_full_batch(
-        ret, decision_thresh, epsilon_over_decision_thresh, original_size,
-        preserve_mask, loss_reduction_func):
-    """
-    Recover lower and upper bounds to full batch size so that later we can
-    directly update using the full batch size of l and u.
-    """
-    if ret is not None:
-        if (isinstance(decision_thresh, torch.Tensor)
-                and decision_thresh.numel() > 1):
-            full_ret = (decision_thresh.clone().to(ret.device).type(ret.dtype)
-                        + epsilon_over_decision_thresh)
-        else:
-            num_decision_thresh = decision_thresh
-            if isinstance(num_decision_thresh, torch.Tensor):
-                num_decision_thresh = num_decision_thresh.item()
-            full_ret = torch.full(
-                (original_size,) + tuple(ret.shape[1:]),
-                fill_value=num_decision_thresh + epsilon_over_decision_thresh,
-                device=ret.device, dtype=ret.dtype)
-        full_ret[preserve_mask] = ret
-        if full_ret.shape[1] > 1:
-            full_reduced_ret = loss_reduction_func(full_ret)
-        else:
-            full_reduced_ret = full_ret
-    else:
-        full_ret = full_reduced_ret = None
-
-    return full_ret, full_reduced_ret
-
-
-@torch.no_grad()
-def _prune_bounds_by_mask(
-        now_preserve_mask, decision_thresh, ret_l, ret_u, ret, preserve_mask,
-        epsilon_over_decision_thresh, original_size, loss_reduction_func,
-        beta, intermediate_beta_enabled,
-        fix_intermediate_layer_bounds, intermediate_layer_bounds,
-        aux_reference_bounds, partial_intermediate_layer_bounds,
-        pre_prune_size):
-    """
-    Prune bounds by given now_preserve_mask.
-    """
-    full_ret_l, full_l = _recover_bounds_to_full_batch(
-        ret_l, decision_thresh, epsilon_over_decision_thresh,
-        original_size, preserve_mask, loss_reduction_func)
-
-    full_ret_u, full_u = _recover_bounds_to_full_batch(
-        ret_u, decision_thresh, epsilon_over_decision_thresh,
-        original_size, preserve_mask, loss_reduction_func)
-
-    full_ret = (full_ret_l, full_ret_u) + ret[2:]
-
-    if beta and intermediate_beta_enabled:
-        # prune the partial_intermediate_layer_bounds
-        interval_to_prune = partial_intermediate_layer_bounds
-    elif fix_intermediate_layer_bounds:
-        interval_to_prune = intermediate_layer_bounds
-    else:
-        interval_to_prune = None
-    if interval_to_prune is not None:
-        for k, v in interval_to_prune.items():
-            interm_interval_l, interm_interval_r = v[0], v[1]
-            if interm_interval_l.shape[0] == pre_prune_size:
-                # the first dim is batch size and matches preserve mask
-                interm_interval_l = interm_interval_l[now_preserve_mask]
-            if interm_interval_r.shape[0] == pre_prune_size:
-                # the first dim is batch size and matches preserve mask
-                interm_interval_r = interm_interval_r[now_preserve_mask]
-            interval_to_prune[k] = [interm_interval_l, interm_interval_r]
-
-    if aux_reference_bounds is not None:
-        for k in aux_reference_bounds:
-            aux_ref_l, aux_ref_r = aux_reference_bounds[k]
-            if aux_ref_l.shape[0] == pre_prune_size:
-                # the first dim is batch size and matches the preserve mask
-                aux_ref_l = aux_ref_l[now_preserve_mask]
-            if aux_ref_r.shape[0] == pre_prune_size:
-                # the first dim is batch size and matches the preserve mask
-                aux_ref_r = aux_ref_r[now_preserve_mask]
-            aux_reference_bounds[k] = [aux_ref_l, aux_ref_r]
-
-    # update the global mask here for possible next iteration
-    preserve_mask_next = preserve_mask[now_preserve_mask]
-
-    return full_l, full_ret_l, full_u, full_ret_u, full_ret, preserve_mask_next
-
-
-@torch.no_grad()
-def _prune_x(x, now_preserve_mask):
-    """
-    Prune x by given now_preserve_mask.
-    """
-    x = list(x)
-    pre_prune_size = x[0].shape[0]
-    x[0].data = x[0][now_preserve_mask].data
-    if hasattr(x[0], 'ptb'):
-        if x[0].ptb.x_L is not None:
-            x[0].ptb.x_L = x[0].ptb.x_L[now_preserve_mask]
-        if x[0].ptb.x_U is not None:
-            x[0].ptb.x_U = x[0].ptb.x_U[now_preserve_mask]
-    x = tuple(x)
-
-    return x, pre_prune_size
-
-
-def _to_float64(self, C, x, aux_reference_bounds, intermediate_layer_bounds):
+def _to_float64(self: 'BoundedModule', C, x, aux_reference_bounds, interm_bounds):
     """
     Transfer variables to float64 only in the last iteration to help alleviate
     floating point error.
@@ -262,14 +142,14 @@ def _to_float64(self, C, x, aux_reference_bounds, intermediate_layer_bounds):
     # best_intermediate_bounds is linked to aux_reference_bounds!
     # we only need call .to() for one of them
     self._to(aux_reference_bounds, torch.float64, inplace=True)
-    intermediate_layer_bounds = self._to(
-        intermediate_layer_bounds, torch.float64)
+    interm_bounds = self._to(
+        interm_bounds, torch.float64)
 
-    return C, x, intermediate_layer_bounds
+    return C, x, interm_bounds
 
 
-def _to_default_dtype(
-        self, x, total_loss, full_ret, ret, best_intermediate_bounds, return_A):
+def _to_default_dtype(self: 'BoundedModule', x, total_loss, full_ret, ret,
+                      best_intermediate_bounds, return_A):
     """
     Switch back to default precision from float64 typically to adapt to
     afterwards operations.
@@ -294,15 +174,16 @@ def _to_default_dtype(
     return total_loss, x, full_ret
 
 
-def _get_idx_mask(idx, full_ret_bound, best_ret_bound):
+def _get_idx_mask(idx, full_ret_bound, best_ret_bound, loss_reduction_func):
     """Get index for improved elements."""
     assert idx in [0, 1], (
         '0 means updating lower bound, 1 means updating upper bound')
     if idx == 0:
-        idx_mask = (full_ret_bound > best_ret_bound).any(dim=1).view(-1)
+        idx_mask = (loss_reduction_func(full_ret_bound)
+                    > loss_reduction_func(best_ret_bound)).view(-1)
     else:
-        idx_mask = (full_ret_bound < best_ret_bound).any(dim=1).view(-1)
-
+        idx_mask = (loss_reduction_func(full_ret_bound)
+                    < loss_reduction_func(best_ret_bound)).view(-1)
     improved_idx = None
     if idx_mask.any():
         # we only pick up the results improved in a batch
@@ -310,103 +191,96 @@ def _get_idx_mask(idx, full_ret_bound, best_ret_bound):
     return idx_mask, improved_idx
 
 
-def _update_best_ret(
-        full_ret_bound, best_ret_bound, full_ret, best_ret, need_update, idx):
+def _update_best_ret(full_ret_bound, best_ret_bound, full_ret, best_ret,
+                     need_update, loss_reduction_func, idx, deterministic=False):
     """Update best_ret_bound and best_ret by comparing with new results."""
     assert idx in [0, 1], (
         '0 means updating lower bound, 1 means updating upper bound')
-    idx_mask, improved_idx = _get_idx_mask(idx, full_ret_bound, best_ret_bound)
+    idx_mask, improved_idx = _get_idx_mask(
+        idx, full_ret_bound, best_ret_bound, loss_reduction_func)
 
     if improved_idx is not None:
         need_update = True
-        if idx == 0:
-            best_ret_bound[improved_idx] = torch.maximum(
+        compare = torch.max if idx == 0 else torch.min
+        if not deterministic:
+            best_ret_bound[improved_idx] = compare(
                 full_ret_bound[improved_idx], best_ret_bound[improved_idx])
-            if full_ret[idx] is not None:
-                best_ret[idx][improved_idx] = torch.maximum(
-                    full_ret[idx][improved_idx], best_ret[idx][improved_idx])
         else:
-            best_ret_bound[improved_idx] = torch.minimum(
-                full_ret_bound[improved_idx], best_ret_bound[improved_idx])
-            if full_ret[idx] is not None:
-                best_ret[idx][improved_idx] = torch.minimum(
-                    full_ret[idx][improved_idx], best_ret[idx][improved_idx])
+            best_ret_bound[improved_idx] = full_ret_bound[improved_idx]
+        if full_ret[idx] is not None:
+            if not deterministic:
+                best_ret[idx][improved_idx] = compare(
+                    full_ret[idx][improved_idx],
+                    best_ret[idx][improved_idx])
+            else:
+                best_ret[idx][improved_idx] = full_ret[idx][improved_idx]
 
-    return best_ret_bound, best_ret, idx_mask, improved_idx, need_update
+    return best_ret_bound, best_ret, need_update, idx_mask, improved_idx
 
 
 def _update_optimizable_activations(
-        optimizable_activations, intermediate_layer_bounds,
-        fix_intermediate_layer_bounds, best_intermediate_bounds,
-        reference_idx, idx, alpha, best_alphas):
+        optimizable_activations, interm_bounds,
+        fix_interm_bounds, best_intermediate_bounds,
+        reference_idx, idx, alpha, best_alphas, deterministic):
     """
     Update bounds and alpha of optimizable_activations.
     """
     for node in optimizable_activations:
         # Update best intermediate layer bounds only when they are optimized.
-        # If they are already fixed in intermediate_layer_bounds, then do
+        # If they are already fixed in interm_bounds, then do
         # nothing.
-        if (intermediate_layer_bounds is None
-                or node.inputs[0].name not in intermediate_layer_bounds
-                or not fix_intermediate_layer_bounds):
-            best_intermediate_bounds[node.name][0][idx] = torch.max(
-                best_intermediate_bounds[node.name][0][idx],
-                node.inputs[0].lower[reference_idx])
-            best_intermediate_bounds[node.name][1][idx] = torch.min(
-                best_intermediate_bounds[node.name][1][idx],
-                node.inputs[0].upper[reference_idx])
-
+        if (interm_bounds is None
+                or node.inputs[0].name not in interm_bounds
+                or not fix_interm_bounds):
+            if deterministic:
+                best_intermediate_bounds[node.name][0][idx] = node.inputs[0].lower[reference_idx]
+                best_intermediate_bounds[node.name][1][idx] = node.inputs[0].upper[reference_idx]
+            else:
+                best_intermediate_bounds[node.name][0][idx] = torch.max(
+                    best_intermediate_bounds[node.name][0][idx],
+                    node.inputs[0].lower[reference_idx])
+                best_intermediate_bounds[node.name][1][idx] = torch.min(
+                    best_intermediate_bounds[node.name][1][idx],
+                    node.inputs[0].upper[reference_idx])
         if alpha:
-            # Each alpha has shape (2, output_shape, batch, *shape) for ReLU.
+            # Each alpha has shape (2, output_shape, batch, *shape) for act.
             # For other activation function this can be different.
             for alpha_m in node.alpha:
-                if node.alpha_batch_dim == 2:
-                    best_alphas[node.name][alpha_m][:, :,
-                        idx] = node.alpha[alpha_m][:, :, idx]
-                elif node.alpha_batch_dim == 3:
-                    best_alphas[node.name][alpha_m][:, :, :,
-                        idx] = node.alpha[alpha_m][:, :, :, idx]
-                else:
-                    raise ValueError(
-                        f'alpha_batch_dim={node.alpha_batch_dim} must be set '
-                        'to 2 or 3 in BoundOptimizableActivation')
+                best_alphas[node.name][alpha_m][:, :,
+                    idx] = node.alpha[alpha_m][:, :, idx]
 
 
-def _update_best_beta(
-        self, enable_opt_interm_bounds, betas, optimizable_activations,
-        best_betas, idx):
+def update_best_beta(self: 'BoundedModule', enable_opt_interm_bounds, betas,
+                     best_betas, idx):
     """
     Update best beta by given idx.
     """
     if enable_opt_interm_bounds and betas:
-        for node in optimizable_activations:
-            for key in node.sparse_beta.keys():
-                best_betas[node.name][key] = (
-                    node.sparse_beta[key].detach().clone())
+        for node in self.splittable_activations:
+            for node_input in node.inputs:
+                for key in node_input.sparse_betas.keys():
+                    best_betas[node_input.name][key] = (
+                        node_input.sparse_betas[key].val.detach().clone())
         if self.cut_used:
             for gbidx, general_betas in enumerate(self.cut_beta_params):
+                # FIXME need to check if 'cut' is a node name
                 best_betas['cut'][gbidx] = general_betas.detach().clone()
     else:
+        for node in self.nodes_with_beta:
+            best_betas[node.name][idx] = node.sparse_betas[0].val[idx]
         if self.cut_used:
             regular_beta_length = len(betas) - len(self.cut_beta_params)
-            for beta_idx in range(regular_beta_length):
-                # regular beta crown betas
-                best_betas[beta_idx][idx] = betas[beta_idx][idx]
             for cut_beta_idx in range(len(self.cut_beta_params)):
                 # general cut beta crown general_betas
-                best_betas[regular_beta_length + cut_beta_idx][:, :, idx,
+                best_betas['cut'][cut_beta_idx][:, :, idx,
                     :] = betas[regular_beta_length + cut_beta_idx][:, :, idx, :]
-        else:
-            for beta_idx in range(len(betas)):
-                # regular beta crown betas
-                best_betas[beta_idx][idx] = betas[beta_idx][idx]
 
 
-def get_optimized_bounds(
-        self, x=None, aux=None, C=None, IBP=False, forward=False,
-        method='backward', bound_lower=True, bound_upper=False,
+def _get_optimized_bounds(
+        self: 'BoundedModule', x=None, aux=None, C=None, IBP=False,
+        forward=False, method='backward', bound_side='lower',
         reuse_ibp=False, return_A=False, average_A=False, final_node_name=None,
-        intermediate_layer_bounds=None, reference_bounds=None,
+        interm_bounds=None, reference_bounds=None,
         aux_reference_bounds=None, needed_A_dict=None, cutter=None,
         decision_thresh=None, epsilon_over_decision_thresh=1e-4):
     """
@@ -417,77 +291,78 @@ def get_optimized_bounds(
     iteration = opts['iteration']
     beta = opts['enable_beta_crown']
     alpha = opts['enable_alpha_crown']
-    opt_coeffs = opts['opt_coeffs']
-    opt_bias = opts['opt_bias']
+    apply_output_constraints_to = opts['apply_output_constraints_to']
     opt_choice = opts['optimizer']
-    single_node_split = opts['single_node_split']
-    assert single_node_split is True
     keep_best = opts['keep_best']
-    fix_intermediate_layer_bounds = opts['fix_intermediate_layer_bounds']
-    init_alpha = opts['init_alpha']
-    lr_alpha = opts['lr_alpha']
-    lr_beta = opts['lr_beta']
-    lr_cut_beta = opts['lr_cut_beta']
-    lr_intermediate_beta = opts['lr_intermediate_beta']
-    lr_decay = opts['lr_decay']
-    lr_coeffs = opts['lr_coeffs']
+    fix_interm_bounds = opts['fix_interm_bounds']
     loss_reduction_func = opts['loss_reduction_func']
     stop_criterion_func = opts['stop_criterion_func']
     use_float64_in_last_iteration = opts['use_float64_in_last_iteration']
     early_stop_patience = opts['early_stop_patience']
-    intermediate_beta_enabled = opts['intermediate_beta']
     start_save_best = opts['start_save_best']
     multi_spec_keep_func = opts['multi_spec_keep_func']
+    deterministic = opts['deterministic']
     enable_opt_interm_bounds = self.bound_opts.get(
         'enable_opt_interm_bounds', False)
     sparse_intermediate_bounds = self.bound_opts.get(
         'sparse_intermediate_bounds', False)
     verbosity = self.bound_opts['verbosity']
 
-    assert bound_lower != bound_upper, (
-        'we can only optimize lower OR upper bound at one time')
+    if bound_side not in ['lower', 'upper']:
+        raise ValueError(bound_side)
+    bound_lower = bound_side == 'lower'
+    bound_upper = bound_side == 'upper'
+
     assert alpha or beta, (
         'nothing to optimize, use compute bound instead!')
 
     if C is not None:
         self.final_shape = C.size()[:2]
         self.bound_opts.update({'final_shape': self.final_shape})
-    if init_alpha:
+    if opts['init_alpha']:
         # TODO: this should set up aux_reference_bounds.
-        self.init_slope(x, share_slopes=opts['use_shared_alpha'],
-                   method=method, c=C, final_node_name=final_node_name)
+        self.init_alpha(x, share_alphas=opts['use_shared_alpha'],
+                        method=method, c=C, final_node_name=final_node_name)
 
-    # Optimizable activations that are actually used and perturbed
-    optimizable_activations = [
-        n for n in self.optimizable_activations if n.used and n.perturbed]
-    # Relu node that are actually used
-    relus = [n for n in self.relus if n.used and n.perturbed]
+    optimizable_activations = self.get_enabled_opt_act()
 
-    alphas, betas, parameters = [], [], []
+    alphas, parameters = [], []
     dense_coeffs_mask = []
-    partial_intermediate_layer_bounds = None
-
     if alpha:
         best_alphas = _set_alpha(
-            optimizable_activations, parameters, alphas, lr_alpha)
-
+            optimizable_activations, parameters, alphas, opts['lr_alpha'])
     if beta:
-        ret_set_beta = _set_beta(
-            self, relus, optimizable_activations, single_node_split,
-            enable_opt_interm_bounds, betas, opt_coeffs, parameters,
-            lr_coeffs, opt_bias, lr_beta, lr_cut_beta, cutter,
-            dense_coeffs_mask)
-        betas, best_betas, coeffs = ret_set_beta[:3]
-        dense_coeffs_mask, best_coeffs, biases, best_biases = ret_set_beta[3:]
+        ret_set_beta = self.set_beta(
+            enable_opt_interm_bounds, parameters,
+            opts['lr_beta'], opts['lr_cut_beta'], cutter, dense_coeffs_mask)
+        betas, best_betas, coeffs, dense_coeffs_mask = ret_set_beta[:4]
+    if apply_output_constraints_to is not None and len(apply_output_constraints_to) > 0:
+        _set_gammas(self.nodes(), parameters)
 
     start = time.time()
 
-    if (decision_thresh is not None
-            and isinstance(decision_thresh, torch.Tensor)):
+    if isinstance(decision_thresh, torch.Tensor):
         if decision_thresh.dim() == 1:
             # add the spec dim to be aligned with compute_bounds return
             decision_thresh = decision_thresh.unsqueeze(-1)
 
+    if opts['pruning_in_iteration']:
+        if return_A:
+            raise NotImplementedError(
+                'Pruning in iteration optimization does not support '
+                'return A yet. '
+                'Please fix or discard this optimization by setting '
+                '--disable_pruning_in_iteration '
+                'or bab: pruning_in_iteration: false')
+        pruner = OptPruner(
+            x, threshold=opts['pruning_in_iteration_threshold'],
+            multi_spec_keep_func=multi_spec_keep_func,
+            loss_reduction_func=loss_reduction_func,
+            decision_thresh=decision_thresh,
+            epsilon_over_decision_thresh=epsilon_over_decision_thresh,
+            fix_interm_bounds=fix_interm_bounds)
+    else:
+        pruner = None
 
     if opt_choice == 'adam-autolr':
         opt = AdamElementLR(parameters)
@@ -500,10 +375,7 @@ def get_optimized_bounds(
 
     # Create a weight vector to scale learning rate.
     loss_weight = torch.ones(size=(x[0].size(0),), device=x[0].device)
-    scheduler = optim.lr_scheduler.ExponentialLR(opt, lr_decay)
-
-    if verbosity > 0 and intermediate_beta_enabled:
-        self.print_optimized_beta(relus, intermediate_beta_enabled=True)
+    scheduler = optim.lr_scheduler.ExponentialLR(opt, opts['lr_decay'])
 
     # best_intermediate_bounds is linked to aux_reference_bounds!
     best_intermediate_bounds = {}
@@ -516,15 +388,6 @@ def get_optimized_bounds(
     if aux_reference_bounds is None:
         aux_reference_bounds = {}
 
-    with torch.no_grad():
-        pruning_in_iteration = False
-        # for computing the positive domain ratio
-        original_size = x[0].shape[0]
-        preserve_mask = None
-
-    # record the overhead due to extra operations from pruning-in-iteration
-    pruning_time = 0.
-
     need_grad = True
     patience = 0
     for i in range(iteration):
@@ -534,79 +397,66 @@ def get_optimized_bounds(
 
         intermediate_constr = None
 
-        if not fix_intermediate_layer_bounds:
+        if not fix_interm_bounds:
             # If we still optimize all intermediate neurons, we can use
-            # intermediate_layer_bounds as reference bounds.
-            reference_bounds = intermediate_layer_bounds
+            # interm_bounds as reference bounds.
+            if reference_bounds is None:
+                reference_bounds = {}
+            if interm_bounds is not None:
+                reference_bounds.update(interm_bounds)
+            interm_bounds = {}
 
         if i == iteration - 1:
             # No grad update needed for the last iteration
             need_grad = False
-
             if (self.device == 'cuda'
                     and torch.get_default_dtype() == torch.float32
                     and use_float64_in_last_iteration):
-                C, x, intermediate_layer_bounds = _to_float64(
-                    self, C, x, aux_reference_bounds, intermediate_layer_bounds)
+                C, x, interm_bounds = self._to_float64(
+                    C, x, aux_reference_bounds, interm_bounds)
 
-        # we will use last update preserve mask in caller functions to recover
-        # lA, l, u, etc to full batch size
-        self.last_update_preserve_mask = preserve_mask
+        if pruner:
+            # we will use last update preserve mask in caller functions to recover
+            # lA, l, u, etc to full batch size
+            self.last_update_preserve_mask = pruner.preserve_mask
+            pruner.cache_full_sized_alpha(optimizable_activations)
+
         with torch.no_grad() if not need_grad else ExitStack():
             # ret is lb, ub or lb, ub, A_dict (if return_A is set to true)
-
-            # argument for intermediate_layer_bounds
-            # If we set neuron bounds individually, or if we are optimizing
-            # intermediate layer bounds using beta, we do not set
-            # intermediate_layer_bounds.
-            # When intermediate betas are used, we must set
-            # intermediate_layer_bounds to None because we want to recompute
-            # all intermediate layer bounds.
-            if beta and intermediate_beta_enabled:
-                arg_ilb = partial_intermediate_layer_bounds
-            elif fix_intermediate_layer_bounds:
-                arg_ilb = intermediate_layer_bounds
-            else:
-                arg_ilb = None
-
-            # argument for aux_reference_bounds
-            if sparse_intermediate_bounds:
-                arg_arb = aux_reference_bounds
-            else:
-                arg_arb = None
-
             ret = self.compute_bounds(
                 x, aux, C, method=method, IBP=IBP, forward=forward,
                 bound_lower=bound_lower, bound_upper=bound_upper,
                 reuse_ibp=reuse_ibp, return_A=return_A,
                 final_node_name=final_node_name, average_A=average_A,
-                intermediate_layer_bounds=arg_ilb,
+                # When intermediate bounds are recomputed, we must set it
+                # to None
+                interm_bounds=interm_bounds if fix_interm_bounds else None,
                 # This is the currently tightest interval, which will be used to
                 # pass split constraints when intermediate betas are used.
                 reference_bounds=reference_bounds,
                 # This is the interval used for checking for unstable neurons.
-                aux_reference_bounds=arg_arb,
+                aux_reference_bounds=aux_reference_bounds if sparse_intermediate_bounds else None,
                 # These are intermediate layer beta variables and their
                 # corresponding A matrices and biases.
                 intermediate_constr=intermediate_constr,
                 needed_A_dict=needed_A_dict,
-                update_mask=preserve_mask)
-
+                update_mask=pruner.preserve_mask if pruner else None)
         ret_l, ret_u = ret[0], ret[1]
+
+        if pruner:
+            pruner.recover_full_sized_alpha(optimizable_activations)
 
         if (self.cut_used and i % cutter.log_interval == 0
                 and len(self.cut_beta_params) > 0):
             # betas[-1]: (2(0 lower, 1 upper), spec, batch, num_constrs)
             if ret_l is not None:
-                print(
-                    i, 'lb beta sum:',
-                    f'{self.cut_beta_params[-1][0].sum() / ret_l.size(0)},',
-                    f'worst {ret_l.min()}')
+                print(i, 'lb beta sum:',
+                      f'{self.cut_beta_params[-1][0].sum() / ret_l.size(0)},',
+                      f'worst {ret_l.min()}')
             if ret_u is not None:
-                print(
-                    i, 'lb beta sum:',
-                    f'{self.cut_beta_params[-1][1].sum() / ret_u.size(0)},',
-                    f'worst {ret_u.min()}')
+                print(i, 'lb beta sum:',
+                      f'{self.cut_beta_params[-1][1].sum() / ret_u.size(0)},',
+                      f'worst {ret_u.min()}')
 
         if i == 0:
             # save results at the first iteration
@@ -618,9 +468,8 @@ def get_optimized_bounds(
             ret_0 = ret[0].detach().clone() if bound_lower else ret[1].detach().clone()
 
             for node in optimizable_activations:
-                new_intermediate = [
-                    node.inputs[0].lower.detach().clone(),
-                    node.inputs[0].upper.detach().clone()]
+                new_intermediate = [node.inputs[0].lower.detach().clone(),
+                                    node.inputs[0].upper.detach().clone()]
                 best_intermediate_bounds[node.name] = new_intermediate
                 if sparse_intermediate_bounds:
                     # Always using the best bounds so far as the reference
@@ -640,80 +489,27 @@ def get_optimized_bounds(
         full_l = l
         full_ret = ret
 
-        # positive domains may already be filtered out, so we use all domains -
-        # negative domains to compute
-        if decision_thresh is not None:
-            if (isinstance(decision_thresh, torch.Tensor)
-                    and decision_thresh.numel() > 1
-                    and preserve_mask is not None):
-                if decision_thresh.shape[-1] == 1:
-                    # single spec with pruned domains
-                    negative_domain = (
-                        ret_l.view(-1)
-                        <= decision_thresh[preserve_mask].view(-1)).sum()
-                else:
-                    # multiple spec with pruned domains
-                    negative_domain = multi_spec_keep_func(
-                        ret_l <= decision_thresh[preserve_mask]).sum()
-            else:
-                if ret_l.shape[-1] == 1:
-                    # single spec
-                    negative_domain = (
-                        ret_l.view(-1) <= decision_thresh.view(-1)).sum()
-                else:
-                    # multiple spec
-                    negative_domain = multi_spec_keep_func(
-                        ret_l <= decision_thresh).sum()
-            positive_domain_num = original_size - negative_domain
+        if pruner:
+            (x, C, full_l, full_ret_l, full_ret_u,
+             full_ret, stop_criterion) = pruner.prune(
+                x, C, ret_l, ret_u, ret, full_l, full_ret_l, full_ret_u,
+                full_ret, interm_bounds, aux_reference_bounds,
+                stop_criterion_func, bound_lower)
         else:
-            positive_domain_num = -1
-        positive_domain_ratio = float(
-            positive_domain_num) / float(original_size)
-        # threshold is 10% by default
-        next_iter_pruning_in_iteration = (
-            opts['pruning_in_iteration'] and decision_thresh is not None
-            and positive_domain_ratio > opts['pruning_in_iteration_threshold'])
-
-        if pruning_in_iteration:
-            stime = time.time()
-            if return_A:
-                raise Exception(
-                    'Pruning in iteration optimization does not support '
-                    'return A yet. '
-                    'Please fix or discard this optimization by setting '
-                    '--disable_pruning_in_iteration '
-                    'or bab: pruning_in_iteration: false')
-            now_preserve_mask = _get_preserve_mask(
-                decision_thresh, ret_l, preserve_mask, multi_spec_keep_func)
-            # prune C
-            if C is not None and C.shape[0] == x[0].shape[0]:
-                C = C[now_preserve_mask]  # means C is also batch specific
-            # prune x
-            x, pre_prune_size = _prune_x(x, now_preserve_mask)
-            # prune bounds
-            ret_prune = _prune_bounds_by_mask(
-                now_preserve_mask, decision_thresh, ret_l, ret_u, ret,
-                preserve_mask, epsilon_over_decision_thresh, original_size,
-                loss_reduction_func, beta, intermediate_beta_enabled,
-                fix_intermediate_layer_bounds,
-                intermediate_layer_bounds, aux_reference_bounds,
-                partial_intermediate_layer_bounds, pre_prune_size)
-            full_l, full_ret_l = ret_prune[:2]
-            # ret_prune[2] is full_u which is unused
-            full_ret_u, full_ret, preserve_mask_next = ret_prune[3:]
-            pruning_time += time.time() - stime
+            stop_criterion = (stop_criterion_func(full_ret_l) if bound_lower
+                              else stop_criterion_func(-full_ret_u))
 
         loss_ = l if bound_lower else -u
-        stop_criterion = stop_criterion_func(
-            full_ret_l) if bound_lower else stop_criterion_func(-full_ret_u)
-        if (type(stop_criterion) != bool
-                and stop_criterion.numel() > 1 and pruning_in_iteration):
-            stop_criterion = stop_criterion[preserve_mask]
         total_loss = -1 * loss_
+
         if type(stop_criterion) == bool:
             loss = total_loss.sum() * (not stop_criterion)
         else:
+            assert total_loss.shape == stop_criterion.shape
             loss = (total_loss * stop_criterion.logical_not()).sum()
+        # For logging, print the total sum. Otherwise the loss may appear
+        # to be increasing as more examples are stopped.
+        loss_sum = total_loss.sum()
 
         stop_criterion_final = isinstance(
             stop_criterion, torch.Tensor) and stop_criterion.all()
@@ -728,9 +524,8 @@ def get_optimized_bounds(
         if (i == iteration - 1 and self.device == 'cuda'
                 and torch.get_default_dtype() == torch.float32
                 and use_float64_in_last_iteration):
-            total_loss, x, full_ret = _to_default_dtype(
-                self, x, total_loss, full_ret, ret, best_intermediate_bounds,
-                return_A)
+            total_loss, x, full_ret = self._to_default_dtype(
+                x, total_loss, full_ret, ret, best_intermediate_bounds, return_A)
 
         with torch.no_grad():
             # for lb and ub, we update them in every iteration since updating
@@ -738,15 +533,13 @@ def get_optimized_bounds(
             need_update = False
             if keep_best:
                 if best_ret_u is not None:
-                    ret_upd = _update_best_ret(
+                    best_ret_u, best_ret, need_update, idx_mask, improved_idx = _update_best_ret(
                         full_ret_u, best_ret_u, full_ret, best_ret, need_update,
-                        idx=1)
-                    best_ret_u, best_ret, _, _, need_update = ret_upd
+                        loss_reduction_func, idx=1, deterministic=deterministic)
                 if best_ret_l is not None:
-                    ret_upd = _update_best_ret(
+                    best_ret_l, best_ret, need_update, idx_mask, improved_idx = _update_best_ret(
                         full_ret_l, best_ret_l, full_ret, best_ret, need_update,
-                        idx=0)
-                    best_ret_l, best_ret, _, _, need_update = ret_upd
+                        loss_reduction_func, idx=0, deterministic=deterministic)
             else:
                 # Not saving the best, just keep the last iteration.
                 if full_ret[0] is not None:
@@ -767,48 +560,48 @@ def get_optimized_bounds(
             # (in case divergence) and second half iterations
             # or before early stop by either stop_criterion or
             # early_stop_patience reached
-            if (i < 1 or i > int(iteration * start_save_best)
+            if (i < 1 or i > int(iteration * start_save_best) or deterministic
                     or stop_criterion_final or patience == early_stop_patience):
 
                 # compare with the first iteration results and get improved indexes
                 if bound_lower:
-                    idx_mask, idx = _get_idx_mask(0, full_ret_l, ret_0)
+                    if deterministic:
+                        idx = improved_idx
+                    else:
+                        idx_mask, idx = _get_idx_mask(
+                            0, full_ret_l, ret_0, loss_reduction_func)
                     ret_0[idx] = full_ret_l[idx]
                 else:
-                    idx_mask, idx = _get_idx_mask(1, full_ret_u, ret_0)
+                    if deterministic:
+                        idx = improved_idx
+                    else:
+                        idx_mask, idx = _get_idx_mask(
+                            1, full_ret_u, ret_0, loss_reduction_func)
                     ret_0[idx] = full_ret_u[idx]
 
                 if idx is not None:
                     # for update propose, we condition the idx to update only
                     # on domains preserved
-                    if pruning_in_iteration:
-                        # local sparse index of preserved samples where
-                        # idx == true
-                        local_idx = idx_mask[preserve_mask].nonzero().view(-1)
-                        # idx is global sparse index of preserved samples where
-                        # idx == true
-                        new_idx = torch.zeros_like(
-                            idx_mask, dtype=torch.bool, device=x[0].device)
-                        new_idx[preserve_mask] = idx_mask[preserve_mask]
-                        idx = new_idx.nonzero().view(-1)
-                        reference_idx = local_idx
+                    if pruner:
+                        reference_idx, idx = pruner.prune_idx(idx_mask, idx, x)
                     else:
                         reference_idx = idx
 
                     _update_optimizable_activations(
-                        optimizable_activations, intermediate_layer_bounds,
-                        fix_intermediate_layer_bounds, best_intermediate_bounds,
-                        reference_idx, idx, alpha, best_alphas)
+                        optimizable_activations, interm_bounds,
+                        fix_interm_bounds, best_intermediate_bounds,
+                        reference_idx, idx, alpha, best_alphas, deterministic)
 
-                    if beta and single_node_split:
-                        _update_best_beta(
-                            self, enable_opt_interm_bounds, betas,
-                            optimizable_activations, best_betas, idx)
+                    if beta:
+                        self.update_best_beta(enable_opt_interm_bounds, betas,
+                                              best_betas, idx)
 
 
         if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
             print(f'****** iter [{i}]',
-                  f'loss: {loss.item()}, lr: {opt.param_groups[0]["lr"]}')
+                  f'loss: {loss_sum.item()}, lr: {opt.param_groups[0]["lr"]}',
+                  (' pruning_in_iteration open status: '
+                     f'{pruner.pruning_in_iteration}') if pruner else '')
 
         if stop_criterion_final:
             print(f'\nall verified at {i}th iter')
@@ -820,20 +613,22 @@ def get_optimized_bounds(
                 ' iterations no improvement!')
             break
 
-        current_lr = [param_group['lr'] for param_group in opt.param_groups]
+        if i != iteration - 1 and not loss.requires_grad:
+            assert i == 0, (i, iteration)
+            print('[WARNING] No optimizable parameters found. Will skip optimiziation. '
+                  'This happens e.g. if all optimizable layers are freezed or the '
+                  'network has no optimizable layers.')
+            break
 
         opt.zero_grad(set_to_none=True)
 
         if verbosity > 2:
-            print(
-                f'*** iter [{i}]\n', f'loss: {loss.item()}',
-                total_loss.squeeze().detach().cpu().numpy(), 'lr: ',
-                current_lr)
+            current_lr = [param_group['lr'] for param_group in opt.param_groups]
+            print(f'*** iter [{i}]\n', f'loss: {loss.item()}',
+                  total_loss.squeeze().detach().cpu().numpy(), 'lr: ',
+                  current_lr)
             if beta:
-                self.print_optimized_beta(relus, intermediate_beta_enabled)
-                if opt_coeffs:
-                    for co in coeffs:
-                        print(f'coeff sum: {co.abs().sum():.5g}')
+                print_optimized_beta(optimizable_activations)
             if beta and i == 0 and verbosity > 2:
                 breakpoint()
 
@@ -841,6 +636,7 @@ def get_optimized_bounds(
             # we do not need to update parameters in the last step since the
             # best result already obtained
             loss.backward()
+
             # All intermediate variables are not needed at this point.
             self._clear_and_set_new(None)
             if opt_choice == 'adam-autolr':
@@ -849,7 +645,6 @@ def get_optimized_bounds(
                 opt.step()
 
         if beta:
-            # Clipping to >=0.
             for b in betas:
                 b.data = (b >= 0) * b.data
             for dmi in range(len(dense_coeffs_mask)):
@@ -860,50 +655,23 @@ def get_optimized_bounds(
 
         if alpha:
             for m in optimizable_activations:
-                m.clip_alpha_()
+                m.clip_alpha()
+        if apply_output_constraints_to is not None and len(apply_output_constraints_to) > 0:
+            for m in self.nodes():
+                m.clip_gammas()
 
         scheduler.step()
 
-        if pruning_in_iteration:
-            preserve_mask = preserve_mask_next
-        if not pruning_in_iteration and next_iter_pruning_in_iteration:
-            # init preserve_mask etc
-            preserve_mask = torch.arange(
-                0, x[0].shape[0], device=x[0].device, dtype=torch.long)
-            pruning_in_iteration = True
+        if pruner:
+            pruner.next_iter()
 
-    if pruning_in_iteration:
-        # overwrite pruned cells in best_ret by threshold + eps
-        if return_A:
-            fin_l, fin_u, fin_A = best_ret
-        else:
-            fin_l, fin_u = best_ret
-            fin_A = None
-        if fin_l is not None:
-            new_fin_l = full_ret_l
-            new_fin_l[preserve_mask] = fin_l[preserve_mask]
-            fin_l = new_fin_l
-        if fin_u is not None:
-            new_fin_u = full_ret_u
-            new_fin_u[preserve_mask] = fin_u[preserve_mask]
-            fin_u = new_fin_u
-        if return_A:
-            best_ret = (fin_l, fin_u, fin_A)
-        else:
-            best_ret = (fin_l, fin_u)
+    if pruner:
+        best_ret = pruner.update_best(full_ret_l, full_ret_u, best_ret)
 
     if verbosity > 3:
         breakpoint()
 
     if keep_best:
-        def update_best(dest, src):
-            for item_dest, item_src in zip(dest, src):
-                if enable_opt_interm_bounds:
-                    for key in item_dest.keys():
-                        item_dest[key].data = item_src[key].data
-                else:
-                    item_dest.data = item_src.data
-
         # Set all variables to their saved best values.
         with torch.no_grad():
             for idx, node in enumerate(optimizable_activations):
@@ -912,149 +680,152 @@ def get_optimized_bounds(
                     node.alpha = best_alphas[node.name]
                 # Update best intermediate layer bounds only when they are
                 # optimized. If they are already fixed in
-                # intermediate_layer_bounds, then do nothing.
+                # interm_bounds, then do nothing.
                 best_intermediate = best_intermediate_bounds[node.name]
                 node.inputs[0].lower.data = best_intermediate[0].data
                 node.inputs[0].upper.data = best_intermediate[1].data
-                if beta:
-                    if (single_node_split and hasattr(node, 'sparse_beta')
-                            and node.sparse_beta is not None):
-                        if enable_opt_interm_bounds:
-                            for key in node.sparse_beta.keys():
-                                node.sparse_beta[key].copy_(
-                                    best_betas[node.name][key])
-                        else:
-                            node.sparse_beta.copy_(best_betas[idx])
+            if beta:
+                for node in self.nodes_with_beta:
+                    assert getattr(node, 'sparse_betas', None) is not None
+                    if enable_opt_interm_bounds:
+                        for key in node.sparse_betas.keys():
+                            node.sparse_betas[key].val.copy_(
+                                best_betas[node.name][key])
                     else:
-                        update_best(betas, best_betas)
-                        if opt_coeffs:
-                            update_best(coeffs, best_coeffs)
-                        if opt_bias:
-                            update_best(biases, best_biases)
+                        node.sparse_betas[0].val.copy_(best_betas[node.name])
             if self.cut_used:
-                regular_beta_length = len(betas) - len(self.cut_beta_params)
                 for ii in range(len(self.cut_beta_params)):
-                    self.cut_beta_params[ii].data = best_betas[
-                        regular_beta_length + ii].data
+                    self.cut_beta_params[ii].data = best_betas['cut'][ii].data
 
-    if (intermediate_layer_bounds is not None
-            and not fix_intermediate_layer_bounds):
+    if interm_bounds is not None and not fix_interm_bounds:
         for l in self._modules.values():
-            if (l.name in intermediate_layer_bounds.keys()
+            if (l.name in interm_bounds.keys()
                     and hasattr(l, 'lower')):
-                l.lower = torch.max(
-                    l.lower, intermediate_layer_bounds[l.name][0])
-                l.upper = torch.min(
-                    l.upper, intermediate_layer_bounds[l.name][1])
+                l.lower = torch.max(l.lower, interm_bounds[l.name][0])
+                l.upper = torch.min(l.upper, interm_bounds[l.name][1])
                 infeasible_neurons = l.lower > l.upper
                 if infeasible_neurons.any():
-                    print(
-                        f'Infeasibility detected in layer {l.name}.',
-                        infeasible_neurons.sum().item(),
-                        infeasible_neurons.nonzero()[:, 0])
+                    print(f'Infeasibility detected in layer {l.name}.',
+                          infeasible_neurons.sum().item(),
+                          infeasible_neurons.nonzero()[:, 0])
 
     if verbosity > 0:
-        if self.cut_used and beta:
-            print(
-                'first 10 best general betas:',
-                best_betas[-1].view(2, -1)[0][:10], 'sum:',
-                best_betas[-1][0].sum().item())
         if best_ret_l is not None:
             # FIXME: unify the handling of l and u.
-            print(
-                'best_l after optimization:',
-                best_ret_l.sum().item(), 'with beta sum per layer:',
-                [p.sum().item() for p in betas])
+            print('best_l after optimization:', best_ret_l.sum().item())
+            if beta:
+                print('beta sum per layer:', [p.sum().item() for p in betas])
         print('alpha/beta optimization time:', time.time() - start)
 
     for node in optimizable_activations:
         node.opt_end()
 
-    # update pruning ratio
-    if (opts['pruning_in_iteration'] and decision_thresh is not None
-            and full_l.numel() > 0):
-        stime = time.time()
-        with torch.no_grad():
-            if isinstance(decision_thresh, torch.Tensor):
-                if decision_thresh.shape[-1] == 1:
-                    neg_domain_num = torch.sum(
-                        full_ret_l.view(-1) <= decision_thresh.view(-1)).item()
-                else:
-                    neg_domain_num = torch.sum(multi_spec_keep_func(
-                        full_ret_l <= decision_thresh)).item()
-            else:
-                if full_l.shape[-1] == 1:
-                    neg_domain_num = torch.sum(
-                        full_ret_l.view(-1) <= decision_thresh).item()
-                else:
-                    neg_domain_num = torch.sum(multi_spec_keep_func(
-                        full_ret_l <= decision_thresh)).item()
-            now_pruning_ratio = (1.0 -
-                float(neg_domain_num) / float(full_l.shape[0]))
-            print('pruning_in_iteration open status:', pruning_in_iteration)
-            print(
-                'ratio of positive domain =', full_l.shape[0] - neg_domain_num,
-                '/', full_l.numel(), '=', now_pruning_ratio)
-        pruning_time += time.time() - stime
-        print('pruning-in-iteration extra time:', pruning_time)
+    if pruner:
+        pruner.update_ratio(full_l, full_ret_l)
+        pruner.clean_full_sized_alpha_cache()
+
+    if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
+        print()
 
     return best_ret
 
 
-def init_slope(
-        self, x, share_slopes=False, method='backward',
-        c=None, bound_lower=True, bound_upper=True, final_node_name=None,
-        intermediate_layer_bounds=None, activation_opt_params=None,
-        skip_bound_compute=False):
-    for node in self.optimizable_activations:
+def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
+               c=None, bound_lower=True, bound_upper=True, final_node_name=None,
+               interm_bounds=None, activation_opt_params=None,
+               skip_bound_compute=False):
+    self(*x) # Do a forward pass to set perturbed nodes
+    final = (self.final_node() if final_node_name is None
+             else self[final_node_name])
+    self._set_used_nodes(final)
+
+    optimizable_activations = self.get_enabled_opt_act()
+    for node in optimizable_activations:
+        # TODO(7/6/2023) In the future, we may need to enable alpha sharing
+        # automatically by consider the size of all the optimizable nodes in the
+        # graph. For now, only an adhoc check in MatMul is added.
+        node._all_optimizable_activations = optimizable_activations
+
         # initialize the parameters
         node.opt_init()
 
-    if (not skip_bound_compute or intermediate_layer_bounds is None or
+    apply_output_constraints_to = (
+        self.bound_opts['optimize_bound_args']['apply_output_constraints_to']
+    )
+    if (not skip_bound_compute or interm_bounds is None or
             activation_opt_params is None or not all(
-                [relu.name in activation_opt_params for relu in self.relus])):
+                [act.name in activation_opt_params
+                 for act in self.optimizable_activations])):
         skipped = False
         # if new interval is None, then CROWN interval is not present
         # in this case, we still need to redo a CROWN pass to initialize
         # lower/upper
         with torch.no_grad():
+            # We temporarilly deactivate output constraints
+            self.bound_opts['optimize_bound_args']['apply_output_constraints_to'] = []
             l, u = self.compute_bounds(
                 x=x, C=c, method=method, bound_lower=bound_lower,
                 bound_upper=bound_upper, final_node_name=final_node_name,
-                intermediate_layer_bounds=intermediate_layer_bounds)
+                interm_bounds=interm_bounds)
+            self.bound_opts['optimize_bound_args']['apply_output_constraints_to'] = (
+                apply_output_constraints_to
+            )
     else:
         # we skip, but we still would like to figure out the "used",
         # "perturbed", "backward_from" of each note in the graph
         skipped = True
         # this set the "perturbed" property
-        self._set_input(
-            *x, intermediate_layer_bounds=intermediate_layer_bounds)
-
-        final = self.final_node(
-        ) if final_node_name is None else self[final_node_name]
-        self._set_used_nodes(final)
-
+        self.set_input(*x, interm_bounds=interm_bounds)
         self.backward_from = {node: [final] for node in self._modules}
 
     final_node_name = final_node_name or self.final_name
 
     init_intermediate_bounds = {}
-    for node in self.optimizable_activations:
-        if not node.used or not node.perturbed:
-            continue
+    for node in optimizable_activations:
         start_nodes = []
         if method in ['forward', 'forward+backward']:
-            start_nodes.append(('_forward', 1, None))
+            start_nodes.append(('_forward', 1, None, False))
         if method in ['backward', 'forward+backward']:
+            if (
+                apply_output_constraints_to is not None
+                and len(apply_output_constraints_to) > 0
+            ):
+                input_node = None
+                for potential_input_node_name in self.input_name:
+                    if type(self[potential_input_node_name]) is BoundInput:
+                        assert input_node is None, 'Only a single input node is supported'
+                        input_node = self[potential_input_node_name]
+                assert input_node is not None
+
+                backward_from_node = input_node
+            else:
+                backward_from_node = node
             start_nodes += self.get_alpha_crown_start_nodes(
-                node, c=c, share_slopes=share_slopes,
-                final_node_name=final_node_name)
+                node,
+                c=c,
+                share_alphas=share_alphas,
+                final_node_name=final_node_name,
+                backward_from_node=backward_from_node
+            )
         if skipped:
             node.restore_optimized_params(activation_opt_params[node.name])
         else:
             node.init_opt_parameters(start_nodes)
-        init_intermediate_bounds[node.inputs[0].name] = (
-            [node.inputs[0].lower.detach(), node.inputs[0].upper.detach()])
+        if node in self.splittable_activations:
+            for i in node.requires_input_bounds:
+                input_node = node.inputs[i]
+                if not input_node.perturbed:
+                    continue
+                init_intermediate_bounds[node.inputs[i].name] = (
+                    [node.inputs[i].lower.detach(),
+                    node.inputs[i].upper.detach()])
+    if (
+        apply_output_constraints_to is not None
+        and len(apply_output_constraints_to) > 0
+        and hasattr(self, 'constraints')
+    ):
+        for node in self.nodes():
+            node.init_gammas(self.constraints.size(0))
 
     if self.bound_opts['verbosity'] >= 1:
         print('Optimizable variables initialized.')

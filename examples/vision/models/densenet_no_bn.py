@@ -84,9 +84,8 @@ class DenseNet(nn.Module):
         out = self.trans1(self.dense1(out))
         out = self.trans2(self.dense2(out))
         out = self.dense3(out)
-        # out = self.dense4(out)
         out = F.relu(out)
-        out = out.view(out.size(0), -1)
+        out = torch.flatten(out, 1)
         out = F.relu(self.linear1(out))
         out = self.linear2(out)
 

@@ -1,7 +1,11 @@
 """ Normalization operators"""
 import copy
+
+import torch
+
 from .base import *
 from .solver_utils import grb
+
 
 class BoundBatchNormalization(Bound):
     def __init__(self, attr, inputs, output_index, options, training):
@@ -53,7 +57,50 @@ class BoundBatchNormalization(Bound):
             result = w.view(*shape) * x + b.view(*shape)
         return result
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_forward(self, dim_in, *x):
+        inp = x[0]
+        assert (x[1].lower == x[1].upper).all(), "unsupported forward bound with perturbed mean"
+        assert (x[2].lower == x[2].upper).all(), "unsupported forward bound with perturbed var"
+        weight, bias = x[1].lower, x[2].lower
+        if not self.training:
+            assert (x[3].lower == x[3].upper).all(), "unsupported forward bound with perturbed mean"
+            assert (x[4].lower == x[4].upper).all(), "unsupported forward bound with perturbed var"
+            self.current_mean = x[3].lower
+            self.current_var = x[4].lower
+        self._check_unused_mean_or_var()
+        if not self.use_affine:
+            weight = torch.ones_like(weight)
+            bias = torch.zeros_like(bias)
+
+
+        tmp_bias = bias - self.current_mean / torch.sqrt(self.current_var + self.eps) * weight
+        tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
+
+        # for debug: this checking is passed, i.e., we derived the forward bound
+        # from the following correct computation procedure
+        # tmp_x = ((x[0].lb + x[0].ub) / 2.).detach()
+        # expect_output = self(tmp_x, *[_.lower for _ in x[1:]])
+        # tmp_weight = tmp_weight.view(*((1, -1) + (1,) * (tmp_x.ndim - 2)))
+        # tmp_bias = tmp_bias.view(*((1, -1) + (1,) * (tmp_x.ndim - 2)))
+        # computed_output = tmp_weight * tmp_x + tmp_bias
+        # assert torch.allclose(expect_output, computed_output, 1e-5, 1e-5)
+
+        tmp_weight = tmp_weight.view(*((1, 1, -1) + (1,) * (inp.lw.ndim - 3)))
+        new_lw = torch.clamp(tmp_weight, min=0.) * inp.lw + torch.clamp(tmp_weight, max=0.) * inp.uw
+        new_uw = torch.clamp(tmp_weight, min=0.) * inp.uw + torch.clamp(tmp_weight, max=0.) * inp.lw
+
+        tmp_weight = tmp_weight.view(*((1, -1) + (1,) * (inp.lb.ndim - 2)))
+        tmp_bias = tmp_bias.view(*((1, -1) + (1,) * (inp.lb.ndim - 2)))
+        new_lb = torch.clamp(tmp_weight, min=0.) * inp.lb + torch.clamp(tmp_weight, max=0.) * inp.ub + tmp_bias
+        new_ub = torch.clamp(tmp_weight, min=0.) * inp.ub + torch.clamp(tmp_weight, max=0.) * inp.lb + tmp_bias
+
+        return LinearBound(
+            lw = new_lw,
+            lb = new_lb,
+            uw = new_uw,
+            ub = new_ub)
+
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
             'Weight perturbation is not supported for BoundBatchNormalization'
 
@@ -88,7 +135,7 @@ class BoundBatchNormalization(Bound):
 
                     # tmp_weight has shape (c,), it will be applied on the (c,) dimension.
                     patches = patches * tmp_weight.view(*([1] * (patches.ndim - 3)), -1, 1, 1)  # Match with sparse or non-sparse patches.
-                    next_A = Patches(patches, last_A.stride, last_A.padding, last_A.shape, identity=0, unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape)
+                    next_A = last_A.create_similar(patches)
 
                     # bias to size (c,), need expansion before unfold.
                     bias = tmp_bias.view(-1,1,1).expand(self.input_shape[1:]).unsqueeze(0)
@@ -116,7 +163,7 @@ class BoundBatchNormalization(Bound):
                         patches = patches[last_A.unstable_idx[0], :, last_A.unstable_idx[1], last_A.unstable_idx[2]]
                     # Expand the batch dimension.
                     patches = patches.expand(-1, last_A.shape[1], *([-1] * (patches.ndim - 2)))
-                    next_A = Patches(patches, 1, 0, last_A.shape, unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape)
+                    next_A = last_A.create_similar(patches, stride=1, padding=0, identity=0)
                     if last_A.unstable_idx is not None:
                         # Need to expand the bias and choose the selected ones.
                         bias = tmp_bias.view(-1,1,1,1).expand(-1, 1, last_A.output_shape[2], last_A.output_shape[3])
@@ -168,7 +215,7 @@ class BoundBatchNormalization(Bound):
 
         # interval_propagate() of the Linear layer may encounter input with different norms.
         norm, eps = Interval.get_perturbation(v[0])[:2]
-        if norm == np.inf:
+        if norm == torch.inf:
             center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
             deviation = tmp_weight_abs.view(*shape) * diff
         elif norm > 0:
@@ -229,5 +276,7 @@ class BoundBatchNormalization(Bound):
             new_layer_gurobi_vars.append(out_chan_vars)
 
         self.solver_vars = new_layer_gurobi_vars
-        # self.solver_constrs = new_layer_gurobi_constrs
         model.update()
+
+    def update_requires_input_bounds(self):
+        self._check_weight_perturbation()

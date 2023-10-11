@@ -68,15 +68,11 @@ class ResNeXt(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        # out = F.relu(self.bn1(self.conv1(x)))
         out = F.relu(self.conv1(x))
-
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
-        # out = self.layer4(out)
-        # out = F.avg_pool2d(out, 8)
-        out = out.view(out.size(0), -1)
+        out = torch.flatten(out, 1)
         out = F.relu(self.linear1(out))
         out = self.linear2(out)
         return out

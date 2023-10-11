@@ -3,7 +3,7 @@ from .base import *
 
 
 class BoundRNN(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.complex = True
         self.output_index = output_index

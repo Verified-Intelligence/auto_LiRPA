@@ -110,14 +110,14 @@ class BoundDataParallel(DataParallel):
             # `BoundedModule` type rather than bound nodes.
             for node in model._modules.values():
                 if node.name == node_name:
-                    return getattr(node, att_name)    
+                    return getattr(node, att_name)
         else:
             # Find node by class
             for _, node in model.named_modules():
                 # Find the Exp neuron in computational graph
                 if isinstance(node, node_class):
                     return getattr(node, att_name)
-             
+
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         # add 'module.' here before each keys in self.module.state_dict() if needed
         return self.module.state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)

@@ -1,38 +1,13 @@
+# pylint: disable=wrong-import-position
 """Test Jacobian bounds."""
+
+import sys
+sys.path.append('../examples/vision')
+from jacobian import compute_jacobians
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.perturbations import *
 from testcase import TestCase
-
-
-class MLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(16**2, 20)
-        self.fc2 = nn.Linear(20, 10)
-
-    def forward(self, x):
-        x = torch.flatten(x, -1)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-
-class CNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 2, 7, stride=1, padding=0)
-        self.conv2 = nn.Conv2d(2, 3, 7, stride=1, padding=0)
-        self.fc1 = nn.Linear(48, 20)
-        self.fc2 = nn.Linear(20, 10)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.view(x.size(0), -1)
-        return self.fc2(F.relu(self.fc1(x)))
+from auto_LiRPA.utils import Flatten
 
 
 class TestJacobian(TestCase):
@@ -42,18 +17,20 @@ class TestJacobian(TestCase):
             generate=generate)
 
     def test(self):
-        image = torch.randn(1, 1, 16, 16)
-        model = CNN()
-        model = BoundedModule(model, image, device='cpu')
-        ptb = PerturbationLpNorm(eps=0.1)
-        x = BoundedTensor(image, ptb)
-        output = model(x)
-        print(output)
-        model.augment_gradient_graph(x)
-        ret = model.compute_jacobian_bounds(
-            x, labels=torch.tensor([1], dtype=torch.long))
-        print(ret)
-        self.result = [ret]
+        in_dim, width, linear_size = 8, 2, 8
+        model = nn.Sequential(
+            nn.Conv2d(3, width, 3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(width, width, 3, stride=1, padding=0),
+            nn.ReLU(),
+            Flatten(),
+            nn.Linear(width * (in_dim-4)**2, linear_size),
+            nn.ReLU(),
+            nn.Linear(linear_size, 10)
+        )
+        x0 = torch.randn(1, 3, in_dim, in_dim)
+        self.result = compute_jacobians(
+            model, x0, bound_opts={'optimize_bound_args': {'iteration': 2}})
         self.check()
 
 

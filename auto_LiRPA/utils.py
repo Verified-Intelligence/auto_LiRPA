@@ -2,12 +2,10 @@ import logging
 import time
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import os
 import sys
 import appdirs
 from collections import defaultdict, namedtuple
-from collections.abc import Sequence
 from functools import reduce
 import operator
 import warnings
@@ -27,6 +25,19 @@ warnings.simplefilter("once")
 # Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
 eyeC = namedtuple('eyeC', 'shape device')
 OneHotC = namedtuple('OneHotC', 'shape device index coeffs')
+
+def onehotc_to_dense(one_hot_c: OneHotC, dtype: torch.dtype) -> torch.Tensor:
+    shape = one_hot_c.shape  # [spec, batch, C, H, W]
+    dim = int(prod(shape[2:]))
+    dense = torch.zeros(
+        size=(shape[0], shape[1], dim), device=one_hot_c.device, dtype=dtype)
+    # one_hot_c.index has size (spec, batch), its values are the index of the one-hot non-zero elements in A.
+    # one_hot_c.coeffs is the value of the non-zero element.
+    dense = torch.scatter(
+        dense, dim=2, index=one_hot_c.index.unsqueeze(-1),
+        src=one_hot_c.coeffs.unsqueeze(-1))
+    dense = dense.view(shape[0], shape[1], *shape[2:])
+    return dense
 
 # Benchmarking mode disable some expensive assertions.
 Benchmarking = True
@@ -54,14 +65,17 @@ def reduction_str2func(reduction_func):
     else:
         return reduction_func
 
-def stop_criterion_sum(threshold=0):
-    return lambda x: (x.sum(1, keepdim=True) > threshold)
-
-def stop_criterion_mean(threshold=0):
-    return lambda x: (x.mean(1, keepdim=True) > threshold)
+def stop_criterion_placeholder(threshold=0):
+    return lambda x: RuntimeError("BUG: bound optimization stop criterion not specified.")
 
 def stop_criterion_min(threshold=0):
     return lambda x: (x.min(1, keepdim=True).values > threshold)
+
+def stop_criterion_all(threshold=0):
+    # The dimension of x should be (batch, spec). The spec dimension
+    # This was used in the incomplete verifier, where the spec dimension can
+    # present statements in an OR clause.
+    return lambda x: (x > threshold).all(dim=1, keepdim=True)
 
 def stop_criterion_max(threshold=0):
     return lambda x: (x.max(1, keepdim=True).values > threshold)
@@ -69,19 +83,23 @@ def stop_criterion_max(threshold=0):
 def stop_criterion_batch(threshold=0):
     # may unexpected broadcast, pay attention to the shape of threshold
     # x shape: batch, number_bounds; threshold shape: batch, number_bounds
-    # print('threshold', threshold.shape)
     return lambda x: (x > threshold)
 
 def stop_criterion_batch_any(threshold=0):
+    """If any spec >= rhs, then this sample can be stopped;
+       if all samples can be stopped, stop = True, o.w., False.
+    """
     # may unexpected broadcast, pay attention to the shape of threshold
     # x shape: batch, number_bounds; threshold shape: batch, number_bounds
-    # print('threshold', threshold.shape)
-    return lambda x: (x > threshold).any(dim=1)
+    return lambda x: (x > threshold).any(dim=1, keepdim=True)
 
 def stop_criterion_batch_topk(threshold=0, k=1314):
     # x shape: batch, number_bounds; threshold shape: batch, number_bounds
-    # print('threshold', threshold.shape)
     return lambda x: (torch.kthvalue(x, k, dim=-1, keepdim=True).values > threshold).any(dim=1)
+
+def multi_spec_keep_func_all(x):
+    return torch.all(x, dim=-1)
+
 
 user_data_dir = appdirs.user_data_dir('auto_LiRPA')
 if not os.path.exists(user_data_dir):
@@ -90,50 +108,47 @@ if not os.path.exists(user_data_dir):
     except:
         logger.error('Failed to create directory {}'.format(user_data_dir))
 
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
 
 class MultiAverageMeter(object):
     """Computes and stores the average and current value for multiple metrics"""
     def __init__(self):
         self.reset()
+
     def reset(self):
         self.sum_meter = defaultdict(float)
         self.lasts = defaultdict(float)
         self.counts_meter = defaultdict(int)
-    def update(self, key, val, n=1):
+        self.batch_size = 1
+
+    def set_batch_size(self, batch_size):
+        self.batch_size = batch_size
+
+    def update(self, key, val, n=None):
+        if val is None:
+            return
+        if n is None:
+            n = self.batch_size
         if isinstance(val, torch.Tensor):
             val = val.item()
         self.lasts[key] = val
         self.sum_meter[key] += val * n
         self.counts_meter[key] += n
+
     def last(self, key):
         return self.lasts[key]
+
     def avg(self, key):
         if self.counts_meter[key] == 0:
             return 0.0
         else:
             return self.sum_meter[key] / self.counts_meter[key]
+
     def __repr__(self):
         s = ""
         for k in self.sum_meter:
             s += "{}={:.4f} ".format(k, self.avg(k))
         return s.strip()
+
 
 class MultiTimer(object):
     """Count the time for each part of training."""
@@ -159,9 +174,14 @@ class MultiTimer(object):
             s += "{}_time={:.3f} ".format(k, self.timer_total[k])
         return s.strip()
 
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size(0), -1)
+
+class Flatten(nn.Flatten):
+    """Legacy Flatten class.
+
+    It was previously created when nn.Flatten was not supported. Simply use
+    nn.Flatten in the future."""
+    pass
+
 
 class Unflatten(nn.Module):
     def __init__(self, wh):
@@ -169,6 +189,25 @@ class Unflatten(nn.Module):
         self.wh = wh # width and height of the feature maps
     def forward(self, x):
         return x.view(x.size(0), -1, self.wh, self.wh)
+
+
+class Max(nn.Module):
+
+    def __init__(self):
+        super(Max, self).__init__()
+
+    def forward(self, x, y):
+        return torch.max(x, y)
+
+
+class Min(nn.Module):
+
+    def __init__(self):
+        super(Min, self).__init__()
+
+    def forward(self, x, y):
+        return torch.min(x, y)
+
 
 def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
     parameters = []
@@ -180,12 +219,6 @@ def scale_gradients(optimizer, gradient_accumulation_steps, grad_clip=None):
     if grad_clip is not None:
         return torch.nn.utils.clip_grad_norm_(parameters, grad_clip)
 
-def recursive_map (seq, func):
-    for item in seq:
-        if isinstance(item, Sequence):
-            yield type(item)(recursive_map(item, func))
-        else:
-            yield func(item)
 
 # unpack tuple, dict, list into one single list
 # TODO: not sure if the order matches graph.inputs()
@@ -202,13 +235,16 @@ def unpack_inputs(inputs, device=None):
             inputs = inputs.to(device)
         return [inputs]
 
+
 def isnan(x):
     if isinstance(x, Patches):
         return False
     return torch.isnan(x).any()
 
+
 def prod(x):
     return reduce(operator.mul, x, 1)
+
 
 def batched_index_select(input, dim, index):
     # Assuming the input has a batch dimension.
@@ -231,16 +267,6 @@ def batched_index_select(input, dim, index):
     return torch.gather(input, dim, index)
 
 
-def check_padding(x, padding):
-    if isinstance(padding, int):
-        return x, (padding, padding)
-    if len(padding) == 2:
-        return x, padding
-    if (padding[0] == padding[1]) and (padding[2] == padding[3]):
-        return x, (padding[0], padding[2])
-    return F.pad(x, padding), (0, 0)
-
-
 def get_spec_matrix(X, y, num_classes):
     with torch.no_grad():
         c = (torch.eye(num_classes).type_as(X)[y].unsqueeze(1)
@@ -248,6 +274,7 @@ def get_spec_matrix(X, y, num_classes):
         I = (~(y.unsqueeze(1) == torch.arange(num_classes).type_as(y).unsqueeze(0)))
         c = (c[I].view(X.size(0), num_classes - 1, num_classes))
     return c
+
 
 def unravel_index(
     indices: torch.LongTensor,
@@ -274,14 +301,19 @@ def unravel_index(
 
     return list(reversed(coord))
 
-def get_A_shape(A):
-    if A is None:
-        return 'None'
-    if isinstance(A, Patches):
-        if A.patches is not None:
-            return A.patches.shape
-        else:
-            return A.shape
-    if isinstance(A, torch.Tensor):
-        return A.shape
-    return 'Unknown'
+
+def fill_template(out, template):
+    if template is None:
+        return out.popleft()
+    elif isinstance(template, (list, tuple)):
+        res = []
+        for t in template:
+            res.append(fill_template(t))
+        return tuple(res) if isinstance(template, tuple) else res
+    elif isinstance(template, dict):
+        res = {}
+        for key in template:
+            res[key] = fill_template(template[key])
+        return res
+    else:
+        raise NotImplementedError

@@ -1,7 +1,11 @@
 from .bound_ops import *
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .bound_general import BoundedModule
 
-def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
+
+def build_solver_module(self: 'BoundedModule', x=None, C=None, interm_bounds=None,
                         final_node_name=None, model_type="mip", solver_pkg="gurobi"):
     r"""build lp/mip solvers in general graph.
 
@@ -11,7 +15,7 @@ def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
         C (Tensor): The specification matrix that can map the output of the model with an
         additional linear layer. This is usually used for maping the logits output of the
         model to classification margins.
-        intermediate_layer_bounds: if specified, will replace existing intermediate layer bounds.
+        interm_bounds: if specified, will replace existing intermediate layer bounds.
         Otherwise we reuse exising intermediate bounds.
 
         final_node_name (String): the name for the target layer to optimize
@@ -21,7 +25,7 @@ def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
     Returns:
         output vars (list): a list of final nodes to optimize
     """
-    # self.root_name: list of root node name
+    # self.root_names: list of root node name
     # self.final_name: list of output node name
     # self.final_node: output module
     # <module>.input: a list of input modules of this layer module
@@ -30,24 +34,23 @@ def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
     # if last layer we need to be careful with:
     #       C: specification matrix
     #       <module>.is_input_perturbed(1)
-
     if x is not None:
-        assert intermediate_layer_bounds is not None
+        assert interm_bounds is not None
         # Set the model to use new intermediate layer bounds, ignore the original ones.
-        self._set_input(x, intermediate_layer_bounds=intermediate_layer_bounds)
+        self.set_input(x, interm_bounds=interm_bounds)
 
-    root = [self[name] for name in self.root_name]
+    roots = [self[name] for name in self.root_names]
 
     # create interval ranges for input and other weight parameters
-    for i in range(len(root)):
-        value = root[i].forward()
+    for i in range(len(roots)):
+        value = roots[i].forward()
         # if isinstance(root[i], BoundInput) and not isinstance(root[i], BoundParams):
-        if type(root[i]) is BoundInput:
+        if type(roots[i]) is BoundInput:
             # create input vars for gurobi self.model
-            inp_gurobi_vars = self._build_solver_input(root[i])
+            inp_gurobi_vars = self._build_solver_input(roots[i])
         else:
             # regular weights
-            root[i].solver_vars = value
+            roots[i].solver_vars = value
 
     final = self.final_node() if final_node_name is None else self[final_node_name]
 
@@ -58,10 +61,11 @@ def build_solver_module(self, x=None, C=None, intermediate_layer_bounds=None,
     return final.solver_vars
 
 
-def _build_solver_general(self, node, C=None, model_type="mip", solver_pkg="gurobi"):
+def _build_solver_general(self: 'BoundedModule', node: Bound, C=None, model_type="mip",
+                          solver_pkg="gurobi"):
     if not hasattr(node, 'solver_vars'):
         for n in node.inputs:
-            self._build_solver_general(n, C=C, model_type=model_type, solver_pkg=solver_pkg)
+            self._build_solver_general(n, C=C, model_type=model_type)
         inp = [n_pre.solver_vars for n_pre in node.inputs]
         # print(node, node.inputs)
         if C is not None and isinstance(node, BoundLinear) and\
@@ -70,15 +74,20 @@ def _build_solver_general(self, node, C=None, model_type="mip", solver_pkg="guro
             # merge the last BoundLinear node with the specification,
             # available when weights of this layer are not perturbed
             solver_vars = node.build_solver(*inp, model=self.model, C=C,
-                    model_type=model_type, solver_pkg=solver_pkg)
+                model_type=model_type, solver_pkg=solver_pkg)
         else:
             solver_vars = node.build_solver(*inp, model=self.model, C=None,
                     model_type=model_type, solver_pkg=solver_pkg)
         # just return output node gurobi vars
         return solver_vars
 
+def _reset_solver_vars(self: 'BoundedModule', node: Bound):
+    if hasattr(node, 'solver_vars'):
+        del node.solver_vars
+    for n in node.inputs:
+        self._reset_solver_vars(n)
 
-def _build_solver_input(self, node):
+def _build_solver_input(self: 'BoundedModule', node):
     ## Do the input layer, which is a special case
     assert isinstance(node, BoundInput)
     assert node.perturbation is not None
@@ -86,6 +95,8 @@ def _build_solver_input(self, node):
     inp_gurobi_vars = []
     # zero var will be shared within the solver model
     zero_var = self.model.addVar(lb=0, ub=0, obj=0, vtype=grb.GRB.CONTINUOUS, name='zero')
+    one_var = self.model.addVar(lb=1, ub=1, obj=0, vtype=grb.GRB.CONTINUOUS, name='one')
+    neg_one_var = self.model.addVar(lb=-1, ub=-1, obj=0, vtype=grb.GRB.CONTINUOUS, name='neg_one')
     x_L = node.value - node.perturbation.eps if node.perturbation.x_L is None else node.perturbation.x_L
     x_U = node.value + node.perturbation.eps if node.perturbation.x_U is None else node.perturbation.x_U
     x_L = x_L.squeeze(0)

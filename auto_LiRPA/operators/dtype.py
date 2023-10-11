@@ -1,25 +1,27 @@
-from .base import * 
+from .base import *
 from ..utils import Patches
 
 class BoundCast(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.to = attr['to']
+        # See values of enum DataType in TensorProto.
+        # Unsupported: str, uint16, uint32, uint64.
         self.data_types = [
             None,  torch.float, torch.uint8, torch.int8,
             None,  torch.int16, torch.int32, torch.int64,
-            None,  torch.bool, torch.float16, torch.float32,
-            None,  None
+            None,  torch.bool, torch.float16, torch.float64,
+            None,  None, torch.complex64, torch.complex128
         ]
         self.type = self.data_types[self.to]
-        assert self.type is not None
+        assert self.type is not None, "Unsupported type conversion."
         self.use_default_ibp = True
 
     def forward(self, x):
         self.type_in = x.dtype
         return x.to(self.type)
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         if type(last_lA) == Tensor or type(last_lA) == Tensor:
             lA = last_lA.to(self.type_in) if last_lA is not None else None
             uA = last_uA.to(self.type_in) if last_uA is not None else None

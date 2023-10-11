@@ -39,31 +39,56 @@ def insert_zeros(image, s):
     return matrix
 
 
-def remove_zeros(image, s):
+def remove_zeros(image, s, remove_zero_start_idx=(0,0)):
     if s <= 0:
         return image
     matrix_stride = image.stride()
+    storage_offset = image.storage_offset()
     return torch.as_strided(image, [
         # Shape of the output matrix.
         *image.shape[:-2],
-        (image.size(-2) + 1) // 2,  # H (without zeros)
-        (image.size(-1) + 1) // 2,  # W (without zeros)
+        (image.size(-2) - remove_zero_start_idx[-2] + (s + 1) - 1) // (s + 1),  # H (without zeros)
+        (image.size(-1) - remove_zero_start_idx[-1] + (s + 1) - 1) // (s + 1),  # W (without zeros)
         ], [
         # Stride of the output matrix.
         *matrix_stride[:-2],
         matrix_stride[-2] * (s + 1),  # Move s+1 rows.
         matrix_stride[-1] * (s + 1),  # Move s+1 pixels.
-    ])
+        ],
+        storage_offset + matrix_stride[-2] * remove_zero_start_idx[-2] + matrix_stride[-1] * remove_zero_start_idx[-1]
+    )
 
 
 def unify_shape(shape):
-    """Convert shapes to 4-tuple."""
+    """
+    Convert shapes to 4-tuple: (left, right, top, bottom).
+    """
     if shape is not None:
         if isinstance(shape, int):
+            # Same on all four directions.
             shape = (shape, shape, shape, shape)
         if len(shape) == 2:
+            # (height direction, width direction).
             shape = (shape[1], shape[1], shape[0], shape[0])
         assert len(shape) == 4
+    # Returned: (left, right, top, bottom).
+    return shape
+
+
+def simplify_shape(shape):
+    """
+    Convert shapes to 2-tuple or a single number.
+    Used to avoid extra padding operation because the padding
+    operation in F.conv2d is not general enough.
+    """
+    if len(shape) == 4:
+        # 4-tuple: (left, right, top, bottom).
+        if shape[0] == shape[1] and shape[2] == shape[3]:
+            shape = (shape[2], shape[0])
+    if len(shape) == 2:
+        # 2-tuple: (height direction, width direction).
+        if shape[0] == shape[1]:
+            shape = shape[0]
     return shape
 
 
@@ -146,6 +171,14 @@ class Patches:
                 output_shape=self.output_shape, unstable_idx=self.unstable_idx)
             return A1_matrix.transpose(0, 1) + matrix
 
+    def __str__(self):
+        return (
+                f"Patches(stride={self.stride}, padding={self.padding}, "
+                f"output_padding={self.output_padding}, inserted_zeros={self.inserted_zeros}, "
+                f"kernel_shape={list(self.patches.shape)}, input_shape={self.input_shape}, "
+                f"output_shape={self.output_shape}, unstable_idx={type(self.unstable_idx)})"
+        )
+
     @property
     def device(self):
         if self.patches is not None:
@@ -164,12 +197,15 @@ class Patches:
         Create a new Patches object with new patches weights, and keep other properties the same.
         """
         new_patches = self.patches if patches is None else patches
+        new_identity = self.identity if identity is None else identity
+        if new_identity and (new_patches is not None):
+            raise ValueError("Identity Patches should have .patches property set to 0.")
         return Patches(
             new_patches,
             stride=self.stride if stride is None else stride,
             padding=self.padding if padding is None else padding,
             shape=new_patches.shape,
-            identity=self.identity if identity is None else identity,
+            identity=new_identity,
             unstable_idx=self.unstable_idx if unstable_idx is None else unstable_idx,
             output_shape=self.output_shape if output_shape is None else output_shape,
             inserted_zeros=self.inserted_zeros if inserted_zeros is None else inserted_zeros,
@@ -178,23 +214,35 @@ class Patches:
         )
 
     def to_matrix(self, input_shape):
-        assert self.inserted_zeros == 0
         assert not is_shape_used(self.output_padding)
-        return patches_to_matrix(self.patches, input_shape, self.stride, self.padding, self.output_shape, self.unstable_idx)
+        return patches_to_matrix(
+            self.patches, input_shape, self.stride, self.padding,
+            self.output_shape, self.unstable_idx, self.inserted_zeros
+        )
 
     def simplify(self):
         """Merge stride and inserted_zeros; if they are the same they can cancel out."""
         stride = [self.stride, self.stride] if isinstance(self.stride, int) else self.stride
-        if self.inserted_zeros > 0 and self.inserted_zeros + 1 == stride[0] and stride[0] == stride[1]:
+        if (self.inserted_zeros > 0 and self.inserted_zeros + 1 == stride[0] and
+                stride[0] == stride[1] and (self.patches.size(-1) % stride[1]) == 0 and (self.patches.size(-2) % stride[0]) == 0):
             # print(f'before simplify: patches={self.patches.size()} padding={self.padding}, stride={self.stride}, output_padding={self.output_padding}, inserted_zeros={self.inserted_zeros}')
             full_stride = [stride[1], stride[1], stride[0], stride[0]]
             # output_padding = tuple(p // s for p, s in zip(output_padding, full_stride))
-            self.padding = tuple(p // s - o for p, s, o in zip(self.padding, full_stride, unify_shape(self.output_padding)))
-            self.patches = remove_zeros(self.patches, self.inserted_zeros)
-            self.stride = 1
-            self.inserted_zeros = 0
-            self.output_padding = 0
-            # print(f'after simplify: patches={self.patches.size()} padding={self.padding}, stride={self.stride}, output_padding={self.output_padding}, inserted_zeros={self.inserted_zeros}')
+            padding = unify_shape(self.padding)
+            # since inserted_zero will not put zeros to both end, like [x 0 0 x 0 0 x] instead of [x 0 0 x 0 0 x 0 0]
+            # when computing the simplified padding, we should view (inserted_zeros-1) padding entries from one end side
+            # as part of the inserted_zero matrices (i.e., "consumed")
+            consumed_padding = (padding[0], padding[1] - (stride[1] - 1), padding[2], padding[3] - (stride[0] - 1))
+            tentative_padding = tuple(p // s - o for p, s, o in zip(consumed_padding, full_stride, unify_shape(self.output_padding)))
+            # negative padding is inconvenient
+            if all([p >= 0 for p in tentative_padding]):
+                remove_zero_start_idx = (padding[2] % stride[0], padding[0] % stride[1])
+                self.padding = tentative_padding
+                self.patches = remove_zeros(self.patches, self.inserted_zeros, remove_zero_start_idx=remove_zero_start_idx)
+                self.stride = 1
+                self.inserted_zeros = 0
+                self.output_padding = 0
+                # print(f'after simplify: patches={self.patches.size()} padding={self.padding}, stride={self.stride}, output_padding={self.output_padding}, inserted_zeros={self.inserted_zeros}')
 
     def matmul(self, input, patch_abs=False, input_shape=None):
         """
@@ -269,7 +317,8 @@ def compute_patches_stride_padding(input_shape, patches_padding, patches_stride,
     return new_padding, new_stride, new_output_padding
 
 
-def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None, unstable_idx=None):
+def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
+                      unstable_idx=None, inserted_zeros=0):
     """Converting a Patches piece into a full dense matrix."""
     if type(padding) == int:
         padding = (padding, padding, padding, padding)
@@ -291,6 +340,9 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None, u
         output_channel, output_x, output_y = output_shape[1:]
     input_channel, kernel_x, kernel_y = pieces.shape[-3:]
     input_x, input_y = input_shape[-2:]
+
+    if inserted_zeros > 0:
+        input_x, input_y = (input_x - 1) * (inserted_zeros + 1) + 1, (input_y - 1) * (inserted_zeros + 1) + 1
 
     if unstable_idx is None:
         # Fix all patches in a full A matrix.
@@ -324,6 +376,9 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None, u
         A_matrix = A_matrix.view(batch_size, unstable_size, input_channel, input_x + padding[2] + padding[3], input_y + padding[0] + padding[1])
 
     A_matrix = A_matrix[:,:,:,padding[2]:input_x + padding[2],padding[0]:input_y + padding[0]]
+
+    if inserted_zeros > 0:
+        A_matrix = A_matrix[:,:,:, ::(inserted_zeros+1), ::(inserted_zeros+1)]
 
     return A_matrix
 
@@ -394,7 +449,6 @@ def inplace_unfold(image, kernel_size, stride=1, padding=0, inserted_zeros=0, ou
     # Output shape is (batch_size, patches_h, patches_w, channel, kernel_height, kernel_width)
     if sum(output_padding) > 0:
       output_padding = tuple(p if p > 0 else None for p in output_padding)
-      output_padding = (output_padding)
       matrix_strided = matrix_strided[:, output_padding[2]:-output_padding[3] if output_padding[3] is not None else None,
                                       output_padding[0]:-output_padding[1] if output_padding[1] is not None else None, :, :, :]
     return matrix_strided
@@ -431,9 +485,11 @@ def maybe_unfold_patches(d_tensor, last_A, alpha_lookup_idx=None):
     d_unfolded_r = d_unfolded.view(*d_shape[:-3], *d_unfolded.shape[1:])
     if last_A.unstable_idx is not None:
         # Here we have d for all output neurons, but we only need to select unstable ones.
-        if d_unfolded_r.size(0) == 1:
+        if d_unfolded_r.size(0) == 1 and alpha_lookup_idx is None:
             # Shared alpha, spasre alpha should not be used.
-            assert alpha_lookup_idx is None
+            # Note: only d_unfolded_r.size(0) == 1 cannot judge that it is a shared alpha,
+            #   since the activation may have no unstable neuron at all so
+            #   the first dim = 1 + # unstable neuron still equals to 1
             if len(last_A.unstable_idx) == 3:
                 # Broadcast the spec shape, so only need to select the rest dimensions.
                 # Change shape to (out_h, out_w, batch, in_c, H, W) or (out_h, out_w, in_c, H, W).
@@ -512,3 +568,34 @@ def maybe_unfold_patches(d_tensor, last_A, alpha_lookup_idx=None):
         # the out_h, out_w dimension and out_c = 1 (sepc). We added 1s for the out_h, out_w dimensions.
         d_unfolded_r = d_unfolded_r.unsqueeze(2).unsqueeze(-4)
     return d_unfolded_r
+
+def create_valid_mask(output_shape, device, dtype, kernel_size, stride, inserted_zeros, padding, output_padding,
+                      unstable_idx=None):
+    """
+        Create a 0-1 mask of patch pieces shape (except batch dim),
+        where 1 indicates the cells corresponding to valid image pixels
+        Can be used to mask out unused A cells
+    :return: tensor of batch pieces shape, containing the binary mask
+    """
+    one_d = torch.ones(
+        tuple(1 for i in output_shape[1:]),
+        device=device, dtype=dtype
+    ).expand(output_shape[1:])
+    # Add batch dimension.
+    one_d = one_d.unsqueeze(0)
+    # After unfolding, the shape is (1, out_h, out_w, in_c, h, w)
+    one_d_unfolded = inplace_unfold(
+        one_d, kernel_size=kernel_size,
+        stride=stride, padding=padding,
+        inserted_zeros=inserted_zeros,
+        output_padding=output_padding)
+    if unstable_idx is not None:
+        # Move out_h, out_w dimension to the front for easier selection.
+        ans = one_d_unfolded.permute(1, 2, 0, 3, 4, 5)
+        # for sparse patches the shape is (unstable_size, batch, in_c, h, w).
+        # Batch size is 1 so no need to select here.
+        ans = ans[unstable_idx[1], unstable_idx[2]]
+    else:
+        # Append the spec dimension.
+        ans = one_d_unfolded.unsqueeze(0)
+    return ans

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -98,7 +98,7 @@ class ResNet5(nn.Module):
         out = self.layer1(out)
         if self.last_layer == "avg":
             out = self.avg2d(out)
-            out = out.view(out.size(0), -1)
+            out = torch.flatten(out, 1)
             out = self.linear(out)
         elif self.last_layer == "dense":
             out = torch.flatten(out, 1)
@@ -144,7 +144,7 @@ class ResNet9(nn.Module):
         out = self.layer2(out)
         if self.last_layer == "avg":
             out = self.avg2d(out)
-            out = out.view(out.size(0), -1)
+            out = torch.flatten(out, 1)
             out = self.linear(out)
         elif self.last_layer == "dense":
             out = torch.flatten(out, 1)
@@ -158,6 +158,7 @@ def resnet2b():
 
 def resnet4b():
     return ResNet9(BasicBlock, num_blocks=2, in_planes=16, bn=False, last_layer="dense")
+
 
 if __name__ == '__main__':
     print('ResNet-2B:\n', resnet2b())

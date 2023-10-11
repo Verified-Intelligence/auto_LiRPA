@@ -9,8 +9,8 @@ class TestCase(unittest.TestCase):
     def __init__(self, methodName='runTest', seed=1, ref_path=None, generate=False):
         super().__init__(methodName)
 
-        self.addTypeEqualityFunc(np.ndarray, 'assertArrayEqual')
-        self.addTypeEqualityFunc(torch.Tensor, 'assertTensorEqual')
+        self.addTypeEqualityFunc(np.ndarray, 'assert_array_equal')
+        self.addTypeEqualityFunc(torch.Tensor, 'assert_tensor_equal')
 
         self.set_seed(seed)
         self.ref_path = ref_path
@@ -46,15 +46,25 @@ class TestCase(unittest.TestCase):
         if self.generate:
             self.save()
         else:
-            for i in range(len(self.result)):
-                self.assertEqual(self.result[i], self.reference[i])
+            self.assert_equal(self.result, self.reference)
 
-    def assertArrayEqual(self, a, b, msg=None):
-        self.assertIsInstance(a, np.ndarray, 'First argument is not an np.ndarray')
-        self.assertIsInstance(b, np.ndarray, 'Second argument is not an np.ndarray')
+    def assert_equal(self, a, b):
+        assert type(a) == type(b)
+        if isinstance(a, list):
+            for a_, b_ in zip(a, b):
+                self.assert_equal(a_, b_)
+        elif isinstance(a, tuple):
+            for a_, b_ in zip(a, b):
+                self.assert_equal(a_, b_)
+        elif isinstance(a, np.ndarray):
+            self.assert_array_equal(a, b)
+        elif isinstance(a, torch.Tensor):
+            self.assert_tensor_equal(a, b)
+        else:
+            assert a == b
+
+    def assert_array_equal(self, a, b, msg=None):
         return np.allclose(a, b)
 
-    def assertTensorEqual(self, a, b, msg=None):
-        self.assertIsInstance(a, torch.Tensor, 'First argument is not an torch.Tensor')
-        self.assertIsInstance(b, torch.Tensor, 'Second argument is not an torch.Tensor')
+    def assert_tensor_equal(self, a, b, msg=None):
         return torch.allclose(a, b)

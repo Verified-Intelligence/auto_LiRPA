@@ -1,7 +1,7 @@
 from .base import *
 
 class BoundDropout(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         if 'ratio' in attr:
             self.ratio = attr['ratio']
@@ -21,13 +21,14 @@ class BoundDropout(Bound):
         if self.dynamic:
             # Inputs: data, ratio (optional), training_mode (optional)
             # We assume ratio must exist in the inputs.
-            # We ignore training_mode, but will use self.training which can be 
+            # We ignore training_mode, but will use self.training which can be
             # changed after BoundedModule is built.
-            assert inputs[1].dtype == torch.float32
+            assert (inputs[1].dtype == torch.float32 or
+                    inputs[1].dtype == torch.float64)
             self.ratio = inputs[1]
         if self.ratio >= 1:
             raise ValueError('Ratio in dropout should be less than 1')
-        self.mask = torch.rand(x.shape) > self.ratio
+        self.mask = torch.rand(x.shape, device=self.ratio.device) > self.ratio
         return x * self.mask / (1 - self.ratio)
 
     def _check_forward(self):
@@ -36,7 +37,7 @@ class BoundDropout(Bound):
             raise RuntimeError('For a model with dropout in the training mode, '\
                 'a clean forward pass must be called before bound computation')
 
-    def bound_backward(self, last_lA, last_uA, *args):
+    def bound_backward(self, last_lA, last_uA, *args, **kwargs):
         empty_A = [(None, None)] * (len(args) -1)
         if not self.training:
             return [(last_lA, last_uA), *empty_A], 0, 0
@@ -63,7 +64,7 @@ class BoundDropout(Bound):
         if not self.training:
             return v[0]
         self._check_forward()
-        h_L, h_U = v[0] 
+        h_L, h_U = v[0]
         lower = h_L * self.mask / (1 - self.ratio)
         upper = h_U * self.mask / (1 - self.ratio)
         return lower, upper

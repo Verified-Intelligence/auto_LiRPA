@@ -2,19 +2,30 @@
 from .base import *
 import numpy as np
 from .solver_utils import grb
-from ..patches import unify_shape, compute_patches_stride_padding, is_shape_used
+from ..patches import unify_shape, compute_patches_stride_padding, is_shape_used, create_valid_mask
 from .gradient_modules import Conv2dGrad
 
+EPS = 1e-2
 
 class BoundConv(Bound):
-    def __init__(self, attr, inputs, output_index, options):
-        assert (attr['pads'][0] == attr['pads'][2])
-        assert (attr['pads'][1] == attr['pads'][3])
-
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
 
+        if len(attr['kernel_shape']) == 1:
+            # for 1d conv
+            assert (attr['pads'][0] == attr['pads'][1])
+            self.padding = [attr['pads'][0]]
+            self.F_conv = F.conv1d
+            self.conv_dim = 1
+        else:
+            # for 2d conv
+            assert (attr['pads'][0] == attr['pads'][2])
+            assert (attr['pads'][1] == attr['pads'][3])
+            self.padding = [attr['pads'][0], attr['pads'][1]]
+            self.F_conv = F.conv2d
+            self.conv_dim = 2
+
         self.stride = attr['strides']
-        self.padding = [attr['pads'][0], attr['pads'][1]]
         self.dilation = attr['dilations']
         self.groups = attr['group']
         if len(inputs) == 3:
@@ -32,10 +43,12 @@ class BoundConv(Bound):
     def forward(self, *x):
         # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
         bias = x[2] if self.has_bias else None
-        output = F.conv2d(x[0], x[1], bias, self.stride, self.padding, self.dilation, self.groups)
+
+        output = self.F_conv(x[0], x[1], bias, self.stride, self.padding, self.dilation, self.groups)
+
         return output
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         if self.is_input_perturbed(1):
             raise NotImplementedError(
                 'Weight perturbation for convolution layers has not been implmented.')
@@ -48,67 +61,56 @@ class BoundConv(Bound):
                 return None, 0
             if type(last_A) is OneHotC:
                 # Conv layer does not support the OneHotC fast path. We have to create a dense matrix instead.
-                shape = last_A.shape  # [spec, batch, C, H, W]
-                dim = int(prod(shape[2:]))
-                dense_last_A = torch.zeros(
-                    size=(shape[0], shape[1], dim), device=last_A.device, dtype=weight.dtype)
-                # last_A.index has size (spec, batch), its values are the index of the one-hot non-zero elements in A.
-                # last_A.coeffs is the value of the non-zero element.
-                dense_last_A = torch.scatter(
-                    dense_last_A, dim=2, index=last_A.index.unsqueeze(-1),
-                    src=last_A.coeffs.unsqueeze(-1))
-                # We created a large A matrix and it will be handled below.
-                last_A = dense_last_A.view(shape[0], shape[1], *shape[2:])
+                last_A = onehotc_to_dense(last_A, dtype=weight.dtype)
 
             if type(last_A) == Tensor:
                 shape = last_A.size()
                 # when (W−F+2P)%S != 0, construct the output_padding
-                output_padding0 = (
-                    int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 *
-                    self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0]))
-                output_padding1 = (
-                    int(self.input_shape[3]) - (int(self.output_shape[3]) - 1) * self.stride[1] + 2 *
-                    self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0]))
-                next_A = F.conv_transpose2d(
-                    last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
-                    stride=self.stride, padding=self.padding, dilation=self.dilation,
-                    groups=self.groups, output_padding=(output_padding0, output_padding1))
+                if self.conv_dim == 2:
+                    output_padding0 = (
+                        int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 *
+                        self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0]))
+                    output_padding1 = (
+                        int(self.input_shape[3]) - (int(self.output_shape[3]) - 1) * self.stride[1] + 2 *
+                        self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0]))
+                    next_A = F.conv_transpose2d(
+                        last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
+                        stride=self.stride, padding=self.padding, dilation=self.dilation,
+                        groups=self.groups, output_padding=(output_padding0, output_padding1))
+                else:
+                    # for 1d conv, we use conv_transpose1d()
+                    output_padding = (
+                            int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 *
+                            self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0]))
+                    next_A = F.conv_transpose1d(
+                        last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
+                        stride=self.stride, padding=self.padding, dilation=self.dilation,
+                        groups=self.groups, output_padding=output_padding)
+
                 next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
                 if self.has_bias:
                     # sum_bias = (last_A.sum((3, 4)) * x[2].lower).sum(2)
-                    sum_bias = torch.einsum('sbchw,c->sb', last_A, x[2].lower)
+                    sum_bias = torch.einsum('sbc...,c->sb', last_A, x[2].lower)
                 else:
                     sum_bias = 0
                 return next_A, sum_bias
             elif type(last_A) == Patches:
                 # Here we build and propagate a Patch object with (patches, stride, padding)
+                assert self.conv_dim == 2, 'Patches mode not supports conv1d so far.'
                 assert type(last_A) == Patches
                 if last_A.identity == 0:
                     # FIXME (09/20): Don't call it relu_followed. Instead, make this a property of A, called "padded" and propagate this property.
                     if not self.relu_followed:
                         # The last_A.patches was not padded, so we need to pad them here.
                         # If this Conv layer is followed by a ReLU layer, then the padding was already handled there and there is no need to pad again.
-                        one_d = torch.ones(
-                            tuple(1 for i in self.output_shape[1:]),
-                            device=last_A.patches.device, dtype=weight.dtype
-                        ).expand(self.output_shape[1:])
-                        # Add batch dimension.
-                        one_d = one_d.unsqueeze(0)
-                        # After unfolding, the shape is (1, out_h, out_w, in_c, h, w)
-                        one_d_unfolded = inplace_unfold(
-                            one_d, kernel_size=last_A.patches.shape[-2:],
-                            stride=last_A.stride, padding=last_A.padding,
-                            inserted_zeros=last_A.inserted_zeros,
-                            output_padding=last_A.output_padding)
-                        if last_A.unstable_idx is not None:
-                            # Move out_h, out_w dimension to the front for easier selection.
-                            one_d_unfolded_r = one_d_unfolded.permute(1, 2, 0, 3, 4, 5)
-                            # for sparse patches the shape is (unstable_size, batch, in_c, h, w).
-                            # Batch size is 1 so no need to select here.
-                            one_d_unfolded_r = one_d_unfolded_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
-                        else:
-                            # Append the spec dimension.
-                            one_d_unfolded_r = one_d_unfolded.unsqueeze(0)
+                        one_d_unfolded_r = create_valid_mask(self.output_shape, last_A.patches.device,
+                                                             weight.dtype,
+                                                             last_A.patches.shape[-2:],
+                                                             last_A.stride,
+                                                             last_A.inserted_zeros,
+                                                             last_A.padding,
+                                                             last_A.output_padding,
+                                                             last_A.unstable_idx if last_A.unstable_idx else None)
                         patches = last_A.patches * one_d_unfolded_r
                     else:
                         patches = last_A.patches
@@ -185,12 +187,12 @@ class BoundConv(Bound):
                         sum_bias = sum_bias.reshape(sum_bias.size(0), -1).transpose(0,1)
                     A_matrix = A_matrix.transpose(0,1)  # Spec dimension at the front.
                     return A_matrix, sum_bias
-                # print(f'Conv returns patches with size={pieces.size()}, stride={stride}, padding={padding}, inserted_zeros={inserted_zeros}, output_padding={output_padding}')
-                return Patches(pieces, stride, padding, pieces.shape,
-                               unstable_idx=last_A.unstable_idx,
-                               output_shape=last_A.output_shape,
-                               inserted_zeros=last_A.inserted_zeros,
-                               output_padding=output_padding), sum_bias
+                new_patches = last_A.create_similar(
+                        pieces, stride=stride, padding=padding, output_padding=output_padding,
+                        identity=0, input_shape=self.input_shape)
+                # if last_A is last_lA:
+                #     print(f'Conv : start_node {kwargs["start_node"].name} layer {self.name} {new_patches}')
+                return new_patches, sum_bias
             else:
                 raise NotImplementedError()
 
@@ -212,8 +214,8 @@ class BoundConv(Bound):
         out_lbs, out_ubs = None, None
         if hasattr(self, "lower"):
             # self.lower shape (1,8,16,16)
-            out_lbs = self.lower.cpu().numpy()
-            out_ubs = self.upper.cpu().numpy()
+            out_lbs = self.lower.detach().cpu().numpy()
+            out_ubs = self.upper.detach().cpu().numpy()
 
         # current layer weight (8,3,4,4)
         this_layer_weight = v[1].detach().cpu().numpy()
@@ -228,55 +230,102 @@ class BoundConv(Bound):
         new_layer_gurobi_vars = []
         new_layer_gurobi_constrs = []
 
+        # precompute row and column index mappings
+
+        # compute row mapping: from current row to input rows
+        # vectorization of following code:
+        # for out_row_idx in range(this_layer_shape[2]):
+        #     ker_row_min, ker_row_max = 0, weight_shape2
+        #     in_row_idx_min = -padding0 + stride0 * out_row_idx
+        #     in_row_idx_max = in_row_idx_min + weight_shape2 - 1
+        #     if in_row_idx_min < 0:
+        #         ker_row_min = -in_row_idx_min
+        #     if in_row_idx_max >= pre_layer_shape[2]:
+        #         ker_row_max = ker_row_max - in_row_idx_max + pre_layer_shape[2] - 1
+        #     in_row_idx_min, in_row_idx_max = max(in_row_idx_min, 0), min(in_row_idx_max,
+        #                                                                  pre_layer_shape[2] - 1)
+        in_row_idx_mins = np.arange(this_layer_shape[2]) * stride0 - padding0
+        in_row_idx_maxs = in_row_idx_mins + weight_shape2 - 1
+        ker_row_mins = np.zeros(this_layer_shape[2], dtype=int)
+        ker_row_maxs = np.ones(this_layer_shape[2], dtype=int) * weight_shape2
+        ker_row_mins[in_row_idx_mins < 0] = -in_row_idx_mins[in_row_idx_mins < 0]
+        ker_row_maxs[in_row_idx_maxs >= pre_layer_shape[2]] = \
+            ker_row_maxs[in_row_idx_maxs >= pre_layer_shape[2]] - in_row_idx_maxs[in_row_idx_maxs >= pre_layer_shape[2]]\
+            + pre_layer_shape[2] - 1
+        in_row_idx_mins = np.maximum(in_row_idx_mins, 0)
+        in_row_idx_maxs = np.minimum(in_row_idx_maxs, pre_layer_shape[2] - 1)
+
+        # compute column mapping: from current column to input columns
+        # vectorization of following code:
+        # for out_col_idx in range(this_layer_shape[3]):
+        #     ker_col_min, ker_col_max = 0, weight_shape3
+        #     in_col_idx_min = -padding1 + stride1 * out_col_idx
+        #     in_col_idx_max = in_col_idx_min + weight_shape3 - 1
+        #     if in_col_idx_min < 0:
+        #         ker_col_min = -in_col_idx_min
+        #     if in_col_idx_max >= pre_layer_shape[3]:
+        #         ker_col_max = ker_col_max - in_col_idx_max + pre_layer_shape[3] - 1
+        #     in_col_idx_min, in_col_idx_max = max(in_col_idx_min, 0), min(in_col_idx_max,
+        #                                                                  pre_layer_shape[3] - 1)
+        in_col_idx_mins = np.arange(this_layer_shape[3]) * stride1 - padding1
+        in_col_idx_maxs = in_col_idx_mins + weight_shape3 - 1
+        ker_col_mins = np.zeros(this_layer_shape[3], dtype=int)
+        ker_col_maxs = np.ones(this_layer_shape[3], dtype=int) * weight_shape3
+        ker_col_mins[in_col_idx_mins < 0] = -in_col_idx_mins[in_col_idx_mins < 0]
+        ker_col_maxs[in_col_idx_maxs >= pre_layer_shape[3]] = \
+            ker_col_maxs[in_col_idx_maxs >= pre_layer_shape[3]] - in_col_idx_maxs[in_col_idx_maxs >= pre_layer_shape[3]]\
+            + pre_layer_shape[3] - 1
+        in_col_idx_mins = np.maximum(in_col_idx_mins, 0)
+        in_col_idx_maxs = np.minimum(in_col_idx_maxs, pre_layer_shape[3] - 1)
+
         neuron_idx = 0
         for out_chan_idx in range(this_layer_shape[1]):
             out_chan_vars = []
             for out_row_idx in range(this_layer_shape[2]):
                 out_row_vars = []
-                for out_col_idx in range(this_layer_shape[3]):
-                    # print(this_layer_bias.shape, out_chan_idx, out_lbs.size(1))
-                    lin_expr = 0
-                    if self.has_bias:
-                        lin_expr = this_layer_bias[out_chan_idx]
 
+                # get row index range from precomputed arrays
+                ker_row_min, ker_row_max = ker_row_mins[out_row_idx], ker_row_maxs[out_row_idx]
+                in_row_idx_min, in_row_idx_max = in_row_idx_mins[out_row_idx], in_row_idx_maxs[out_row_idx]
+
+                for out_col_idx in range(this_layer_shape[3]):
+
+                    # get col index range from precomputed arrays
+                    ker_col_min, ker_col_max = ker_col_mins[out_col_idx], ker_col_maxs[out_col_idx]
+                    in_col_idx_min, in_col_idx_max = in_col_idx_mins[out_col_idx], in_col_idx_maxs[out_col_idx]
+
+                    # init linear expression
+                    lin_expr = this_layer_bias[out_chan_idx] if self.has_bias else 0
+
+                    # init linear constraint LHS implied by the conv operation
                     for in_chan_idx in range(this_layer_weight.shape[1]):
 
-                        # new version of conv layer for building mip by skipping kernel loops
-                        ker_row_min, ker_row_max = 0, weight_shape2
-                        in_row_idx_min = -padding0 + stride0 * out_row_idx
-                        in_row_idx_max = in_row_idx_min + weight_shape2 - 1
-                        if in_row_idx_min < 0:
-                            ker_row_min = -in_row_idx_min
-                        if in_row_idx_max >= pre_layer_shape[2]:
-                            ker_row_max = ker_row_max - in_row_idx_max + pre_layer_shape[2] -1
-                        in_row_idx_min, in_row_idx_max = max(in_row_idx_min, 0), min(in_row_idx_max, pre_layer_shape[2] - 1)
-
-                        ker_col_min, ker_col_max = 0, weight_shape3
-                        in_col_idx_min = -padding1 + stride1 * out_col_idx
-                        in_col_idx_max = in_col_idx_min + weight_shape3 - 1
-                        if in_col_idx_min < 0:
-                            ker_col_min = -in_col_idx_min
-                        if in_col_idx_max >= pre_layer_shape[3]:
-                            ker_col_max = ker_col_max - in_col_idx_max + pre_layer_shape[3] -1
-                        in_col_idx_min, in_col_idx_max = max(in_col_idx_min, 0), min(in_col_idx_max, pre_layer_shape[3] - 1)
-
                         coeffs = this_layer_weight[out_chan_idx, in_chan_idx, ker_row_min:ker_row_max, ker_col_min:ker_col_max].reshape(-1)
-
                         gvars = gvars_array[in_chan_idx, in_row_idx_min:in_row_idx_max+1, in_col_idx_min:in_col_idx_max+1].reshape(-1)
                         if solver_pkg == 'gurobi':
                             lin_expr += grb.LinExpr(coeffs, gvars)
                         else:
-                            # lin_expr += coeffs@gvars
-
                             for i in range(len(coeffs)):
                                 try:
                                     lin_expr += coeffs[i] * gvars[i]
                                 except TypeError:
                                     lin_expr += coeffs[i] * gvars[i].var
 
-
+                    # init potential lb and ub, which helps solver to finish faster
                     out_lb = out_lbs[0, out_chan_idx, out_row_idx, out_col_idx] if out_lbs is not None else -float('inf')
                     out_ub = out_ubs[0, out_chan_idx, out_row_idx, out_col_idx] if out_ubs is not None else float('inf')
+                    if out_ub - out_lb < EPS:
+                        """
+                            If the inferred lb and ub are too close, it could lead to floating point disagreement
+                            between solver's inferred lb and ub constraints and the computed ones from ab-crown.
+                            Such disagreement can lead to "infeasible" result from the solver for feasible problem.
+                            To avoid so, we relax the box constraints.
+                            This should not affect the solver's result correctness,
+                            since the tighter lb and ub can be inferred by the solver.
+                        """
+                        out_lb, out_ub = (out_lb + out_ub - EPS) / 2., (out_lb + out_ub + EPS) / 2.
+
+                    # add the output var and constraint
                     var = model.addVar(lb=out_lb, ub=out_ub,
                                             obj=0, vtype=grb.GRB.CONTINUOUS,
                                             # name=f'lay{layer_idx}_[{out_chan_idx}, {out_row_idx}, {out_col_idx}]')
@@ -306,16 +355,17 @@ class BoundConv(Bound):
         weight = v[1][0]
         bias = v[2][0] if self.has_bias else None
 
-        if norm == np.inf:
+        if norm == torch.inf:
             mid = (h_U + h_L) / 2.0
             diff = (h_U - h_L) / 2.0
             weight_abs = weight.abs()
-            deviation = F.conv2d(diff, weight_abs, None, self.stride, self.padding, self.dilation, self.groups)
+            deviation = self.F_conv(diff, weight_abs, None, self.stride, self.padding, self.dilation, self.groups)
         elif norm > 0:
             norm, eps = Interval.get_perturbation(v[0])
             # L2 norm, h_U and h_L are the same.
             mid = h_U
             # TODO: padding
+            assert not isinstance(eps, torch.Tensor) or eps.numel() == 1
             deviation = torch.mul(weight, weight).sum((1, 2, 3)).sqrt() * eps
             deviation = deviation.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         else: # Here we calculate the L0 norm IBP bound using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
@@ -326,14 +376,14 @@ class BoundConv(Bound):
             deviation = torch.sum(torch.topk(weight_sum.view(weight_sum.shape[0], -1), k)[0], dim=1) * ratio
 
             if self.has_bias:
-                center = F.conv2d(mid, weight, v[2][0], self.stride, self.padding, self.dilation, self.groups)
+                center = self.F_conv(mid, weight, v[2][0], self.stride, self.padding, self.dilation, self.groups)
             else:
-                center = F.conv2d(mid, weight, None, self.stride, self.padding, self.dilation, self.groups)
+                center = self.F_conv(mid, weight, None, self.stride, self.padding, self.dilation, self.groups)
 
             ss = center.shape
             deviation = deviation.repeat(ss[2] * ss[3]).view(-1, ss[1]).t().view(ss[1], ss[2], ss[3])
 
-        center = F.conv2d(mid, weight, bias, self.stride, self.padding, self.dilation, self.groups)
+        center = self.F_conv(mid, weight, bias, self.stride, self.padding, self.dilation, self.groups)
 
         upper = center + deviation
         lower = center - deviation
@@ -357,12 +407,12 @@ class BoundConv(Bound):
             if input.device != torch.device('cpu') and input.shape[0] > max_batch_size:
                 ret = []
                 for i in range((input.shape[0] + max_batch_size - 1) // max_batch_size):
-                    ret.append(F.conv2d(
+                    ret.append(self.F_conv(
                         input[i*max_batch_size:(i+1)*max_batch_size],
                         weight, bias, stride, padding, dilation, groups))
                 return torch.cat(ret, dim=0)
             else:
-                return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
+                return self.F_conv(input, weight, bias, stride, padding, dilation, groups)
         w_new = conv2d(
             w.reshape(shape_wconv), weight, None, self.stride, self.padding,
             self.dilation, self.groups)
@@ -386,16 +436,16 @@ class BoundConv(Bound):
         weight_abs = weight.abs()
         shape = mid_w.shape
         shape_wconv = [shape[0] * shape[1]] + list(shape[2:])
-        deviation_w = F.conv2d(
+        deviation_w = self.F_conv(
             diff_w.reshape(shape_wconv), weight_abs, None,
             self.stride, self.padding, self.dilation, self.groups)
-        deviation_b = F.conv2d(
+        deviation_b = self.F_conv(
             diff_b, weight_abs, None,
             self.stride, self.padding, self.dilation, self.groups)
-        center_w = F.conv2d(
+        center_w = self.F_conv(
             mid_w.reshape(shape_wconv), weight, None,
             self.stride, self.padding, self.dilation, self.groups)
-        center_b = F.conv2d(
+        center_b = self.F_conv(
             mid_b, weight, bias,
             self.stride, self.padding, self.dilation, self.groups)
         deviation_w = deviation_w.reshape(shape[0], -1, *deviation_w.shape[1:])
@@ -413,9 +463,12 @@ class BoundConv(Bound):
             self.dilation, self.groups)
         return node_grad, (grad_upstream,), []
 
+    def update_requires_input_bounds(self):
+        self._check_weight_perturbation()
+
 
 class BoundConvTranspose(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         assert (attr['pads'][0] == attr['pads'][2])
         assert (attr['pads'][1] == attr['pads'][3])
@@ -425,16 +478,18 @@ class BoundConvTranspose(Bound):
         self.dilation = attr['dilations']
         self.groups = attr['group']
         self.output_padding = [attr.get('output_padding', [0, 0])[0], attr.get('output_padding', [0, 0])[1]]
+        assert len(attr['kernel_shape']) == 2  # 2d transposed convolution.
         if len(inputs) == 3:
             self.has_bias = True
         else:
             self.has_bias = False
         self.mode = options.get("conv_mode", "matrix")
         assert self.output_padding == [0, 0]
-        assert self.padding == [0, 0]
         assert self.dilation == [1, 1]
         assert self.stride[0] == self.stride[1]
         assert self.groups == 1
+
+        self.F_convtranspose = F.conv_transpose2d
 
     def forward(self, *x):
         # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
@@ -443,7 +498,7 @@ class BoundConvTranspose(Bound):
         return output
 
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         if self.is_input_perturbed(1):
             raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
 
@@ -456,14 +511,7 @@ class BoundConvTranspose(Bound):
                 return None, 0
             if type(last_A) is OneHotC:
                 # Conv layer does not support the OneHotC fast path. We have to create a dense matrix instead.
-                shape = last_A.shape  # [spec, batch, C, H, W]
-                dim = int(prod(shape[2:]))
-                dense_last_A = torch.zeros(size=(shape[0], shape[1], dim), device=last_A.device, dtype=weight.dtype)
-                # last_A.index has size (spec, batch), its values are the index of the one-hot non-zero elements in A.
-                # last_A.coeffs is the value of the non-zero element.
-                dense_last_A = torch.scatter(dense_last_A, dim=2, index=last_A.index.unsqueeze(-1), src=last_A.coeffs.unsqueeze(-1))
-                # We created a large A matrix and it will be handled below.
-                last_A = dense_last_A.view(shape[0], shape[1], *shape[2:])
+                last_A = onehotc_to_dense(last_A, dtype=weight.dtype)
 
             if type(last_A) == Tensor:
                 shape = last_A.size()
@@ -495,7 +543,12 @@ class BoundConvTranspose(Bound):
                     flattened_patches = patches.reshape(-1, patches.size(-3), patches.size(-2), patches.size(-1))
                     # Merge patches with this layer's weights. Weight must be flipped here; and if stride != 1, we must insert zeros in the input image.
                     # For conv_transpose2d, the weight matrix is in the (in, out, k, k) shape.
-                    pieces = F.conv_transpose2d(flattened_patches, weight.transpose(0,1).flip(-1,-2), stride=last_A.inserted_zeros + 1)
+                    # pieces = F.conv_transpose2d(flattened_patches, weight.transpose(0,1).flip(-1,-2), stride=self.stride)
+                    # pieces = F.conv_transpose2d(flattened_patches, weight.transpose(0,1).flip(-1,-2), stride=last_A.inserted_zeros + 1)
+                    # Use padding in conv_transposed2d directly.
+                    pieces = F.conv_transpose2d(
+                            # Transpose because the weight has in_channel before out_channel.
+                            flattened_patches, insert_zeros(weight.transpose(0,1).flip(-1,-2), last_A.inserted_zeros))
                     # New patch size: (out_c, batch, out_h, out_w, c, h, w) or (unstable_size, batch, c, h, w).
                     pieces = pieces.view(*patches.shape[:-3], pieces.size(-3), pieces.size(-2), pieces.size(-1))
 
@@ -512,23 +565,23 @@ class BoundConvTranspose(Bound):
                         sum_bias = x[2].lower.view(-1, 1, 1, 1).expand(-1, *last_A.shape[1:4])
                 else:
                     raise NotImplementedError()
-                padding = last_A.padding if last_A is not None else (0, 0, 0, 0)  # (left, right, top, bottom)
+                patches_padding = last_A.padding if last_A is not None else (0, 0, 0, 0)  # (left, right, top, bottom)
                 output_padding = last_A.output_padding if last_A is not None else (0, 0, 0, 0)  # (left, right, top, bottom)
                 inserted_zeros = last_A.inserted_zeros
-                assert self.padding == [0, 0]
                 assert self.stride[0] == self.stride[1]
 
                 # Unify the shape to 4-tuple.
                 output_padding = unify_shape(output_padding)
-                padding = unify_shape(padding)
+                patches_padding = unify_shape(patches_padding)
                 this_stride = unify_shape(self.stride)
                 this_padding = unify_shape(self.padding)
 
-                # Compute new padding.
-                padding = tuple(p + (weight.size(3 - j//2) - 1) for j, p in enumerate(padding))
+                # Compute new padding. Due to the shape flip during merging, we need to check the string/size on the dimension 3 - j.
+                # TODO: testing for asymmetric shapes.
+                padding = tuple(p * (inserted_zeros + 1) + (weight.size(3 - j//2) - 1) for j, p in enumerate(patches_padding))
 
                 # Compute new output padding
-                output_padding = tuple(p * this_stride[j] + this_padding[j] for j, p in enumerate(output_padding))
+                output_padding = tuple(p * (inserted_zeros + 1) + this_padding[j] for j, p in enumerate(output_padding))
                 # When we run insert_zeros, it's missing the right most column and the bottom row.
                 # padding = (padding[0], padding[1] + inserted_zeros, padding[2], padding[3] + inserted_zeros)
 
@@ -548,8 +601,14 @@ class BoundConvTranspose(Bound):
                         sum_bias = sum_bias.reshape(sum_bias.size(0), -1).transpose(0,1)
                     A_matrix = A_matrix.transpose(0,1)  # Spec dimension at the front.
                     return A_matrix, sum_bias
-                return Patches(pieces, last_A.stride, padding, pieces.shape, unstable_idx=last_A.unstable_idx,
-                        output_shape=last_A.output_shape, inserted_zeros=inserted_zeros, output_padding=output_padding), sum_bias
+                new_patches = last_A.create_similar(
+                        pieces, padding=padding, inserted_zeros=inserted_zeros, output_padding=output_padding,
+                        input_shape=self.input_shape)
+                # if last_A is last_lA:
+                #     print(f'ConvT input : start_node {kwargs["start_node"].name} layer {self.name} {last_lA}')
+                #     print(f'ConvT layer : padding {self.padding} stride {self.stride} kernel {list(weight.shape[-2:])} input {list(self.input_shape)} output {list(self.output_shape)}')
+                #     print(f'ConvT output: start_node {kwargs["start_node"].name} layer {self.name} {new_patches}')
+                return new_patches, sum_bias
             else:
                 raise NotImplementedError()
 
@@ -568,7 +627,7 @@ class BoundConvTranspose(Bound):
         weight = v[1][0]
         bias = v[2][0] if self.has_bias else None
 
-        if norm == np.inf:
+        if norm == torch.inf:
             mid = (h_U + h_L) / 2.0
             diff = (h_U - h_L) / 2.0
             weight_abs = weight.abs()
@@ -590,8 +649,44 @@ class BoundConvTranspose(Bound):
         lower = center - deviation
         return lower, upper
 
+    def bound_forward(self, dim_in, *x):
+        if self.is_input_perturbed(1) or self.is_input_perturbed(2):
+            raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
+
+        weight = x[1].lb
+        bias = x[2].lb if self.has_bias else None
+        x = x[0]
+
+        mid_w = (x.lw + x.uw) / 2
+        mid_b = (x.lb + x.ub) / 2
+        diff_w = (x.uw - x.lw) / 2
+        diff_b = (x.ub - x.lb) / 2
+        weight_abs = weight.abs()
+        shape = mid_w.shape
+        shape_wconv = [shape[0] * shape[1]] + list(shape[2:])
+        deviation_w = self.F_convtranspose(
+            diff_w.reshape(shape_wconv), weight_abs, None, output_padding=self.output_padding,
+            stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+        deviation_b = self.F_convtranspose(
+            diff_b, weight_abs, None, output_padding=self.output_padding,
+            stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+        center_w = self.F_convtranspose(
+            mid_w.reshape(shape_wconv), weight, output_padding=self.output_padding,
+            stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+        center_b = self.F_convtranspose(
+            mid_b, weight, bias, output_padding=self.output_padding,
+            stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+        deviation_w = deviation_w.reshape(shape[0], -1, *deviation_w.shape[1:])
+        center_w = center_w.reshape(shape[0], -1, *center_w.shape[1:])
+
+        return LinearBound(
+            lw = center_w - deviation_w,
+            lb = center_b - deviation_b,
+            uw = center_w + deviation_w,
+            ub = center_b + deviation_b)
+
 class BoundPad(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         if hasattr(attr, 'pads'):
             self.padding = attr['pads'][2:4] + attr['pads'][6:8]
@@ -614,7 +709,7 @@ class BoundPad(Bound):
         l, u = zip(*v)
         return Interval.make_interval(self.forward(*l), self.forward(*u), v[0])
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         # TODO: padding for 3-D or more dimensional inputs.
         left, right, top, bottom = self.padding
         def _bound_oneside(last_A):

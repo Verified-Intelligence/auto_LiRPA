@@ -5,4 +5,4 @@ from .perturbations import PerturbationLpNorm, PerturbationSynonym
 from .wrapper import CrossEntropyWrapper, CrossEntropyWrapperMultiInput
 from .bound_op_map import register_custom_op, unregister_custom_op
 
-__version__ = '0.3.1'
+__version__ = '0.4.0'

@@ -99,13 +99,13 @@ class ResNet(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
         out = F.avg_pool2d(out, 4)
-        out = out.view(out.size(0), -1)
+        out = torch.flatten(out, 1)
         out = self.linear(out)
         return out
 
 def ResNet18(in_planes=64):
     return ResNet(BasicBlock, [2, 2, 2, 2], in_planes=in_planes)
-    
+
 if __name__ == "__main__":
     from thop import profile
     net = ResNet18(in_planes=64)

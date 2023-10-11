@@ -1,8 +1,16 @@
 import torch
 from .bound_ops import *
+from .utils import logger
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .bound_general import BoundedModule
 
 
-def IBP_general(self, node=None, C=None, delete_bounds_after_use=False):
+def IBP_general(self: 'BoundedModule', node=None, C=None,
+                delete_bounds_after_use=False):
+
+    logger.debug('IBP for %s', node)
 
     def _delete_unused_bounds(node_list):
         """Delete bounds from input layers after use to save memory. Used when
@@ -18,9 +26,9 @@ def IBP_general(self, node=None, C=None, delete_bounds_after_use=False):
         if res is not None:
             return res
 
-    if not node.perturbed and hasattr(node, 'forward_value'):
-        node.lower, node.upper = node.interval = (
-            node.forward_value, node.forward_value)
+    if not node.perturbed:
+        fv = self.get_forward_value(node)
+        node.lower, node.upper = node.interval = (fv, fv)
 
     to_be_deleted_bounds = []
     if not hasattr(node, 'interval'):
@@ -56,12 +64,11 @@ def IBP_general(self, node=None, C=None, delete_bounds_after_use=False):
         _delete_unused_bounds(to_be_deleted_bounds)
         return node.interval
 
-def _IBP_loss_fusion(self, node, C):
+def _IBP_loss_fusion(self: 'BoundedModule', node, C):
     """Merge BoundLinear, BoundGatherElements and BoundSub.
 
     Improvement when loss fusion is used in training.
     """
-
     # not using loss fusion
     if not self.bound_opts.get('loss_fusion', False):
         return None
@@ -105,29 +112,40 @@ def _IBP_loss_fusion(self, node, C):
     return None
 
 
-def check_IBP_intermediate(self, node):
+def check_IBP_intermediate(self: 'BoundedModule', node):
     """ Check if we use IBP bounds to compute intermediate bounds on this node.
 
-    We check if we can get bounds by only visiting operators in
-    `self.ibp_intermediate`. Currently, assume all eligible operators have
-    exactly one input.
+    Currently, assume all eligible operators have exactly one input.
     """
+    if (isinstance(node, BoundReshape)
+            and hasattr(node.inputs[0], 'lower')
+            and hasattr(node.inputs[1], 'value')):
+        # Node for input value.
+        val_input = node.inputs[0]
+        # Node for input parameter (e.g., shape, permute)
+        arg_input = node.inputs[1]
+        node.lower = node.forward(val_input.lower, arg_input.value)
+        node.upper = node.forward(val_input.upper, arg_input.value)
+        node.interval = (node.lower, node.upper)
+        return True
 
     nodes = []
-    while not hasattr(node, 'lower') or not hasattr(node, 'upper'):
-        if type(node) not in self.ibp_intermediate:
+    while (getattr(node, 'lower', None) is None
+            or getattr(node, 'upper', None) is None):
+        if not node.ibp_intermediate:
             return False
         assert len(node.inputs) == 1, (
-            'Nodes in self.ibp_intermediate cannot have more than one input')
+            'Nodes with ibp_intermediate=True cannot have more than one input')
         nodes.append(node)
         node = node.inputs[0]  # FIXME: this cannot handle multiple inputs.
     nodes.reverse()
     for n in nodes:
         n.interval = self.IBP_general(n)
+
     return True
 
 
-def check_IBP_first_linear(self, node):
+def check_IBP_first_linear(self: 'BoundedModule', node):
     """Here we avoid creating a big C matrix in the first linear layer.
     Disable this optimization when we have beta for intermediate layer bounds.
     Disable this optimization when we need the A matrix of the first nonlinear

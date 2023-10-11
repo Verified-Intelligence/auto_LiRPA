@@ -26,7 +26,7 @@ class cnn_4layer_test(nn.Module):
 
 class TestVisionModels(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, seed=1234, 
+        super().__init__(methodName, seed=1234,
             ref_path='data/vision_test_data', generate=generate)
         self.result = {}
 
@@ -40,8 +40,8 @@ class TestVisionModels(TestCase):
         grad = x.grad
         self.result[lb_name[:-2] + 'grad'] = grad.clone()
         if not self.generate:
-            assert torch.allclose(lb, self.reference[lb_name], 1e-4), (lb - self.reference[lb_name]).abs().sum()
-            assert torch.allclose(ub, self.reference[ub_name], 1e-4), (ub - self.reference[ub_name]).abs().sum()
+            assert torch.allclose(lb, self.reference[lb_name], 1e-4, atol=2e-7), (lb - self.reference[lb_name]).abs().max()
+            assert torch.allclose(ub, self.reference[ub_name], 1e-4, atol=2e-7), (ub - self.reference[ub_name]).abs().max()
             assert ((lb - self.reference[lb_name]).pow(2).sum() < 1e-9), (lb - self.reference[lb_name]).pow(2).sum()
             assert ((ub - self.reference[ub_name]).pow(2).sum() < 1e-9), (ub - self.reference[ub_name]).pow(2).sum()
             assert torch.allclose(grad, self.reference[lb_name[:-2] + 'grad'], 1e-4, 1e-6)

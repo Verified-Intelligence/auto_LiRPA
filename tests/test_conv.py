@@ -1,18 +1,9 @@
 import torch
-import os
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.perturbations import *  
+from auto_LiRPA.perturbations import *
 from testcase import TestCase
 
-class Flatten(nn.Module):
-    def __init__(self):
-        super(Flatten, self).__init__()
-    
-    def forward(self, x):
-        return x.view((x.shape[0], -1))
 
 class cnn_model(nn.Module):
     def __init__(self, layers, padding, stride, linear=True):
@@ -26,7 +17,7 @@ class cnn_model(nn.Module):
             length = (length + 2 * padding - 4)//stride + 1
             assert length > 0
             self.module_list.append(nn.ReLU())
-        self.module_list.append(Flatten())
+        self.module_list.append(nn.Flatten())
         if linear:
             self.module_list.append(nn.Linear(3 * length * length, 256))
             self.module_list.append(nn.Linear(256, 10))
@@ -36,9 +27,9 @@ class cnn_model(nn.Module):
         x = self.model(x)
         return x
 
-class TestConv(TestCase): 
+class TestConv(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1, ref_path=None,
             generate=generate)
 
@@ -72,13 +63,13 @@ class TestConv(TestCase):
                         lb_ref, ub_ref = model.compute_bounds()
 
                         if linear:
-                            assert lb.shape == ub.shape == torch.Size((N, n_classes))    
+                            assert lb.shape == ub.shape == torch.Size((N, n_classes))
                         self.assertEqual(lb, lb_ref)
                         self.assertEqual(ub, ub_ref)
 
                         if not linear and layer_num == 1:
                             pred = model(image)
-                            lb_forward, ub_forward = model.compute_bounds(method='forward')                        
+                            lb_forward, ub_forward = model.compute_bounds(method='forward')
                             self.assertEqual(lb, lb_forward)
                             self.assertEqual(ub, ub_forward)
 

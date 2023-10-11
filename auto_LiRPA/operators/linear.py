@@ -1,14 +1,19 @@
 """ Linear (possibly with weight perturbation) or Dot product layers """
 from torch import Tensor
+from typing import Tuple, List
+from .activation_base import BoundOptimizableActivation
 from .base import *
-from .bivariate import BoundMul
+from .bivariate import BoundMul, MulHelper
 from .gradient_modules import LinearGrad
+from .leaf import BoundParams
 from ..patches import Patches, inplace_unfold
 from .solver_utils import grb
+from .clampmult import multiply_by_A_signs
 
+EPS = 1e-2
 
-class BoundLinear(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+class BoundLinear(BoundOptimizableActivation):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         # Gemm:
         # A = A if transA == 0 else A.T
         # B = B if transB == 0 else B.T
@@ -21,29 +26,68 @@ class BoundLinear(Bound):
         # Defaults in ONNX
         self.transA = 0
         self.transB = 0
-        self.alpha = 1.0
-        self.beta = 1.0
+        self.alpha_linear = 1.0
+        self.beta_linear = 1.0
         if attr is not None:
             self.transA = attr['transA'] if 'transA' in attr else self.transA
             self.transB = attr['transB'] if 'transB' in attr else self.transB
-            self.alpha = attr['alpha'] if 'alpha' in attr else self.alpha
-            self.beta = attr['beta'] if 'beta' in attr else self.beta
+            self.alpha_linear = attr['alpha'] if 'alpha' in attr else self.alpha_linear
+            self.beta_linear = attr['beta'] if 'beta' in attr else self.beta_linear
 
+        options = options or {}
         self.opt_matmul = options.get('matmul')
+        self.splittable = False
+
+        self.mul_helper = MulHelper()
+        self.use_seperate_weights_for_lower_and_upper_bounds = False
+        self.share_alphas = options.get('matmul', {}).get('share_alphas', False)
 
     def _preprocess(self, a, b, c=None):
         """Handle tranpose and linear coefficients."""
         if self.transA and isinstance(a, Tensor):
             a = a.transpose(-2,-1)
-        if self.alpha != 1.0:
-            a = self.alpha * a
+        if self.alpha_linear != 1.0:
+            a = self.alpha_linear * a
         if not self.transB and isinstance(b, Tensor):
-            # our code assumes B is transposed (common case), so we transpose B only when it is not transposed in gemm.
+            # our code assumes B is transposed (common case), so we transpose B
+            # only when it is not transposed in gemm.
             b = b.transpose(-2, -1)
         if c is not None:
-            if self.beta != 1.0:
-                c = self.beta * c
+            if self.beta_linear != 1.0:
+                c = self.beta_linear * c
         return a, b, c
+
+    def init_opt_parameters(self, start_nodes):
+        shared_alpha_dims = []
+        if self.share_alphas:
+            # TODO Temporarily an adhoc check for alpha sharing.
+            count_matmul = len([item for item in self._all_optimizable_activations
+                                if isinstance(item, BoundLinear)])
+            if count_matmul >= 6:
+                shared_alpha_dims = [1, 2, 3]
+            elif count_matmul >= 4:
+                shared_alpha_dims = [1, 2]
+
+        input_lb = [getattr(xi, 'lower', None) for xi in self.inputs]
+        input_ub = [getattr(xi, 'upper', None) for xi in self.inputs]
+        input_lb = self._preprocess(*input_lb)
+        input_ub = self._preprocess(*input_ub)
+        x_l, x_u, y_l, y_u = self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1])
+        assert x_l.ndim == y_l.ndim
+        shape = [1 if i in shared_alpha_dims
+                 else max(x_l.shape[i], y_l.shape[i]) for i in range(x_l.ndim)]
+        for start_node in start_nodes:
+            ns, size_s = start_node[:2]
+            # start_node[3] == False means that this start node is not the final node
+            # if not start_node[3]:
+            #     # NOTE Experimental code. Please check how it will impact the results.
+            #     size_s = 1
+            if isinstance(size_s, torch.Size):
+                # TODO do not give torch.Size
+                size_s = prod(size_s)
+            elif isinstance(size_s, (list, tuple)):
+                size_s = size_s[0]
+            self.alpha[ns] = torch.ones(4, size_s, *shape, device=x_l.device)
 
     def forward(self, x, w, b=None):
         x, w, b = self._preprocess(x, w, b)
@@ -74,15 +118,23 @@ class BoundLinear(Bound):
         if C.index.ndim == 1:
             # Every element in the batch shares the same rows.
             if weight is not None:
-                new_weight = self.non_deter_index_select(weight, dim=0, index=index).unsqueeze(1).expand([-1, batch_size] + [-1] * (weight.ndim - 1))
+                new_weight = self.non_deter_index_select(
+                    weight, dim=0, index=index
+                ).unsqueeze(1).expand(
+                    [-1, batch_size] + [-1] * (weight.ndim - 1))
             if bias is not None:
-                new_bias = self.non_deter_index_select(bias, dim=0, index=index).unsqueeze(1).expand(-1, batch_size)
+                new_bias = self.non_deter_index_select(
+                    bias, dim=0, index=index
+                ).unsqueeze(1).expand(-1, batch_size)
         elif C.index.ndim == 2:
-            # Every element in the batch has different rows, but the number of rows are the same. This essentially needs a batched index_select function.
+            # Every element in the batch has different rows, but the number of
+            # rows are the same. This essentially needs a batched index_select function.
             if weight is not None:
-                new_weight = batched_index_select(weight.unsqueeze(0), dim=1, index=index)
+                new_weight = batched_index_select(
+                    weight.unsqueeze(0), dim=1, index=index)
             if bias is not None:
-                new_bias = batched_index_select(bias.unsqueeze(0), dim=1, index=index)
+                new_bias = batched_index_select(
+                    bias.unsqueeze(0), dim=1, index=index)
         if C.coeffs is not None:
             if weight is not None:
                 new_weight = new_weight * coeffs.unsqueeze(-1)
@@ -94,8 +146,11 @@ class BoundLinear(Bound):
             new_bias = new_bias.transpose(0, 1)
         return new_weight, new_bias
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, start_node=None,
+                       reduce_bias=True, **kwargs):
         assert len(x) == 2 or len(x) == 3
+        if start_node is not None:
+            self._start = start_node.name
         has_bias = len(x) == 3
         # x[0]: input node, x[1]: weight, x[2]: bias
         input_lb = [getattr(xi, 'lower', None) for xi in x]
@@ -106,103 +161,149 @@ class BoundLinear(Bound):
         lA_y = uA_y = lA_bias = uA_bias = None
         lbias = ubias = 0
         batch_size = last_lA.shape[1] if last_lA is not None else last_uA.shape[1]
+        weight = input_lb[1]
+        bias = input_lb[2] if has_bias else None
+
+        def _bound_oneside(last_A):
+            if last_A is None:
+                return None, 0
+            if isinstance(last_A, torch.Tensor):
+                # Matrix mode.
+                # Just multiply this layer's weight into bound matrices, and produce biases.
+                next_A = last_A.to(weight).matmul(weight)
+                sum_bias = (last_A.to(bias).matmul(bias)
+                    if has_bias else 0.0)
+            elif isinstance(last_A, Patches):
+                # Patches mode. After propagating through this layer, it will become a matrix.
+                # Reshape the weight matrix as a conv image.
+                # Weight was in (linear_output_shape, linear_input_shape)
+                # Reshape it to (linear_input_shape, c, h, w)
+                reshaped_weight = weight.transpose(0, 1).view(
+                    -1, *last_A.input_shape[1:])
+                # After unfolding the shape is
+                # (linear_input_shape, output_h, output_w, in_c, patch_h, patch_w)
+                unfolded_weight = inplace_unfold(
+                    reshaped_weight,
+                    kernel_size=last_A.patches.shape[-2:],
+                    stride=last_A.stride, padding=last_A.padding,
+                    inserted_zeros=last_A.inserted_zeros,
+                    output_padding=last_A.output_padding)
+                if has_bias:
+                    # Do the same for the bias.
+                    reshaped_bias = bias.view(*last_A.input_shape[1:]).unsqueeze(0)
+                    # After unfolding the bias shape is (1, output_h, output_w, in_c, patch_h, patch_w)
+                    unfolded_bias = inplace_unfold(
+                        reshaped_bias, kernel_size=last_A.patches.shape[-2:],
+                        stride=last_A.stride, padding=last_A.padding,
+                        inserted_zeros=last_A.inserted_zeros,
+                        output_padding=last_A.output_padding)
+                if last_A.unstable_idx is not None:
+                    # In this case, the last_A shape is (num_unstable, batch, out_c, patch_h, patch_w)
+                    # Reshape our weight to (output_h, output_w, 1, in_c, patch_h, patch_w, linear_input_shape), 1 is the inserted batch dim.
+                    unfolded_weight_r = unfolded_weight.permute(1, 2, 3, 4, 5, 0).unsqueeze(2)
+                    # for sparse patches the shape is (unstable_size, batch, in_c, patch_h, patch_w). Batch size is 1 so no need to select here.
+                    # We select in the (output_h, out_w) dimension.
+                    selected_weight = unfolded_weight_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
+                    next_A = torch.einsum('sbchw,sbchwi->sbi', last_A.patches, selected_weight)
+                    if has_bias:
+                        # Reshape our bias to (output_h, output_w, 1, in_c, patch_h, patch_w). We already have the batch dim.
+                        unfolded_bias_r = unfolded_bias.permute(1, 2, 0, 3, 4, 5)
+                        selected_bias = unfolded_bias_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
+                        sum_bias = torch.einsum('sbchw,sbchw->sb', last_A.patches, selected_bias)
+                else:
+                    # Reshape our weight to (1, 1, output_h, output_w, in_c, patch_h, patch_w, linear_input_shape), 1 is the spec and batch.
+                    selected_weight = unfolded_weight.permute(1, 2, 3, 4, 5, 0).unsqueeze(0).unsqueeze(0)
+                    next_A_r = torch.einsum('sbpqchw,sbpqchwi->spqbi', last_A.patches, selected_weight)
+                    # We return a matrix with flattened spec dimension (corresponding to out_c * out_h * out_w).
+                    next_A = next_A_r.reshape(-1, next_A_r.size(-2), next_A_r.size(-1))
+                    if has_bias:
+                        # Reshape our bias to (1, 1, output_h, output_w, in_c, patch_h, patch_w)
+                        selected_bias = unfolded_bias.unsqueeze(0)
+                        sum_bias_r = torch.einsum('sbpqchw,sbpqchw->spqb', last_A.patches, selected_bias)
+                        sum_bias = sum_bias_r.reshape(-1, sum_bias_r.size(-1))
+            return next_A, sum_bias if has_bias else 0.0
 
         # Case #1: No weight/bias perturbation, only perturbation on input.
         if not self.is_input_perturbed(1) and (not has_bias or not self.is_input_perturbed(2)):
-            weight = input_lb[1]
-            bias = input_lb[2] if has_bias else None
             # If last_lA and last_uA are indentity matrices.
-            if isinstance(last_lA, eyeC) and isinstance(last_uA, eyeC):  # FIXME (12/28): we should check last_lA and last_uA separately. Same applies to the weight perturbed, bias perturbed settings.
-                # Use this layer's W as the next bound matrices. Duplicate the batch dimension. Other dimensions are kept 1.
-                # Not perturbed, so we can use either lower or upper.
-                assert last_lA.shape == last_uA.shape
-                shape_others = prod(last_lA.shape[2:-1])
-                A_identity = torch.eye(shape_others).to(weight).view(shape_others, 1, 1, shape_others, 1)
-                assert last_lA.shape[0] == weight.size(0) * shape_others
-                w = weight.view(1, weight.size(0), *[1] * (len(last_lA.shape) - 2), weight.size(1))
-                w = w * A_identity
+            # FIXME (12/28): we should check last_lA and last_uA separately.
+            # Same applies to the weight perturbed, bias perturbed settings.
 
-                # expand the batch_size dim
-                lA_x = uA_x = w.view(last_lA.shape[0], 1, *last_lA.shape[2:-1], weight.size(1)).expand(last_lA.shape[0], *last_lA.shape[1:-1], weight.size(1))
-                if has_bias:
-                    lbias = ubias = bias.unsqueeze(1).repeat(1, batch_size)
-            elif isinstance(last_lA, OneHotC) or isinstance(last_uA, OneHotC):
-                # We need to select several rows from the weight matrix (its shape is output_size * input_size).
-                lA_x, lbias = self.onehot_mult(weight, bias, last_lA, batch_size)
-                if last_lA is last_uA:
-                    uA_x = lA_x
-                    ubias = lbias
+            def multiply_with_weight(weight, set_l: bool, set_u: bool):
+                lA_x = uA_x = None
+                lbias = ubias = 0.
+                if isinstance(last_lA, eyeC) and isinstance(last_uA, eyeC):
+                    # Use this layer's W as the next bound matrices. Duplicate the batch dimension. Other dimensions are kept 1.
+                    # Not perturbed, so we can use either lower or upper.
+                    assert last_lA.shape == last_uA.shape
+                    shape_others = prod(last_lA.shape[2:-1])
+                    A_identity = torch.eye(
+                        shape_others, device=weight.device, dtype=weight.dtype
+                    ).view(shape_others, 1, 1, shape_others, 1)
+                    assert last_lA.shape[0] == weight.size(0) * shape_others
+                    w = weight.view(
+                        1, weight.size(0), *[1] * (len(last_lA.shape) - 2),
+                        weight.size(1))
+                    w = w * A_identity
+
+                    # expand the batch_size dim
+                    tmp_A_x = w.reshape(
+                        last_lA.shape[0], 1, *last_lA.shape[2:-1], weight.size(1)
+                    ).expand(last_lA.shape[0], *last_lA.shape[1:-1], weight.size(1))
+                    if set_l:
+                        lA_x = tmp_A_x
+                    if set_u:
+                        uA_x = tmp_A_x
+
+                    if has_bias:
+                        tmp_bias = bias.unsqueeze(1).repeat(1, batch_size)
+                        if set_l:
+                            lbias = tmp_bias
+                        if set_u:
+                            ubias = tmp_bias
+                elif isinstance(last_lA, OneHotC) or isinstance(last_uA, OneHotC):
+                    # We need to select several rows from the weight matrix
+                    # (its shape is output_size * input_size).
+                    if set_l:
+                        lA_x, lbias = self.onehot_mult(weight, bias, last_lA, batch_size)
+                    if last_lA is last_uA and set_l and set_u:
+                        uA_x = lA_x
+                        ubias = lbias
+                    elif set_u:
+                        uA_x, ubias = self.onehot_mult(weight, bias, last_uA, batch_size)
                 else:
-                    uA_x, ubias = self.onehot_mult(weight, bias, last_uA, batch_size)
-            else:
-                def _bound_oneside(last_A):
-                    if last_A is None:
-                        return None, 0
-                    if isinstance(last_A, torch.Tensor):
-                        # Matrix mode.
-                        # Just multiply this layer's weight into bound matrices, and produce biases.
-                        next_A = last_A.to(weight).matmul(weight)
-                        sum_bias = (last_A.to(bias).matmul(bias)
-                            if has_bias else 0.0)
-                    elif isinstance(last_A, Patches):
-                        # Patches mode. After propagating through this layer, it will become a matrix.
-                        # Reshape the weight matrix as a conv image.
-                        # Weight was in (linear_output_shape, linear_input_shape)
-                        # Reshape it to (linear_input_shape, c, h, w)
-                        reshaped_weight = weight.transpose(0,1).view(-1, *last_A.input_shape[1:])
-                        # After unfolding the shape is (linear_input_shape, output_h, output_w, in_c, patch_h, patch_w)
-                        unfolded_weight = inplace_unfold(
-                            reshaped_weight,
-                            kernel_size=last_A.patches.shape[-2:],
-                            stride=last_A.stride, padding=last_A.padding,
-                            inserted_zeros=last_A.inserted_zeros,
-                            output_padding=last_A.output_padding)
-                        if has_bias:
-                            # Do the same for the bias.
-                            reshaped_bias = bias.view(*last_A.input_shape[1:]).unsqueeze(0)
-                            # After unfolding the bias shape is (1, output_h, output_w, in_c, patch_h, patch_w)
-                            unfolded_bias = inplace_unfold(reshaped_bias, kernel_size=last_A.patches.shape[-2:], stride=last_A.stride, padding=last_A.padding, inserted_zeros=last_A.inserted_zeros, output_padding=last_A.output_padding)
-                        if last_A.unstable_idx is not None:
-                            # Reshape our weight to (output_h, output_w, 1, in_c, patch_h, patch_w, linear_input_shape), 1 is the inserted batch dim.
-                            unfolded_weight_r = unfolded_weight.permute(1, 2, 3, 4, 5, 0).unsqueeze(2)
-                            # for sparse patches the shape is (unstable_size, batch, in_c, patch_h, patch_w). Batch size is 1 so no need to select here.
-                            # We select in the (output_h, out_w) dimension.
-                            selected_weight = unfolded_weight_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
-                            next_A = torch.einsum('sbchw,sbchwi->sbi', last_A.patches, selected_weight)
-                            if has_bias:
-                                # Reshape our bias to (output_h, output_w, 1, in_c, patch_h, patch_w). We already have the batch dim.
-                                unfolded_bias_r = unfolded_bias.permute(1, 2, 0, 3, 4, 5)
-                                selected_bias = unfolded_bias_r[last_A.unstable_idx[1], last_A.unstable_idx[2]]
-                                sum_bias = torch.einsum('sbchw,sbchw->sb', last_A.patches, selected_bias)
-                        else:
-                            # Reshape our weight to (1, 1, output_h, output_w, in_c, patch_h, patch_w, linear_input_shape), 1 is the spec and batch.
-                            selected_weight = unfolded_weight.permute(1, 2, 3, 4, 5, 0).unsqueeze(0).unsqueeze(0)
-                            next_A_r = torch.einsum('sbpqchw,sbpqchwi->spqbi', last_A.patches, selected_weight)
-                            # We return a matrix with flattened spec dimension (corresponding to out_c * out_h * out_w).
-                            next_A = next_A_r.reshape(-1, next_A_r.size(-2), next_A_r.size(-1))
-                            if has_bias:
-                                # Reshape our bias to (1, 1, output_h, output_w, in_c, patch_h, patch_w)
-                                selected_bias = unfolded_bias.unsqueeze(0)
-                                sum_bias_r = torch.einsum('sbpqchw,sbpqchw->spqb', last_A.patches, selected_bias)
-                                sum_bias = sum_bias_r.reshape(-1, sum_bias_r.size(-1))
-                    return next_A, sum_bias if has_bias else 0.0
+                    if set_l:
+                        lA_x, lbias = _bound_oneside(last_lA)
+                    if set_u:
+                        uA_x, ubias = _bound_oneside(last_uA)
+                return lA_x, uA_x, lbias, ubias
 
-                lA_x, lbias = _bound_oneside(last_lA)
-                uA_x, ubias = _bound_oneside(last_uA)
+            if self.use_seperate_weights_for_lower_and_upper_bounds:
+                lA_x, _, lbias, _ = multiply_with_weight(input_lb[1], set_l=True, set_u=False)
+                _, uA_x, _, ubias = multiply_with_weight(input_ub[1], set_l=False, set_u=True)
+            else:
+                lA_x, uA_x, lbias, ubias = multiply_with_weight(weight, set_l=True, set_u=True)
 
         # Case #2: weight is perturbed. bias may or may not be perturbed.
         elif self.is_input_perturbed(1):
+            assert not self.use_seperate_weights_for_lower_and_upper_bounds
             # Obtain relaxations for matrix multiplication.
-            [(lA_x, uA_x), (lA_y, uA_y)], lbias, ubias = self.bound_backward_with_weight(last_lA, last_uA, input_lb, input_ub, x[0], x[1])
+            [(lA_x, uA_x), (lA_y, uA_y)], lbias, ubias = self.bound_backward_with_weight(
+                last_lA, last_uA, input_lb, input_ub, x[0], x[1],
+                reduce_bias=reduce_bias, **kwargs)
             if has_bias:
+                assert reduce_bias
                 if x[2].perturbation is not None:
-                    # Bias is also perturbed. Since bias is directly added to the output, in backward mode it is treated
-                    # as an input with last_lA and last_uA as associated bounds matrices.
-                    # It's okay if last_lA or last_uA is eyeC, as it will be handled in the perturbation object.
+                    # Bias is also perturbed. Since bias is directly added to the
+                    # output, in backward mode it is treated as an input with
+                    # last_lA and last_uA as associated bounds matrices.
+                    # It's okay if last_lA or last_uA is eyeC, as it will be
+                    # handled in the perturbation object.
                     lA_bias = last_lA
                     uA_bias = last_uA
                 else:
-                    # Bias not perturbed, so directly adding the bias of this layer to the final bound bias term.
+                    # Bias not perturbed, so directly adding the bias of this
+                    # layer to the final bound bias term.
                     if isinstance(last_lA, eyeC) and isinstance(last_uA, eyeC):
                         # Bias will be directly added to output.
                         lbias += input_lb[2].unsqueeze(1).repeat(1, batch_size)
@@ -213,18 +314,23 @@ class BoundLinear(Bound):
                         if last_uA is not None:
                             ubias += last_uA.matmul(input_lb[2])
             # If not has_bias, no need to compute lA_bias and uA_bias
-
         # Case 3: Only bias is perturbed, weight is not perturbed.
         elif not self.is_input_perturbed(1) and has_bias and self.is_input_perturbed(2):
+            assert not self.use_seperate_weights_for_lower_and_upper_bounds
+            assert reduce_bias
             if isinstance(last_lA, eyeC) and isinstance(last_uA, eyeC):
-                # Use this layer's W as the next bound matrices. Duplicate the batch dimension. Other dimensions are kept 1.
-                lA_x = uA_x = input_lb[1].unsqueeze(1).repeat([1, batch_size] + [1] * (input_lb[1].ndim - 1))
+                # Use this layer's W as the next bound matrices. Duplicate the
+                # batch dimension. Other dimensions are kept 1.
+                lA_x = uA_x = input_lb[1].unsqueeze(1).repeat(
+                    [1, batch_size] + [1] * (input_lb[1].ndim - 1))
             else:
                 lA_x = last_lA.matmul(input_lb[1])
                 uA_x = last_uA.matmul(input_lb[1])
             # It's okay if last_lA or last_uA is eyeC, as it will be handled in the perturbation object.
             lA_bias = last_lA
             uA_bias = last_uA
+        else:
+            assert not self.use_seperate_weights_for_lower_and_upper_bounds
 
         return [(lA_x, uA_x), (lA_y, uA_y), (lA_bias, uA_bias)], lbias, ubias
 
@@ -249,19 +355,43 @@ class BoundLinear(Bound):
 
         return x_l, x_u, y_l, y_u
 
-    def _relax(self, input_lb, input_ub):
-        return BoundMul.get_bound_mul(*self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1]))
+    @staticmethod
+    # @torch.jit.script
+    def propagate_A_xy(last_A: Tensor, alpha_pos: Tensor, alpha_neg: Tensor,
+                       beta_pos: Tensor, beta_neg: Tensor,
+                       dim_y: List[int]) -> Tuple[Tensor, Tensor]:
+        # last_uA has size (batch, spec, output)
+        last_A_pos = last_A.clamp(min=0).unsqueeze(-1)
+        last_A_neg = last_A.clamp(max=0).unsqueeze(-1)
+        # alpha_u has size (batch, spec, output, input)
+        # uA_x has size (batch, spec, input).
+        A_x = (alpha_pos.transpose(-1, -2).matmul(last_A_pos) +
+                alpha_neg.transpose(-1, -2).matmul(last_A_neg)).squeeze(-1)
+        # beta_u has size (batch, spec, output, input)
+        # uA_y is for weight matrix, with parameter size (output, input)
+        # uA_y has size (batch, spec, output, input). This is an element-wise multiplication.
+        # TODO (for zhouxing/qirui): generalize multiply_by_A_signs() to calculate A_x,
+        # so last_A_pos and last_A_neg are not needed. This saves memory.
+        A_y, _ = multiply_by_A_signs(last_A.unsqueeze(-1), beta_pos, beta_neg, None, None)
+        if len(dim_y) != 0:
+            A_y = torch.sum(A_y, dim=dim_y)
+        return A_x, A_y
 
-    # FIXME This is nonlinear. Move to `bivariate.py`.
-    def bound_backward_with_weight(self, last_lA, last_uA, input_lb, input_ub, x, y):
+    def bound_backward_with_weight(self, last_lA, last_uA, input_lb, input_ub,
+                                   x, y, reduce_bias=True, **kwargs):
+        # FIXME This is nonlinear. Move to `bivariate.py`.
+
         # Note: x and y are not tranposed or scaled, and we should avoid using them directly.
         # Use input_lb and input_ub instead.
-        alpha_l, beta_l, gamma_l, alpha_u, beta_u, gamma_u = self._relax(input_lb, input_ub)
-        alpha_l, alpha_u = alpha_l.unsqueeze(0), alpha_u.unsqueeze(0)
-        beta_l, beta_u = beta_l.unsqueeze(0), beta_u.unsqueeze(0)
-        x_shape, y_shape = input_lb[0].size(), input_lb[1].size()
-        gamma_l = torch.sum(gamma_l, dim=-1).reshape(x_shape[0], -1, 1)
-        gamma_u = torch.sum(gamma_u, dim=-1).reshape(x_shape[0], -1, 1)
+        (alpha_l, beta_l, gamma_l,
+         alpha_u, beta_u, gamma_u) = self.mul_helper.get_relaxation(
+             *self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1]),
+             self.opt_stage, getattr(self, 'alpha', None),
+             getattr(self, '_start', None))
+        x_shape = input_lb[0].size()
+        if reduce_bias:
+            gamma_l = torch.sum(gamma_l, dim=-1)
+            gamma_u = torch.sum(gamma_u, dim=-1)
 
         if len(x.output_shape) != 2 and len(x.output_shape) == len(y.output_shape):
             dim_y = [-3]
@@ -279,32 +409,46 @@ class BoundLinear(Bound):
                 last_A = (torch.eye(last_A.shape[0], device=last_A.device)
                     .view(last_A.shape[0], 1, *last_A.shape[2:]).expand(last_A.shape))
 
-            # last_uA has size (batch, spec, output)
-            last_A_pos = last_A.clamp(min=0).unsqueeze(-1)
-            last_A_neg = last_A.clamp(max=0).unsqueeze(-1)
-            # alpha_u has size (batch, spec, output, input)
-            # uA_x has size (batch, spec, input).
-            A_x = (alpha_pos.transpose(-1, -2).matmul(last_A_pos) + \
-                    alpha_neg.transpose(-1, -2).matmul(last_A_neg)).squeeze(-1)
-            # beta_u has size (batch, spec, output, input)
-            # uA_y is for weight matrix, with parameter size (output, input)
-            # uA_y has size (batch, spec, output, input). This is an element-wise multiplication.
-            A_y = last_A_pos * beta_pos + last_A_neg * beta_neg
-            if len(dim_y) != 0:
-                A_y = torch.sum(A_y, dim=dim_y)
-            # last_uA has size (batch, spec, output)
-            _last_A_pos = last_A_pos.reshape(last_A.shape[0], last_A.shape[1], -1)
-            _last_A_neg = last_A_neg.reshape(last_A.shape[0], last_A.shape[1], -1)
-            # gamma_u has size (batch, output, 1)
-            # ubias has size (batch, spec, 1)
-            bias = _last_A_pos.transpose(0, 1).matmul(gamma_pos).transpose(0, 1) + \
-                    _last_A_neg.transpose(0, 1).matmul(gamma_neg).transpose(0, 1)
+            A_x, A_y = BoundLinear.propagate_A_xy(
+                last_A, alpha_pos, alpha_neg, beta_pos, beta_neg, dim_y)
 
-            bias = bias.squeeze(-1)
+            if reduce_bias:
+                # last_uA has size (batch, spec, output)
+                # gamma_u has size (batch, output, 1)
+                # ubias has size (batch, spec, 1)
+                if self.opt_stage in ['opt', 'reuse']:
+                    bias = (torch.einsum('sb...,sb...->sb',
+                                        last_A.clamp(min=0), gamma_pos)
+                            + torch.einsum('sb...,sb...->sb',
+                                        last_A.clamp(max=0), gamma_neg))
+                else:
+                    bias = (
+                        self.get_bias(last_A.clamp(min=0), gamma_pos)
+                        + self.get_bias(last_A.clamp(max=0), gamma_neg)
+                    )
+            else:
+                assert self.batch_dim == 0
+                assert self.opt_stage not in ['opt', 'reuse']
+                assert dim_y == [-3]
+                bias = (last_A.unsqueeze(-1).clamp(min=0) * gamma_pos
+                        + last_A.unsqueeze(-1).clamp(max=0) * gamma_neg)
+                bias_x = bias.sum(dim=-2)
+                bias_y = bias.sum(dim=-3)
+                bias = (bias_x, bias_y)
             return A_x, A_y, bias
 
-        lA_x, lA_y, lbias = _bound_oneside(last_lA, alpha_l, beta_l, gamma_l, alpha_u, beta_u, gamma_u)
-        uA_x, uA_y, ubias = _bound_oneside(last_uA, alpha_u, beta_u, gamma_u, alpha_l, beta_l, gamma_l)
+        if self.opt_stage in ['opt', 'reuse']:
+            lA_x, lA_y, lbias = _bound_oneside(
+                last_lA, alpha_l[0], beta_l[0], gamma_l[0],
+                alpha_u[0], beta_u[0], gamma_u[0])
+            uA_x, uA_y, ubias = _bound_oneside(
+                last_uA, alpha_u[1], beta_u[1], gamma_u[1],
+                alpha_l[1], beta_l[1], gamma_l[1])
+        else:
+            lA_x, lA_y, lbias = _bound_oneside(
+                last_lA, alpha_l, beta_l, gamma_l, alpha_u, beta_u, gamma_u)
+            uA_x, uA_y, ubias = _bound_oneside(
+                last_uA, alpha_u, beta_u, gamma_u, alpha_l, beta_l, gamma_l)
 
         return [(lA_x, uA_x), (lA_y, uA_y)], lbias, ubias
 
@@ -325,12 +469,14 @@ class BoundLinear(Bound):
     def interval_propagate(self, *v, C=None, w=None):
         has_bias = self is not None and len(v) == 3
         if self is not None:
-            # This will convert an Interval object to tuple. We need to add perturbation property later.
+            # This will convert an Interval object to tuple.
+            # We need to add perturbation property later.
             v_lb, v_ub = zip(*v)
             v_lb = self._preprocess(*v_lb)
             v_ub = self._preprocess(*v_ub)
             # After preprocess the lower and upper bounds, we make them Intervals again.
-            v = [Interval.make_interval(bounds[0], bounds[1], bounds[2]) for bounds in zip(v_lb, v_ub, v)]
+            v = [Interval.make_interval(bounds[0], bounds[1], bounds[2])
+                 for bounds in zip(v_lb, v_ub, v)]
         if w is None and self is None:
             # Use C as the weight, no bias.
             w, lb, ub = C, torch.tensor(0., device=C.device), torch.tensor(0., device=C.device)
@@ -362,7 +508,7 @@ class BoundLinear(Bound):
 
         # interval_propagate() of the Linear layer may encounter input with different norms.
         norm, eps = Interval.get_perturbation(v[0])[:2]
-        if norm == np.inf:
+        if norm == torch.inf:
             interval = BoundLinear._propagate_Linf(v[0], w)
             center, deviation = interval
         elif norm > 0:
@@ -378,7 +524,9 @@ class BoundLinear(Bound):
                 # mid has dimension [batch, input], w has dimension [output, input].
                 center = mid.matmul(w.t())
             deviation = w.norm(dual_norm, dim=-1) * eps
-        else: # here we calculate the L0 norm IBP bound of Linear layers, using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
+        else:
+            # here we calculate the L0 norm IBP bound of Linear layers,
+            # using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
             norm, eps, ratio = Interval.get_perturbation(v[0])
             mid = v[0][0]
             weight_abs = w.abs()
@@ -401,7 +549,7 @@ class BoundLinear(Bound):
         input_norm, input_eps = Interval.get_perturbation(v[0])
         weight_norm, weight_eps = Interval.get_perturbation(v[1])
 
-        if input_norm == np.inf and weight_norm == np.inf:
+        if input_norm == torch.inf and weight_norm == torch.inf:
             # A memory-efficient implementation without expanding all the elementary multiplications
             if self.opt_matmul == 'economic':
                 x_l, x_u = v[0][0], v[0][1]
@@ -435,7 +583,7 @@ class BoundLinear(Bound):
                 lower, upper = torch.sum(lower, -1), torch.sum(upper, -1)
 
             return lower, upper
-        elif input_norm == np.inf and weight_norm == 2:
+        elif input_norm == torch.inf and weight_norm == 2:
             # This eps is actually the epsilon per row, as only one row is involved for each output element.
             eps = weight_eps
             # Input data and weight are Linf perturbed (with upper and lower bounds).
@@ -463,7 +611,7 @@ class BoundLinear(Bound):
 
     # w: an optional argument which can be utilized by BoundMatMul
     def bound_dynamic_forward(self, x, w=None, b=None, C=None, max_dim=None, offset=0):
-        assert not self.transA and self.alpha == 1.0 and self.transB and self.beta == 1.0
+        assert not self.transA and self.alpha_linear == 1.0 and self.transB and self.beta_linear == 1.0
         assert not self.is_input_perturbed(1)
         assert not self.is_input_perturbed(2)
 
@@ -531,22 +679,16 @@ class BoundLinear(Bound):
 
     def bound_forward_with_weight(self, dim_in, x, y):
         x_unsqueeze = LinearBound(
-            x.lw.unsqueeze(-2),
-            x.lb.unsqueeze(-2),
-            x.uw.unsqueeze(-2),
-            x.ub.unsqueeze(-2),
-            x.lower.unsqueeze(-2),
-            x.upper.unsqueeze(-2),
+            x.lw.unsqueeze(-2), x.lb.unsqueeze(-2),
+            x.uw.unsqueeze(-2), x.ub.unsqueeze(-2),
+            x.lower.unsqueeze(-2), x.upper.unsqueeze(-2),
         )
         y_unsqueeze = LinearBound(
-            y.lw.unsqueeze(-3),
-            y.lb.unsqueeze(-3),
-            y.uw.unsqueeze(-3),
-            y.ub.unsqueeze(-3),
-            y.lower.unsqueeze(-3),
-            y.upper.unsqueeze(-3),
+            y.lw.unsqueeze(-3), y.lb.unsqueeze(-3),
+            y.uw.unsqueeze(-3), y.ub.unsqueeze(-3),
+            y.lower.unsqueeze(-3), y.upper.unsqueeze(-3),
         )
-        res_mul = BoundMul.bound_forward_both_perturbed(dim_in, x_unsqueeze, y_unsqueeze)
+        res_mul = self.bound_forward_both_perturbed(dim_in, x_unsqueeze, y_unsqueeze)
         return LinearBound(
             res_mul.lw.sum(dim=-1) if res_mul.lw is not None else None,
             res_mul.lb.sum(dim=-1),
@@ -568,6 +710,8 @@ class BoundLinear(Bound):
 
         # current layer weight (100, 1024)
         this_layer_weight = v[1]
+        if self.transB == 0:
+            this_layer_weight = this_layer_weight.transpose(1, 0)
         #### make sure if this is correct for per-label operations
         if C is not None:
             # merge specification C into last layer weights
@@ -590,6 +734,16 @@ class BoundLinear(Bound):
         for neuron_idx in range(this_layer_shape[0]):
             out_lb = out_lbs[neuron_idx] if out_lbs is not None else -float('inf')
             out_ub = out_ubs[neuron_idx] if out_ubs is not None else float('inf')
+            if out_ub - out_lb < EPS:
+                """
+                    If the inferred lb and ub are too close, it could lead to floating point disagreement
+                    between solver's inferred lb and ub constraints and the computed ones from ab-crown.
+                    Such disagreement can lead to "infeasible" result from the solver for feasible problem.
+                    To avoid so, we relax the box constraints.
+                    This should not affect the solver's result correctness,
+                    since the tighter lb and ub can be inferred by the solver.
+                """
+                out_lb, out_ub = (out_lb + out_ub - EPS) / 2., (out_lb + out_ub + EPS) / 2.
 
             lin_expr = 0
             if has_bias:
@@ -616,28 +770,26 @@ class BoundLinear(Bound):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        node_grad = LinearGrad(self.inputs[1].param)
+        if isinstance(self.inputs[1], BoundParams):
+            w = self.inputs[1].param
+        else:
+            w = self.inputs[1].value
+        if not self.transB:
+            w = w.t()
+        node_grad = LinearGrad(w)
         return node_grad, (grad_upstream,), []
+
+    def update_requires_input_bounds(self):
+        self._check_weight_perturbation()
 
 
 class BoundMatMul(BoundLinear):
     # Reuse most functions from BoundLinear.
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.transA = 0
         self.transB = 0
-        self.is_constant_op = False
-        for inp in inputs:
-            if BoundMul._check_const_input(inp):
-                # If any of the two inputs are constant, we do not need input bounds.
-                # FIXME (05/11/2022): this is just a temporary workaround. We need better way to determine whether we need input bounds, not just for BoundConstant.
-                self.is_constant_op = True
-        if self.is_constant_op:
-            # One input is constant; no bounds required.
-            self.requires_input_bounds = [1]
-        else:
-            # Both inputs are perturbed. Need relaxation.
-            self.requires_input_bounds = [0, 1]
+        self.splittable = True
 
     def forward(self, x, y):
         self.x_shape = x.shape
@@ -650,12 +802,22 @@ class BoundMatMul(BoundLinear):
         lower, upper = super().interval_propagate(*v)
         return lower, upper
 
-    def bound_backward(self, last_lA, last_uA, *x):
+    def bound_backward(self, last_lA, last_uA, *x, start_node=None, **kwargs):
         assert len(x) == 2
-        results = super().bound_backward(last_lA, last_uA, *x)
+        if start_node is not None:
+            self._start = start_node.name
+        results = super().bound_backward(last_lA, last_uA, *x, **kwargs)
         lA_y = results[0][1][0].transpose(-1, -2) if results[0][1][0] is not None else None
         uA_y = results[0][1][1].transpose(-1, -2) if results[0][1][1] is not None else None
-        return [results[0][0], (lA_y, uA_y), results[0][2]], results[1], results[2]
+        if isinstance(results[1], tuple):
+            lbias = (results[1][0], results[1][1].transpose(-1, -2))
+        else:
+            lbias = results[1]
+        if isinstance(results[2], tuple):
+            ubias = (results[2][0], results[2][1].transpose(-1, -2))
+        else:
+            ubias = results[2]
+        return [results[0][0], (lA_y, uA_y), results[0][2]], lbias, ubias
 
     def bound_forward(self, dim_in, x, y):
         return super().bound_forward(dim_in, x, LinearBound(
@@ -667,25 +829,46 @@ class BoundMatMul(BoundLinear):
             y.upper.transpose(-1, -2) if y.upper is not None else None
         ))
 
+    def update_requires_input_bounds(self):
+        self.is_linear_op = False
+        for inp in self.inputs:
+            if not inp.perturbed:
+                # If any of the two inputs are constant, we do not need input bounds.
+                self.is_linear_op = True
+        if self.is_linear_op:
+            # One input is constant; no bounds required.
+            self.requires_input_bounds = []
+            self.splittable = False
+        else:
+            # Both inputs are perturbed. Need relaxation.
+            self.requires_input_bounds = [0, 1]
+            self.splittable = True
+
+
 class BoundNeg(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
+        self.ibp_intermediate = True
 
     def forward(self, x):
         return -x
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         if type(last_lA) == Tensor or type(last_uA) == Tensor:
             return [(-last_lA if last_lA is not None else None,
                  -last_uA if last_uA is not None else None)], 0, 0
         elif type(last_lA) == Patches or type(last_uA) == Patches:
             if last_lA is not None:
-                lA = Patches(-last_lA.patches, last_lA.stride, last_lA.padding, last_lA.shape, unstable_idx=last_lA.unstable_idx, output_shape=last_lA.output_shape)
+                lA = Patches(-last_lA.patches, last_lA.stride, last_lA.padding,
+                             last_lA.shape, unstable_idx=last_lA.unstable_idx,
+                             output_shape=last_lA.output_shape)
             else:
                 lA = None
 
             if last_uA is not None:
-                uA = Patches(-last_uA.patches, last_uA.stride, last_uA.padding, last_uA.shape, unstable_idx=last_uA.unstable_idx, output_shape=last_uA.output_shape)
+                uA = Patches(-last_uA.patches, last_uA.stride, last_uA.padding,
+                             last_uA.shape, unstable_idx=last_uA.unstable_idx,
+                             output_shape=last_uA.output_shape)
             else:
                 uA = None
             return [(lA, uA)], 0, 0
@@ -700,7 +883,7 @@ class BoundNeg(Bound):
 
 
 class BoundCumSum(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.use_default_ibp = True
 
@@ -709,14 +892,14 @@ class BoundCumSum(Bound):
         return torch.cumsum(x, axis)
 
 class BoundIdentity(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.use_default_ibp = True
 
     def forward(self, x):
         return x
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         return [(last_lA, last_uA)], 0, 0
 
     def bound_forward(self, dim_in, x):

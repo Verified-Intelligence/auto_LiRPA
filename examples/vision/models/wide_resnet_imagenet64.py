@@ -42,7 +42,7 @@ class wide_basic(nn.Module):
         return out
 
 class Wide_ResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate, num_classes, 
+    def __init__(self, depth, widen_factor, dropout_rate, num_classes,
             in_planes=16, in_dim=56):
         super(Wide_ResNet, self).__init__()
         self.in_planes = in_planes
@@ -78,7 +78,7 @@ class Wide_ResNet(nn.Module):
         out = self.layer3(out)
         out = F.relu(self.bn1(out))
         out = F.avg_pool2d(out, 7)
-        out = out.view(out.size(0), -1)
+        out = torch.flatten(out, 1)
         out = self.linear(out)
 
         return out

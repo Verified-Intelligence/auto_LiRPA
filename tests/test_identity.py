@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
-from testcase import TestCase  
+from testcase import TestCase
 
-class TestIdentity(TestCase): 
+class TestIdentity(TestCase):
     def __init__(self, methodName='runTest'):
         super().__init__(methodName)
 
@@ -18,10 +18,11 @@ class TestIdentity(TestCase):
         ptb = PerturbationLpNorm(norm=np.inf, eps=eps)
         x = BoundedTensor(x, ptb)
         y_l, y_u = model.compute_bounds()
-        self.assertTensorEqual(x, y)
-        self.assertTensorEqual(y_l, x - eps)
-        self.assertTensorEqual(y_u, x + eps)
+        self.assert_tensor_equal(x, y)
+        self.assert_tensor_equal(y_l, x - eps)
+        self.assert_tensor_equal(y_u, x + eps)
+
 
 if __name__ == '__main__':
     testcase = TestIdentity()
-    testcase.test()        
+    testcase.test()

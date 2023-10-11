@@ -1,16 +1,23 @@
 """ Constant operators, including operators that are usually fixed nodes and not perturbed """
 from .base import *
 
+
 class BoundConstant(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.value = attr['value'].to(self.device)
         self.use_default_ibp = True
 
+    def __repr__(self):
+        if self.value.numel() == 1:
+            return f'BoundConstant(name={self.name}, value={self.value})'
+        else:
+            return super().__repr__()
+
     def forward(self):
         return self.value.to(self.device)
 
-    def bound_backward(self, last_lA, last_uA):
+    def bound_backward(self, last_lA, last_uA, **kwargs):
         def _bound_oneside(A):
             if A is None:
                 return 0.0
@@ -40,14 +47,11 @@ class BoundConstant(Bound):
 
 
 class BoundPrimConstant(Bound):
-    def __init__(self, attr, input, output_index, options):
-        super().__init__(attr, input, output_index, options)
-
     def forward(self):
         return torch.tensor([], device=self.device)
 
 class BoundConstantOfShape(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.value = attr['value'].to(self.device)
 
@@ -56,7 +60,7 @@ class BoundConstantOfShape(Bound):
         self.from_input = True
         return self.value.expand(*list(x))
 
-    def bound_backward(self, last_lA, last_uA, x):
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
         if last_lA is not None:
             lower_sum_b = last_lA * self.value
             while lower_sum_b.ndim > 2:
@@ -81,15 +85,14 @@ class BoundConstantOfShape(Bound):
 
     def interval_propagate(self, *v):
         self.x = v[0][0]
-        size = int(v[0][0].item()) if isinstance(v[0][0], Tensor) else v[0][0]
-        value = torch.ones(size, device=self.device) * self.value
+        value = torch.ones(tuple(v[0][0]), device=self.device) * self.value
         return value, value
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(v)
 
 class BoundRange(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.device = attr['device']
 
@@ -100,7 +103,7 @@ class BoundRange(Bound):
             return torch.arange(start, end, step, device=self.device)
 
 class BoundATenDiag(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.device = attr['device']
 
@@ -111,7 +114,7 @@ class BoundATenDiag(Bound):
         return Interval.make_interval(torch.diag(v[0][0], v[1][0]), torch.diag(v[0][1], v[1][0]), v[0])
 
 class BoundATenDiagonal(Bound):
-    def __init__(self, attr, inputs, output_index, options):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.device = attr['device']
 

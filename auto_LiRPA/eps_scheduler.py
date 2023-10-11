@@ -47,10 +47,10 @@ class BaseScheduler(object):
 
     def train(self):
         self.is_training = True
-        
+
     def eval(self):
         self.is_training = False
-    
+
     # Set how many batches in an epoch
     def set_epoch_length(self, epoch_length):
         self.epoch_length = epoch_length
@@ -133,8 +133,8 @@ class BiLinearScheduler(LinearScheduler):
 
     def __repr__(self):
         return '<BiLinearScheduler: start_eps {:.5f}, end_eps {:.5f}>'.format(
-            self.epoch_start_eps, self.epoch_end_eps)        
-    
+            self.epoch_start_eps, self.epoch_end_eps)
+
     def step_epoch(self, verbose = True):
         self.epoch += 1
         self.batch = 0
@@ -148,7 +148,7 @@ class BiLinearScheduler(LinearScheduler):
                 self.epoch_start_eps = min(eps_epoch * eps_epoch_step, self.max_eps)
                 self.epoch_end_eps = min((eps_epoch + 1) * eps_epoch_step, self.max_eps)
             else:
-                self.epoch_start_eps = max(0, 
+                self.epoch_start_eps = max(0,
                     self.max_eps - ((eps_epoch - self.schedule_length_half) * eps_epoch_step))
                 self.epoch_end_eps = max(0, self.epoch_start_eps - eps_epoch_step)
         self.eps = self.epoch_start_eps
@@ -172,7 +172,7 @@ class SmoothedScheduler(BaseScheduler):
         assert self.mid_point >= 0. and self.mid_point <= 1.
         self.batch = 0
 
-    
+
     # Set how many batches in an epoch
     def set_epoch_length(self, epoch_length):
         if self.epoch_length != self.epoch_length:
@@ -183,11 +183,11 @@ class SmoothedScheduler(BaseScheduler):
 
     def step_epoch(self, verbose = True):
         super(SmoothedScheduler, self).step_epoch()
-        # FIXME 
+        # FIXME
         if verbose == False:
             for i in range(self.epoch_length):
                 self.step_batch()
-            
+
     # Smooth schedule that slowly morphs into a linear schedule.
     # Code is based on DeepMind's IBP implementation:
     # https://github.com/deepmind/interval-bound-propagation/blob/2c1a56cb0497d6f34514044877a8507c22c1bd85/interval_bound_propagation/src/utils.py#L84
@@ -230,7 +230,7 @@ class AdaptiveScheduler(BaseScheduler):
         self.small_loss_thresh = float(self.params.get('small_loss_thresh', 0.05))
         self.epoch = 0
         self.eps_step = self.min_eps_step
-    
+
     def step_batch(self):
         if self.eps < self.max_eps and self.epoch >= self.schedule_start and self.is_training:
             if self.loss != self.loss or self.prev_loss != self.prev_loss:
@@ -275,4 +275,3 @@ if __name__ == "__main__":
     plt.grid()
     plt.tight_layout()
     plt.savefig('epsilon.pdf')
-
