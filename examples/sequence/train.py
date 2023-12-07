@@ -96,7 +96,7 @@ def test(epoch, batches):
         acc, acc_robust, loss = step(model, ptb, batch)
         meter.set_batch_size(len(batch))
         meter.update('acc', acc)
-        meter.udpate('acc_rob', acc_robust)
+        meter.update('acc_rob', acc_robust)
         meter.update('loss', loss)
     logger.info("Epoch %d test: {%s}".format(epoch, meter))
 
