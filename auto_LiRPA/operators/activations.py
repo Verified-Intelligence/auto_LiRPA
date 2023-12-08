@@ -72,6 +72,10 @@ class BoundATenHeaviside(BoundOptimizableActivation):
         # x[0]: input; x[1]: value when x == 0
         return torch.heaviside(x[0], x[1])
 
+    def interval_propagate(self, *v):
+        assert not self.is_input_perturbed(1)
+        return self.forward(v[0][0], v[1][0]), self.forward(v[0][1], v[1][0])
+
     def _init_opt_parameters_impl(self, size_spec, name_start):
         """Implementation of init_opt_parameters for each start_node."""
         l = self.inputs[0].lower
