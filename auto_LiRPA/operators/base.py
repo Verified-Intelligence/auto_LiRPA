@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Base class and functions for implementing bound operators"""
 from typing import Optional, List
 import warnings
@@ -112,14 +128,19 @@ class Bound(nn.Module):
         self.name: Optional[str] = None
         self.output_name = []
         self.device = attr.get('device')
-        self.attr, self.inputs, self.output_index, self.options = \
-            attr, inputs, output_index, options
+        self.attr = attr
+        self.inputs: List['Bound'] = inputs
+        self.output_index = output_index
+        self.options = options
         self.forward_value = None
         self.output_shape = None
         self.from_input = False
         self.bounded = False
         self.IBP_rets = None
         self.requires_input_bounds = []
+        # If True, when building the Jacobian graph, this node should be treated
+        # as a constant and there is no need to further propagate Jacobian.
+        self.no_jacobian = False
         # If True, when we are computing intermediate bounds for these ops,
         # we simply use IBP to propagate bounds from its input nodes
         # instead of CROWN. Currently only operators with a single input can be
@@ -144,6 +165,20 @@ class Bound(nn.Module):
         self.zero_uA_mtx = False
         self.patches_start = False
         self.alpha_beta_update_mask = None
+        self.is_final_node = False
+        # By default, we assue this node has no batch dimension.
+        # It will be updated in BoundedModule.get_forward_value().
+        self.batch_dim = -1
+
+        # The .lower and .upper properties are written to as part of the bound propagation.
+        # Usually, in iterative refinement, each bound only depends on bounds previously
+        # computed in the same iteration. However, this changes if INVPROP is used to incorporate
+        # output constraints. Then, we also need bounds of layers *after* the currently bounded
+        # layer. Therefore, we have to cache the older bounds.
+        self._is_lower_bound_current = False
+        self._lower = None
+        self._is_upper_bound_current = False
+        self._upper = None
 
     def __repr__(self, attrs=None):
         inputs = ', '.join([node.name for node in self.inputs])
@@ -155,10 +190,60 @@ class Bound(nn.Module):
         ret += ')'
         return ret
 
+    @property
+    def lower(self):
+        return self._lower
+
+    @lower.setter
+    def lower(self, value):
+        if not (value is None or isinstance(value, torch.Tensor)):
+            raise TypeError(f'lower must be a tensor or None, got {type(value)}')
+        if value is None:
+            self._is_lower_bound_current = False
+        else:
+            self._is_lower_bound_current = True
+        self._lower = value
+
+    @property
+    def upper(self):
+        return self._upper
+
+    @upper.setter
+    def upper(self, value):
+        if not (value is None or isinstance(value, torch.Tensor)):
+            raise TypeError(f'upper must be a tensor or None, got {type(value)}')
+        if value is None:
+            self._is_upper_bound_current = False
+        else:
+            self._is_upper_bound_current = True
+        self._upper = value
+
+    def move_lower_and_upper_bounds_to_cache(self):
+        if self._lower is not None:
+            self._lower = self._lower.detach().requires_grad_(False)
+            self._is_lower_bound_current = False
+        if self._upper is not None:
+            self._upper = self._upper.detach().requires_grad_(False)
+            self._is_upper_bound_current = False
+
+    def delete_lower_and_upper_bounds(self):
+        self._lower = None
+        self._upper = None
+        self._is_lower_bound_current = False
+        self._is_upper_bound_current = False
+
+    def is_lower_bound_current(self):
+        return self._is_lower_bound_current
+
+    def is_upper_bound_current(self):
+        return self._is_upper_bound_current
+
     def are_output_constraints_activated_for_layer(
         self: 'Bound',
         apply_output_constraints_to: Optional[List[str]],
     ):
+        if self.is_final_node:
+            return False
         if apply_output_constraints_to is None:
             return False
         for layer_type_or_name in apply_output_constraints_to:
@@ -185,12 +270,33 @@ class Bound(nn.Module):
         for d in self.output_shape[1:]:
             neurons_in_this_layer *= d
         init_gamma_value = 0.0
-        self.gammas = torch.full((2, num_constraints), init_gamma_value, requires_grad=True, device=self.device)
+        # We need a different number of gammas depending on whether or not they are shared
+        # However, to the code outside of this class, this should be transparent.
+        # We create the correct number of gammas in gammas_underlying_tensor and if necessary
+        # expand it to simulate a larger tensor. This is just a view, no additional memory is created.
+        # By the outside, only .gammas should be used. However, we must take care to update this view
+        # whenever gammas_underlying_tensor was changed (see clip_gammas)
+        # Note that _set_gammas in optimized_bounds.py needs to refer to the gammas_underlying_tensor,
+        # because that's the leaf tensor for which we need to compute gradients.
+        if self.options.get('optimize_bound_args', {}).get('share_gammas', False):
+            self.gammas_underlying_tensor = torch.full((2, num_constraints, 1), init_gamma_value, requires_grad=True, device=self.device)
+            self.gammas = self.gammas_underlying_tensor.expand(-1, -1, neurons_in_this_layer)
+        else:
+            self.gammas_underlying_tensor = torch.full((2, num_constraints, neurons_in_this_layer), init_gamma_value, requires_grad=True, device=self.device)
+            self.gammas = self.gammas_underlying_tensor
 
     def clip_gammas(self):
         if not hasattr(self, "gammas"):
             return
-        self.gammas.data = torch.clamp(self.gammas.data, min=0.0)
+        self.gammas_underlying_tensor.data = torch.clamp(self.gammas_underlying_tensor.data, min=0.0)
+
+        # If gammas are shared, self.gammas != self.gammas_underlying_tensor
+        # We've changed self.gammas_underlying_tensor, those changes must be propagated to self.gammas
+        neurons_in_this_layer = 1
+        for d in self.output_shape[1:]:
+            neurons_in_this_layer *= d
+        if self.options.get('optimize_bound_args', {}).get('share_gammas', False):
+            self.gammas = self.gammas_underlying_tensor.expand(-1, -1, neurons_in_this_layer)
 
     def is_input_perturbed(self, i=0):
         r"""Check if the i-th input is with perturbation or not."""
@@ -305,11 +411,20 @@ class Bound(nn.Module):
         return not_implemented_op(self, 'bound_backward')
 
     def broadcast_backward(self, A, x):
+        """
+        Adjust shape of A, adding or removing broadcast dimensions, based on the other operand x.
+
+        Typically, A has [spec, batch, ...].
+        The other operand x may have shape [batch, ...], or no batch dimension.
+        Here the "..." dimensions may be different.
+        We need to make sure the two match, by adding or removing dimensions in A.
+        """
         shape = x.output_shape
 
         if isinstance(A, Tensor):
             if x.batch_dim == -1:
-                # final shape of input
+                # The other operand has no batch dimension. (e.g., constants).
+                # Add batch dimension to it.
                 shape = torch.Size([A.shape[1]] + list(shape))
                 dims = []
                 cnt_sum = A.ndim - len(shape) - 1
@@ -332,6 +447,7 @@ class Bound(nn.Module):
                     dims.append(i + 1)
             if dims:
                 A = torch.sum(A, dim=dims, keepdim=True)
+            # Check the final shape - it should be compatible.
             assert A.shape[2:] == shape[1:]  # skip the spec and batch dimension.
         else:
             pass
@@ -345,12 +461,14 @@ class Bound(nn.Module):
             grad_upstream: Upstream gradient in the gradient back-propagation.
 
         Returns:
-            module_grad (torch.nn.Module): Gradient node.
+            A list. Each item contains the following for computing the gradient
+            of each input:
+                module_grad (torch.nn.Module): Gradient node.
 
-            grad_input (list): Inputs to the gradient node. Values do not
-            matter. We only want the shapes.
+                grad_input (list): Inputs to the gradient node. Values do not
+                matter. We only want the shapes.
 
-            grad_extra_nodes (list): Extra nodes needed for the gradient.
+                grad_extra_nodes (list): Extra nodes needed for the gradient.
         """
         return not_implemented_op(self, 'build_gradient_node')
 
@@ -444,7 +562,7 @@ class Bound(nn.Module):
                 flag = flag or self.check_constraint_available(n, flag)
         return flag
 
-    def _ibp_constraint(self, node, delete_bounds_after_use=False):
+    def _ibp_constraint(self, node: 'Bound', delete_bounds_after_use=False):
         def _delete_unused_bounds(node_list):
             """Delete bounds from input layers after use to save memory. Used when
             sparse_intermediate_bounds_with_ibp is true."""
@@ -477,7 +595,7 @@ class Bound(nn.Module):
                 node.cstr_upper = torch.tensor(node.cstr_upper)
                 node.cstr_interval = (node.cstr_lower, node.cstr_upper)
 
-        if hasattr(node, 'lower'):
+        if node.is_lower_bound_current():
             node.lower = torch.where(node.lower >= node.cstr_lower, node.lower,
                             node.cstr_lower)
             node.upper = torch.where(node.upper <= node.cstr_upper, node.upper,

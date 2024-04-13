@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 from .bound_ops import *
 
 from typing import TYPE_CHECKING
@@ -6,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def build_solver_module(self: 'BoundedModule', x=None, C=None, interm_bounds=None,
-                        final_node_name=None, model_type="mip", solver_pkg="gurobi"):
+                        final_node_name=None, model_type="mip", solver_pkg="gurobi", set_input=True):
     r"""build lp/mip solvers in general graph.
 
     Args:
@@ -47,7 +63,8 @@ def build_solver_module(self: 'BoundedModule', x=None, C=None, interm_bounds=Non
         # if isinstance(root[i], BoundInput) and not isinstance(root[i], BoundParams):
         if type(roots[i]) is BoundInput:
             # create input vars for gurobi self.model
-            inp_gurobi_vars = self._build_solver_input(roots[i])
+            if set_input:
+                inp_gurobi_vars = self._build_solver_input(roots[i])
         else:
             # regular weights
             roots[i].solver_vars = value
@@ -67,16 +84,15 @@ def _build_solver_general(self: 'BoundedModule', node: Bound, C=None, model_type
         for n in node.inputs:
             self._build_solver_general(n, C=C, model_type=model_type)
         inp = [n_pre.solver_vars for n_pre in node.inputs]
-        # print(node, node.inputs)
         if C is not None and isinstance(node, BoundLinear) and\
                 not node.is_input_perturbed(1) and self.final_name == node.name:
             # when node is the last layer
             # merge the last BoundLinear node with the specification,
             # available when weights of this layer are not perturbed
-            solver_vars = node.build_solver(*inp, model=self.model, C=C,
+            solver_vars = node.build_solver(*inp, model=self.solver_model, C=C,
                 model_type=model_type, solver_pkg=solver_pkg)
         else:
-            solver_vars = node.build_solver(*inp, model=self.model, C=None,
+            solver_vars = node.build_solver(*inp, model=self.solver_model, C=None,
                     model_type=model_type, solver_pkg=solver_pkg)
         # just return output node gurobi vars
         return solver_vars
@@ -92,46 +108,39 @@ def _build_solver_input(self: 'BoundedModule', node):
     assert isinstance(node, BoundInput)
     assert node.perturbation is not None
     assert node.perturbation.norm == float("inf")
-    inp_gurobi_vars = []
+
+    if self.solver_model is None:
+        self.solver_model = grb.Model()
     # zero var will be shared within the solver model
-    zero_var = self.model.addVar(lb=0, ub=0, obj=0, vtype=grb.GRB.CONTINUOUS, name='zero')
-    one_var = self.model.addVar(lb=1, ub=1, obj=0, vtype=grb.GRB.CONTINUOUS, name='one')
-    neg_one_var = self.model.addVar(lb=-1, ub=-1, obj=0, vtype=grb.GRB.CONTINUOUS, name='neg_one')
+    zero_var = self.solver_model.addVar(lb=0, ub=0, obj=0, vtype=grb.GRB.CONTINUOUS, name='zero')
+    one_var = self.solver_model.addVar(lb=1, ub=1, obj=0, vtype=grb.GRB.CONTINUOUS, name='one')
+    neg_one_var = self.solver_model.addVar(lb=-1, ub=-1, obj=0, vtype=grb.GRB.CONTINUOUS, name='neg_one')
+
     x_L = node.value - node.perturbation.eps if node.perturbation.x_L is None else node.perturbation.x_L
     x_U = node.value + node.perturbation.eps if node.perturbation.x_U is None else node.perturbation.x_U
     x_L = x_L.squeeze(0)
     x_U = x_U.squeeze(0)
-    # x_L, x_U = node.lower.squeeze(0), node.upper.squeeze(0)
 
-    if x_L.ndim == 1:
-        # This is a linear input.
-        for dim, (lb, ub) in enumerate(zip(x_L, x_U)):
-            v = self.model.addVar(lb=lb, ub=ub, obj=0,
+    # Recursive function to create Gurobi variables
+    idx = [0]
+    def create_gurobi_vars(x_L, x_U, solver_model):
+        if x_L.dim() == 0:
+            v = solver_model.addVar(lb=x_L, ub=x_U, obj=0,
                                     vtype=grb.GRB.CONTINUOUS,
-                                    name=f'inp_{dim}')
-            inp_gurobi_vars.append(v)
-    else:
-        assert x_L.ndim == 3, f"x_L ndim  {x_L.ndim}"
-        dim = 0
-        for chan in range(x_L.shape[0]):
-            chan_vars = []
-            for row in range(x_L.shape[1]):
-                row_vars = []
-                for col in range(x_L.shape[2]):
-                    lb = x_L[chan, row, col]
-                    ub = x_U[chan, row, col]
-                    v = self.model.addVar(lb=lb, ub=ub, obj=0,
-                                            vtype=grb.GRB.CONTINUOUS,
-                                            name=f'inp_{dim}')
-                                            # name=f'inp_[{chan},{row},{col}]')
-                    row_vars.append(v)
-                    dim += 1
-                chan_vars.append(row_vars)
-            inp_gurobi_vars.append(chan_vars)
+                                    name=f'inp_{idx[0]}')
+            idx[0] += 1
+            return v
+        else:
+            vars_list = []
+            for i, (sub_x_L, sub_x_U) in enumerate(zip(x_L, x_U)):
+                vars_list.append(create_gurobi_vars(sub_x_L, sub_x_U, solver_model))
+            return vars_list
+
+    inp_gurobi_vars = create_gurobi_vars(x_L, x_U, self.solver_model)
 
     node.solver_vars = inp_gurobi_vars
-    # save the gurobi input variables so that we can later extract primal values in input space easily
+    # Save the gurobi input variables so that we can later extract primal values in input space easily.
     self.input_vars = inp_gurobi_vars
-    self.model.update()
+    self.solver_model.update()
     return inp_gurobi_vars
 

@@ -1,9 +1,27 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Normalization operators"""
 import copy
 
 import torch
 
 from .base import *
+from .constant import BoundConstant
+from .leaf import BoundParams
 from .solver_utils import grb
 
 
@@ -72,18 +90,8 @@ class BoundBatchNormalization(Bound):
             weight = torch.ones_like(weight)
             bias = torch.zeros_like(bias)
 
-
         tmp_bias = bias - self.current_mean / torch.sqrt(self.current_var + self.eps) * weight
         tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
-
-        # for debug: this checking is passed, i.e., we derived the forward bound
-        # from the following correct computation procedure
-        # tmp_x = ((x[0].lb + x[0].ub) / 2.).detach()
-        # expect_output = self(tmp_x, *[_.lower for _ in x[1:]])
-        # tmp_weight = tmp_weight.view(*((1, -1) + (1,) * (tmp_x.ndim - 2)))
-        # tmp_bias = tmp_bias.view(*((1, -1) + (1,) * (tmp_x.ndim - 2)))
-        # computed_output = tmp_weight * tmp_x + tmp_bias
-        # assert torch.allclose(expect_output, computed_output, 1e-5, 1e-5)
 
         tmp_weight = tmp_weight.view(*((1, 1, -1) + (1,) * (inp.lw.ndim - 3)))
         new_lw = torch.clamp(tmp_weight, min=0.) * inp.lw + torch.clamp(tmp_weight, max=0.) * inp.uw
@@ -104,8 +112,18 @@ class BoundBatchNormalization(Bound):
         assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
             'Weight perturbation is not supported for BoundBatchNormalization'
 
+        def get_param(p):
+            if isinstance(p, BoundConstant):
+                # When affine is disabled in BN
+                return p.value
+            elif isinstance(p, BoundParams):
+                return p.param
+            else:
+                raise TypeError(p)
+
         # x[0]: input, x[1]: weight, x[2]: bias, x[3]: running_mean, x[4]: running_var
-        weight, bias = x[1].param, x[2].param
+        weight = get_param(x[1])
+        bias = get_param(x[2])
         if not self.training:
             self.current_mean = x[3].value
             self.current_var = x[4].value
@@ -181,7 +199,6 @@ class BoundBatchNormalization(Bound):
         uA, ubias = _bound_oneside(last_uA)
 
         return [(lA, uA), (None, None), (None, None), (None, None), (None, None)], lbias, ubias
-
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \

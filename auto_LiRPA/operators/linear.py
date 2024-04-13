@@ -1,10 +1,26 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Linear (possibly with weight perturbation) or Dot product layers """
 from torch import Tensor
+from torch.nn import Module
 from typing import Tuple, List
 from .activation_base import BoundOptimizableActivation
 from .base import *
 from .bivariate import BoundMul, MulHelper
-from .gradient_modules import LinearGrad
 from .leaf import BoundParams
 from ..patches import Patches, inplace_unfold
 from .solver_utils import grb
@@ -40,6 +56,7 @@ class BoundLinear(BoundOptimizableActivation):
 
         self.mul_helper = MulHelper()
         self.use_seperate_weights_for_lower_and_upper_bounds = False
+        self.batched_weight_and_bias = False
         self.share_alphas = options.get('matmul', {}).get('share_alphas', False)
 
     def _preprocess(self, a, b, c=None):
@@ -68,8 +85,8 @@ class BoundLinear(BoundOptimizableActivation):
             elif count_matmul >= 4:
                 shared_alpha_dims = [1, 2]
 
-        input_lb = [getattr(xi, 'lower', None) for xi in self.inputs]
-        input_ub = [getattr(xi, 'upper', None) for xi in self.inputs]
+        input_lb = [xi.lower for xi in self.inputs]
+        input_ub = [xi.upper for xi in self.inputs]
         input_lb = self._preprocess(*input_lb)
         input_ub = self._preprocess(*input_ub)
         x_l, x_u, y_l, y_u = self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1])
@@ -153,8 +170,9 @@ class BoundLinear(BoundOptimizableActivation):
             self._start = start_node.name
         has_bias = len(x) == 3
         # x[0]: input node, x[1]: weight, x[2]: bias
-        input_lb = [getattr(xi, 'lower', None) for xi in x]
-        input_ub = [getattr(xi, 'upper', None) for xi in x]
+        input_lb = [xi.lower for xi in x]
+        input_ub = [xi.upper for xi in x]
+
         # transpose and scale each term if necessary.
         input_lb = self._preprocess(*input_lb)
         input_ub = self._preprocess(*input_ub)
@@ -164,21 +182,72 @@ class BoundLinear(BoundOptimizableActivation):
         weight = input_lb[1]
         bias = input_lb[2] if has_bias else None
 
-        def _bound_oneside(last_A):
+        def _bound_oneside(last_A, weight_override=None):
+            # For most applications, weight_override should be left as None
+            # This will cause used_weight to be set to weight, which is the weight
+            # assigned to input_lb[1]. The only reason provide an override weight
+            # is if this layer has different weights for it's lower and upper bounds.
+            # That is currently only the case for the implementation of output
+            # constraints, where lower and upper bounds use distinct gammas.
+            if weight_override is None:
+                used_weight = weight
+            else:
+                used_weight = weight_override
+
             if last_A is None:
                 return None, 0
             if isinstance(last_A, torch.Tensor):
                 # Matrix mode.
                 # Just multiply this layer's weight into bound matrices, and produce biases.
-                next_A = last_A.to(weight).matmul(weight)
-                sum_bias = (last_A.to(bias).matmul(bias)
-                    if has_bias else 0.0)
-            elif isinstance(last_A, Patches):
+                if self.batched_weight_and_bias:
+                    # last_A is the A at the current layer (self)
+                    # next_A is the A for the layer consumed by the current (self) one
+                    # "next_A" makes sense because we're backpropagating. However, the below shapes
+                    # will refer to "prev_layer", which also is the layer that is consumed by
+                    # the current (self) one. That's because they should match the documentation in
+                    # output_constraints.py, which is written from a "forward facing" point of view.
+
+                    # We have: last_A.shape = (unstable_neurons, batch_size, this_layer_neurons)
+                    # We want: next_A.shape = (unstable_neurons, batch_size, prev_layer_neurons)
+
+                    # We also have
+                    # used_weight.shape = (batch_size, this_layer_neurons, prev_layer_neurons)
+
+                    mod_last_A = last_A.unsqueeze(2)
+                    mod_used_weight = used_weight.unsqueeze(0)
+                    # mod_last_A.shape = (unstable_neurons, batch_size, 1, this_layer_neurons)
+                    # mod_used_weight.shape = (1, batch_size, this_layer_neurons, prev_layer_neurons)
+
+                    mod_next_A = mod_last_A.to(mod_used_weight).matmul(mod_used_weight)
+                    # mod_next_A.shape = (unstable_neurons, batch_size, 1, prev_layer_neurons)
+
+                    next_A = mod_next_A.squeeze(2)
+                    # next_A.shape = (unstable_neurons, batch_size, prev_layer_neurons)
+
+                    if has_bias:
+                        # bias.shape = (batch_size, this_layer_neurons)
+
+                        mod_bias = bias.unsqueeze(0).unsqueeze(3)
+                        # mod_bias.shape = (1, batch_size, this_layer_neurons, 1)
+                        # mod_last_A.shape = (unstable_neurons, batch_size, 1, this_layer_neurons)
+
+                        mod_sum_bias = mod_last_A.to(mod_bias).matmul(mod_bias)
+                        # mod_sum_bias.shape = (unstable_neurons, batch_size, 1, 1)
+
+                        sum_bias = mod_sum_bias.squeeze(3).squeeze(2)
+                        # sum_bias.shape = (unstable_neurons, batch_size)
+                else:
+                    next_A = last_A.to(used_weight).matmul(used_weight)
+                    sum_bias = (last_A.to(bias).matmul(bias)
+                        if has_bias else 0.0)
+            else:
+                assert isinstance(last_A, Patches)
+                assert not self.batched_weight_and_bias
                 # Patches mode. After propagating through this layer, it will become a matrix.
                 # Reshape the weight matrix as a conv image.
                 # Weight was in (linear_output_shape, linear_input_shape)
                 # Reshape it to (linear_input_shape, c, h, w)
-                reshaped_weight = weight.transpose(0, 1).view(
+                reshaped_weight = used_weight.transpose(0, 1).view(
                     -1, *last_A.input_shape[1:])
                 # After unfolding the shape is
                 # (linear_input_shape, output_h, output_w, in_c, patch_h, patch_w)
@@ -273,9 +342,9 @@ class BoundLinear(BoundOptimizableActivation):
                         uA_x, ubias = self.onehot_mult(weight, bias, last_uA, batch_size)
                 else:
                     if set_l:
-                        lA_x, lbias = _bound_oneside(last_lA)
+                        lA_x, lbias = _bound_oneside(last_lA, weight_override=weight)
                     if set_u:
-                        uA_x, ubias = _bound_oneside(last_uA)
+                        uA_x, ubias = _bound_oneside(last_uA, weight_override=weight)
                 return lA_x, uA_x, lbias, ubias
 
             if self.use_seperate_weights_for_lower_and_upper_bounds:
@@ -385,9 +454,9 @@ class BoundLinear(BoundOptimizableActivation):
         # Use input_lb and input_ub instead.
         (alpha_l, beta_l, gamma_l,
          alpha_u, beta_u, gamma_u) = self.mul_helper.get_relaxation(
-             *self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1]),
-             self.opt_stage, getattr(self, 'alpha', None),
-             getattr(self, '_start', None))
+            *self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1]),
+            self.opt_stage, getattr(self, 'alpha', None),
+            getattr(self, '_start', None))
         x_shape = input_lb[0].size()
         if reduce_bias:
             gamma_l = torch.sum(gamma_l, dim=-1)
@@ -734,16 +803,21 @@ class BoundLinear(BoundOptimizableActivation):
         for neuron_idx in range(this_layer_shape[0]):
             out_lb = out_lbs[neuron_idx] if out_lbs is not None else -float('inf')
             out_ub = out_ubs[neuron_idx] if out_ubs is not None else float('inf')
-            if out_ub - out_lb < EPS:
+            if out_lbs is not None and out_ubs is not None:
                 """
                     If the inferred lb and ub are too close, it could lead to floating point disagreement
                     between solver's inferred lb and ub constraints and the computed ones from ab-crown.
                     Such disagreement can lead to "infeasible" result from the solver for feasible problem.
+                    Also, prevent lb to be larger than ub due to the floating point issue.
                     To avoid so, we relax the box constraints.
                     This should not affect the solver's result correctness,
                     since the tighter lb and ub can be inferred by the solver.
                 """
-                out_lb, out_ub = (out_lb + out_ub - EPS) / 2., (out_lb + out_ub + EPS) / 2.
+                diff = out_ub - out_lb
+                avg = (out_ub + out_lb) / 2.0
+                condition = (diff < EPS)
+                out_lb = np.where(condition, avg - EPS / 2.0, out_lb)
+                out_ub = np.where(condition, avg + EPS / 2.0, out_ub)
 
             lin_expr = 0
             if has_bias:
@@ -770,14 +844,23 @@ class BoundLinear(BoundOptimizableActivation):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        if isinstance(self.inputs[1], BoundParams):
-            w = self.inputs[1].param
+        if not self.inputs[1].from_input:
+            if isinstance(self.inputs[1], BoundParams):
+                w = self.inputs[1].param
+            else:
+                w = self.inputs[1].value
+            if not self.transB:
+                w = w.t()
+            node_grad = LinearGrad(w.detach())
+            return [(node_grad, (grad_upstream,), [])]
         else:
-            w = self.inputs[1].value
-        if not self.transB:
-            w = w.t()
-        node_grad = LinearGrad(w)
-        return node_grad, (grad_upstream,), []
+            assert not self.transB
+            w = self.inputs[1].forward_value
+            node_grad = MatMulGrad()
+            return [
+                (node_grad, (grad_upstream, self.inputs[1].forward_value), []),
+                (node_grad, (grad_upstream, self.inputs[0].forward_value), []),
+            ]
 
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
@@ -794,8 +877,6 @@ class BoundMatMul(BoundLinear):
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
-        self.x = x
-        self.y = y
         return x.matmul(y)
 
     def interval_propagate(self, *v):
@@ -830,11 +911,10 @@ class BoundMatMul(BoundLinear):
         ))
 
     def update_requires_input_bounds(self):
-        self.is_linear_op = False
-        for inp in self.inputs:
-            if not inp.perturbed:
-                # If any of the two inputs are constant, we do not need input bounds.
-                self.is_linear_op = True
+        # If the second multiplier is a constant, we do not need input bounds.
+        # It has to be the second multiplier, because our implementation in
+        # the bound computation only checks the second input.
+        self.is_linear_op = not self.inputs[1].perturbed
         if self.is_linear_op:
             # One input is constant; no bounds required.
             self.requires_input_bounds = []
@@ -904,3 +984,18 @@ class BoundIdentity(Bound):
 
     def bound_forward(self, dim_in, x):
         return x
+
+
+class LinearGrad(Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.weight = weight
+
+    def forward(self, grad_last):
+        weight = self.weight.to(grad_last).t()
+        return F.linear(grad_last, weight)
+
+
+class MatMulGrad(Module):
+    def forward(self, grad_last, x):
+        return grad_last.matmul(x.transpose(-1, -2))

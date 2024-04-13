@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 from collections import OrderedDict
 import torch
 from torch import Tensor
@@ -42,7 +58,7 @@ class SparseBeta:
             self.bias = self.bias.to(device=self.device, non_blocking=True)
 
 
-def get_split_nodes(self: 'BoundedModule', input_split=False):
+def get_split_nodes(self: 'BoundedModule'):
     self.split_nodes = []
     self.split_activations = {}
     splittable_activations = self.get_splittable_activations()
@@ -57,11 +73,6 @@ def get_split_nodes(self: 'BoundedModule', input_split=False):
         if split_activations_:
             self.split_nodes.append(layer)
             self.split_activations[layer.name] = split_activations_
-    if input_split:
-        root = self[self.root_names[0]]
-        if root not in self.split_nodes:
-            self.split_nodes.append(root)
-            self.split_activations[root.name] = []
     return self.split_nodes, self.split_activations
 
 
@@ -94,7 +105,9 @@ def set_beta(self: 'BoundedModule', enable_opt_interm_bounds, parameters,
             best_betas[node.name] = node.sparse_betas[0].val.detach().clone()
 
     # Beta has shape (batch, max_splits_per_layer)
-    parameters.append({'params': betas.copy(), 'lr': lr_beta, 'batch_dim': 0})
+    parameters.append({
+        'params': [item for item in betas if item.numel() > 0],
+        'lr': lr_beta, 'batch_dim': 0})
 
     if self.cut_used:
         self.set_beta_cuts(parameters, lr_cut_beta, betas, best_betas, cutter)

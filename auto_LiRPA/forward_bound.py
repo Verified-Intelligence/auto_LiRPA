@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import torch
 import warnings
 from .bound_ops import *
@@ -13,7 +29,7 @@ import sys
 sys.setrecursionlimit(1000000)
 
 
-def forward_general(self: 'BoundedModule', C=None, node=None, concretize=False,
+def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize=False,
                     offset=0):
     if self.bound_opts['dynamic_forward']:
         return self.forward_general_dynamic(C, node, concretize, offset)
@@ -26,7 +42,7 @@ def forward_general(self: 'BoundedModule', C=None, node=None, concretize=False,
             return node.value, node.value
         if not node.perturbed:
             node.lower = node.upper = self.get_forward_value(node)
-        if hasattr(node, 'lower'):
+        if node.is_lower_bound_current():
             node.linear = LinearBound(None, node.lower, None, node.upper, node.lower, node.upper)
             return node.lower, node.upper
 
@@ -96,7 +112,7 @@ def forward_general(self: 'BoundedModule', C=None, node=None, concretize=False,
         return lower, upper
 
 
-def forward_general_dynamic(self: 'BoundedModule', C=None, node=None,
+def forward_general_dynamic(self: 'BoundedModule', C=None, node:'Bound'=None,
                             concretize=False, offset=0):
     max_dim = self.bound_opts['forward_max_dim']
 
@@ -137,7 +153,7 @@ def forward_general_dynamic(self: 'BoundedModule', C=None, node=None,
                     None, node.value, None, node.value, node.value, node.value)
                 return node.linear
         if not node.perturbed:
-            if not hasattr(node, 'lower'):
+            if not node.is_lower_bound_current():
                 node.lower = node.upper = self.get_forward_value(node)
             if concretize:
                 return node.lower, node.upper
@@ -155,8 +171,8 @@ def forward_general_dynamic(self: 'BoundedModule', C=None, node=None,
     inp = []
     for l_pre in node.inputs:
         linear_inp = self.forward_general_dynamic(node=l_pre, offset=offset)
-        linear_inp.lower = getattr(l_pre, 'lower', None)
-        linear_inp.upper = getattr(l_pre, 'upper', None)
+        linear_inp.lower = l_pre.lower
+        linear_inp.upper = l_pre.upper
         inp.append(linear_inp)
     node._start = '_forward'
     if (C is not None and isinstance(node, BoundLinear) and

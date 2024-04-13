@@ -13,7 +13,7 @@ from torch.nn import CrossEntropyLoss
 import models
 from auto_LiRPA import BoundedModule, BoundedTensor, BoundDataParallel, CrossEntropyWrapper
 from auto_LiRPA.bound_ops import BoundExp
-from auto_LiRPA.eps_scheduler import LinearScheduler, SmoothedScheduler
+from auto_LiRPA.eps_scheduler import LinearScheduler, SmoothedScheduler, AdaptiveScheduler, FixedScheduler
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
 

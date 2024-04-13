@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Activation operators or other unary nonlinear operators, not including
 those placed in separate files."""
 import torch
@@ -129,3 +145,47 @@ class BoundATenHeaviside(BoundOptimizableActivation):
             lbias = (pos_lA * lower_b + neg_lA * upper_b).flatten(2).sum(-1)
 
         return [(lA, uA), (None, None)], lbias, ubias
+
+
+class BoundSqr(BoundOptimizableActivation):
+
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.splittable = True
+
+    def forward(self, x):
+        return x**2
+
+    def bound_relax(self, x, init=False, dim_opt=None):
+        if init:
+            self.init_linear_relaxation(x, dim_opt)
+        upper_k = x.lower + x.upper
+        # Upper bound: connect the two points (x_l, x_l^2) and (x_u, x_u^2).
+        # The upper bound should always be better than IBP.
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=upper_k, x0=x.lower)
+
+        if self.opt_stage in ['opt', 'reuse']:
+            mid = self.alpha[self._start]
+        else:
+            # Lower bound is a z=0 line if x_l and x_u have different signs.
+            # Otherwise, the lower bound is a tangent line at x_l.
+            # The lower bound should always be better than IBP.
+            # If both x_l and x_u < 0, select x_u. If both > 0, select x_l.
+            # If x_l < 0 and x_u > 0, we use the z=0 line as the lower bound.
+            mid = F.relu(x.lower) - F.relu(-x.upper)
+
+        self.add_linear_relaxation(mask=None, type='lower', k=2*mid, x0=mid)
+
+    def _init_opt_parameters_impl(self, size_spec, **kwargs):
+        """Implementation of init_opt_parameters for each start_node."""
+        l, u = self.inputs[0].lower, self.inputs[0].upper
+        alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
+        alpha.data[:2] = F.relu(l) - F.relu(-u)
+        return alpha
+
+    def interval_propagate(self, *v):
+        h_L, h_U = v[0][0], v[0][1]
+        lower = ((h_U < 0) * (h_U**2) + (h_L > 0) * (h_L**2))
+        upper = torch.max(h_L**2, h_U**2)
+        return lower, upper

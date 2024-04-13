@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Leaf nodes (indepedent nodes in the auto_LiRPA paper).
 
 Including input, parameter, buffer, etc."""
@@ -7,13 +23,14 @@ from .base import *
 
 
 class BoundInput(Bound):
-    def __init__(self, ori_name, value, perturbation=None, input_index=None):
-        super().__init__()
+    def __init__(self, ori_name, value, perturbation=None, input_index=None, options=None, attr=None):
+        super().__init__(options=options, attr=attr)
         self.ori_name = ori_name
         self.value = value
         self.perturbation = perturbation
         self.from_input = True
         self.input_index = input_index
+        self.no_jacobian = True
 
     def __setattr__(self, key, value):
         super().__setattr__(key, value)
@@ -140,8 +157,8 @@ class BoundInput(Bound):
             self.name))
 
 class BoundParams(BoundInput):
-    def __init__(self, ori_name, value, perturbation=None, options=None):
-        super().__init__(ori_name, None, perturbation)
+    def __init__(self, ori_name, value, perturbation=None, options=None, attr=None):
+        super().__init__(ori_name, None, perturbation, attr=attr)
         self.register_parameter('param', value)
         self.from_input = False
         self.initializing = False
@@ -164,10 +181,17 @@ class BoundParams(BoundInput):
             return self.param.requires_grad_(self.training)
 
 class BoundBuffers(BoundInput):
-    def __init__(self, ori_name, value, perturbation=None, options=None):
-        super().__init__(ori_name, None, perturbation)
+    def __init__(self, ori_name, value, perturbation=None, options=None, attr=None):
+        super().__init__(ori_name, None, perturbation, attr=attr)
         self.register_buffer('buffer', value.clone().detach())
-        self.from_input = not options.get('buffers', {}).get('no_batchdim', False)
+        # BoundBuffers are like constants and they are by default not from inputs.
+        # The "has_batchdim" was a hack that will forcibly set BoundBuffer to be
+        # from inputs, to workaround buffers with a batch size dimension. This is
+        # not needed in most cases now.
+        if 'buffers' in options and 'has_batchdim' in options['buffers']:
+            warnings.warn('The "has_batchdim" option for BoundBuffers is deprecated.'
+                          ' It may be removed from the next release.')
+        self.from_input = options.get('buffers', {}).get('has_batchdim', False)
 
     def forward(self):
         return self.buffer

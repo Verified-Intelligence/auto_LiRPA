@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Reduce operators"""
 from .base import *
 
@@ -12,7 +28,7 @@ class BoundReduce(Bound):
     def _parse_input_and_axis(self, *x):
         if len(x) > 1:
             assert not self.is_input_perturbed(1)
-            self.axis = tuple(x[1])
+            self.axis = tuple(item.item() for item in tuple(x[1]))
         self.axis = self.make_axis_non_negative(self.axis)
         return x[0]
 
@@ -101,7 +117,7 @@ class BoundReduceMean(BoundReduce):
 
     def bound_forward(self, dim_in, x, *args):
         assert self.keepdim
-        assert (len(self.axis) == 1)
+        assert len(self.axis) == 1
         axis = self.make_axis_non_negative(self.axis[0])
         assert (axis > 0)
         size = self.input_shape[axis]

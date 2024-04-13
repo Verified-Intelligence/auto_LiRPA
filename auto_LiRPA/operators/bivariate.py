@@ -1,13 +1,28 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Bivariate operators"""
 import torch
 from torch import Tensor
 from typing import Dict, Optional
 from .base import *
 from .activation_base import BoundOptimizableActivation
-from .nonlinear import BoundSqrt
+from .convex_concave import BoundSqrt
 from .clampmult import multiply_by_A_signs
 from ..utils import *
-from .solver_utils import grb
 
 
 class MulHelper:
@@ -89,7 +104,7 @@ class BoundMul(BoundOptimizableActivation):
     def get_relaxation_opt(self, x_l, x_u, y_l, y_u):
         return self.mul_helper.get_relaxation(
             x_l, x_u, y_l, y_u, self.opt_stage, getattr(self, 'alpha', None),
-            self._start)
+            getattr(self, '_start', None))
 
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
@@ -118,7 +133,7 @@ class BoundMul(BoundOptimizableActivation):
         elif isinstance(x, Patches):
             # Multiplies patches by a const. Assuming const is a tensor, and it must be in nchw format.
             assert isinstance(const, torch.Tensor) and const.ndim == 4
-            if const.size(0) == x.patches.size(1) and const.size(1) == x.patches.size(-3) and const.size(2) == const.size(3) == 1:
+            if (const.size(0) == 1 or const.size(0) == x.patches.size(1)) and const.size(1) == x.patches.size(-3) and const.size(2) == const.size(3) == 1:
                 # The case that we can do channel-wise broadcasting multiplication
                 # Shape of const: (batch, in_c, 1, 1)
                 # Shape of patches when unstable_idx is None: (spec, batch, in_c, patch_h, patch_w)
@@ -355,5 +370,4 @@ class BoundDiv(Bound):
             sqrt = torch.sqrt(1. / n * (s + 1))
             return torch.sign(dev) * (1. / sqrt)
 
-        self.x, self.y = x, y
         return x / y

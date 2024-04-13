@@ -1,4 +1,22 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
+from torch.nn import Module
 from .base import *
+from .constant import BoundConstant
 from .solver_utils import grb
 
 
@@ -76,6 +94,23 @@ class BoundAdd(Bound):
         self.solver_vars = np.array(new_layer_gurobi_vars).reshape(this_layer_shape[1:]).tolist()
         model.update()
 
+    def build_gradient_node(self, grad_upstream):
+        if self.inputs[0].output_shape == self.output_shape:
+            grad1 = (AddGrad(), (grad_upstream, ), [])
+        else:
+            if isinstance(self.inputs[0], BoundConstant):
+                grad1 = None
+            else:
+                raise NotImplementedError('Broadcasting has not been supported')
+        if self.inputs[1].output_shape == self.output_shape:
+            grad2 = (AddGrad(), (grad_upstream, ), [])
+        else:
+            if isinstance(self.inputs[1], BoundConstant):
+                grad2 = None
+            else:
+                raise NotImplementedError('Broadcasting has not been supported')
+        return [grad1, grad2]
+
 
 class BoundSub(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -123,8 +158,9 @@ class BoundSub(Bound):
             else:
                 return y_w + torch.zeros_like(x_b)
 
-        lw = add_w(x.lw, -y.uw, x.lb, y.lb)
-        uw = add_w(x.uw, -y.lw, x.ub, y.ub)
+        # Some nodes such as BoundConstant does not have uw and lw.
+        lw = add_w(x.lw, -y.uw if y.uw is not None else None, x.lb, y.lb)
+        uw = add_w(x.uw, -y.lw if y.lw is not None else None, x.ub, y.ub)
 
         return LinearBound(lw, lb, uw, ub)
 
@@ -156,3 +192,20 @@ class BoundSub(Bound):
         # reshape to the correct list shape of solver vars
         self.solver_vars = np.array(new_layer_gurobi_vars).reshape(this_layer_shape[1:]).tolist()
         model.update()
+
+    def build_gradient_node(self, grad_upstream):
+        if self.inputs[0].output_shape != self.inputs[1].output_shape:
+            raise NotImplementedError('Broadcasting has not been supported')
+        return [
+            (AddGrad(), (grad_upstream, ), []),
+            (AddGrad(w=-1.0), (grad_upstream, ), []),
+        ]
+
+
+class AddGrad(Module):
+    def __init__(self, w=1.0):
+        super().__init__()
+        self.w = w
+
+    def forward(self, grad_last):
+        return grad_last * self.w

@@ -93,18 +93,6 @@ class Test1DActivation(TestCase):
 
         # Get bounding results.
         forward = bounded_model(ptb_data)
-        if act_func in [torch.sin, torch.cos]:
-            bounded_model.set_bound_opts({
-                    'optimize_bound_args': {'iteration': 2, 'init_alpha': False},
-                })
-            bounded_model.init_alpha(x=(ptb_data,), skip_bound_compute=True)
-            node = bounded_model.optimizable_activations[0]
-            shape = node.alpha['/1'].data[0:2].shape
-            node.alpha['/1'].data[8:10, :] = (node.alpha['/1'][8:10, :]
-                - node.tp_right_lower_init['/1']) * torch.rand(*shape) + node.tp_right_lower_init['/1']
-            node.alpha['/1'].data[10:12, :] = (node.alpha['/1'][10:12, :]
-                - node.tp_right_upper_init['/1']) * torch.rand(*shape) + node.tp_right_upper_init['/1']
-
         output_lb, output_ub = bounded_model.compute_bounds(
             x=(ptb_data,), method=method)
         bounded_model.set_bound_opts({
@@ -159,6 +147,12 @@ class Test1DActivation(TestCase):
                 test_samples = 10
                 for _ in range(test_samples):
                     self.create_test(act_func=act_func, low=low, high=high, method='CROWN-Optimized')
+
+        print('Testing activations with large input range')
+        for act_func in [torch.sin, torch.tanh,
+                        pow_3, GELU]:
+            low, high = -600, 600
+            self.create_test(act_func=act_func, low=low, high=high, method='CROWN')
 
 
 if __name__ == '__main__':

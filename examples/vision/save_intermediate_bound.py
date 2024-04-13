@@ -53,4 +53,8 @@ image = BoundedTensor(image, ptb)
 
 lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1, }})
 lb, ub = lirpa_model.compute_bounds(x=(image,), method='CROWN-Optimized')
-save_dict = lirpa_model.save_intermediate('./mnist_a_adv_bounds.npy')
+# Intermediate layer bounds are returned as a dictionary, and if an argument is given,
+# a pytorch checkpoint will also be saved to disk.
+save_dict = lirpa_model.save_intermediate('./mnist_a_adv_bounds.pt')
+# To avoid saving the file and get just the bounds, call without any arguments:
+# save_dict = lirpa_model.save_intermediate()

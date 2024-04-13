@@ -1,5 +1,4 @@
 import os
-from collections import defaultdict
 import torch
 import torch.nn as nn
 import torchvision
@@ -38,7 +37,7 @@ class Test_Model(nn.Module):
 
 class TestMinMax(TestCase):
     def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, 
+        super().__init__(methodName,
             seed=1, ref_path='data/min_max_test_data', generate=generate)
 
     def test(self):
@@ -52,7 +51,7 @@ class TestMinMax(TestCase):
             test_data = torchvision.datasets.MNIST(
                 './data', train=False, download=True,
                 transform=torchvision.transforms.ToTensor())
-            
+
             N = 2
             image = test_data.data[:N].view(N,1,28,28)
             image = image.to(torch.float32) / 255.0
@@ -62,7 +61,7 @@ class TestMinMax(TestCase):
             eps = 0.3
             ptb = PerturbationLpNorm(eps = eps)
             image = BoundedTensor(image, ptb)
-            
+
             lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1}})
             lb, ub = lirpa_model.compute_bounds(x=(image,), method='CROWN-Optimized')
 

@@ -1,13 +1,26 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Resize operator """
-import itertools
-
 import torch
 
 from .base import *
 import numpy as np
 from .solver_utils import grb
 from ..patches import unify_shape, create_valid_mask, is_shape_used
-from .gradient_modules import Conv2dGrad
 
 
 class BoundResize(Bound):
@@ -301,3 +314,17 @@ class BoundResize(Bound):
         last_lA = _bound_oneside(last_lA)
         last_uA = _bound_oneside(last_uA)
         return [(last_lA, last_uA), (None, None), (None, None)], 0, 0
+
+
+class BoundExpand(Bound):
+    def forward(self, x, y):
+        y = y.clone()
+        assert y.ndim == 1
+        n, m = x.ndim, y.shape[0]
+        assert n <= m
+        for i in range(n):
+            if y[m - n + i] == 1:
+                y[m - n + i] = x.shape[i]
+            else:
+                assert x.shape[i] == 1 or x.shape[i] == y[m - n + i]
+        return x.expand(*list(y))

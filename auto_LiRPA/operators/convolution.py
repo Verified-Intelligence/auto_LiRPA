@@ -1,9 +1,26 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """ Convolution and padding operators"""
+from torch.autograd import Function
+from torch.nn import Module
 from .base import *
 import numpy as np
 from .solver_utils import grb
 from ..patches import unify_shape, compute_patches_stride_padding, is_shape_used, create_valid_mask
-from .gradient_modules import Conv2dGrad
 
 EPS = 1e-2
 
@@ -212,7 +229,7 @@ class BoundConv(Bound):
         # this layer shape (1,8,16,16)
         this_layer_shape = self.output_shape
         out_lbs, out_ubs = None, None
-        if hasattr(self, "lower"):
+        if self.is_lower_bound_current():
             # self.lower shape (1,8,16,16)
             out_lbs = self.lower.detach().cpu().numpy()
             out_ubs = self.upper.detach().cpu().numpy()
@@ -315,24 +332,18 @@ class BoundConv(Bound):
                     out_lb = out_lbs[0, out_chan_idx, out_row_idx, out_col_idx] if out_lbs is not None else -float('inf')
                     out_ub = out_ubs[0, out_chan_idx, out_row_idx, out_col_idx] if out_ubs is not None else float('inf')
                     if out_ub - out_lb < EPS:
-                        """
-                            If the inferred lb and ub are too close, it could lead to floating point disagreement
-                            between solver's inferred lb and ub constraints and the computed ones from ab-crown.
-                            Such disagreement can lead to "infeasible" result from the solver for feasible problem.
-                            To avoid so, we relax the box constraints.
-                            This should not affect the solver's result correctness,
-                            since the tighter lb and ub can be inferred by the solver.
-                        """
+                        # If the inferred lb and ub are too close, it could lead to floating point disagreement
+                        # between solver's inferred lb and ub constraints and the computed ones from ab-crown.
+                        # Such disagreement can lead to "infeasible" result from the solver for feasible problem.
+                        # To avoid so, we relax the box constraints.
+                        # This should not affect the solver's result correctness,
+                        # since the tighter lb and ub can be inferred by the solver.
                         out_lb, out_ub = (out_lb + out_ub - EPS) / 2., (out_lb + out_ub + EPS) / 2.
 
                     # add the output var and constraint
                     var = model.addVar(lb=out_lb, ub=out_ub,
                                             obj=0, vtype=grb.GRB.CONTINUOUS,
-                                            # name=f'lay{layer_idx}_[{out_chan_idx}, {out_row_idx}, {out_col_idx}]')
                                             name=f'lay{self.name}_{neuron_idx}')
-                    # model.addConstr(lin_expr == var, name=f'lay{layer_idx}_[{out_chan_idx}, {out_row_idx}, {out_col_idx}]_eq')
-                    # new_layer_gurobi_constrs.append(
-                        # model.addConstr(lin_expr == var, name=f'lay{self.name}_{neuron_idx}_eq'))
                     model.addConstr(lin_expr == var, name=f'lay{self.name}_{neuron_idx}_eq')
                     neuron_idx += 1
 
@@ -341,7 +352,6 @@ class BoundConv(Bound):
             new_layer_gurobi_vars.append(out_chan_vars)
 
         self.solver_vars = new_layer_gurobi_vars
-        # self.solver_constrs = new_layer_gurobi_constrs
         model.update()
 
     def interval_propagate(self, *v, C=None):
@@ -461,7 +471,7 @@ class BoundConv(Bound):
         node_grad = Conv2dGrad(
             self, self.inputs[1].param, self.stride, self.padding,
             self.dilation, self.groups)
-        return node_grad, (grad_upstream,), []
+        return [(node_grad, (grad_upstream,), [])]
 
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
@@ -604,10 +614,6 @@ class BoundConvTranspose(Bound):
                 new_patches = last_A.create_similar(
                         pieces, padding=padding, inserted_zeros=inserted_zeros, output_padding=output_padding,
                         input_shape=self.input_shape)
-                # if last_A is last_lA:
-                #     print(f'ConvT input : start_node {kwargs["start_node"].name} layer {self.name} {last_lA}')
-                #     print(f'ConvT layer : padding {self.padding} stride {self.stride} kernel {list(weight.shape[-2:])} input {list(self.input_shape)} output {list(self.output_shape)}')
-                #     print(f'ConvT output: start_node {kwargs["start_node"].name} layer {self.name} {new_patches}')
                 return new_patches, sum_bias
             else:
                 raise NotImplementedError()
@@ -684,6 +690,7 @@ class BoundConvTranspose(Bound):
             lb = center_b - deviation_b,
             uw = center_w + deviation_w,
             ub = center_b + deviation_b)
+
 
 class BoundPad(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -768,3 +775,215 @@ class BoundPad(Bound):
 
         self.solver_vars = new_layer_gurobi_vars
         model.update()
+
+
+class Conv2dGrad(Module):
+    def __init__(self, fw_module, weight, stride, padding, dilation, groups):
+        super().__init__()
+        self.weight = weight
+        self.dilation = dilation
+        self.groups = groups
+        self.fw_module = fw_module
+
+        assert isinstance(stride, list) and stride[0] == stride[1]
+        assert isinstance(padding, list) and padding[0] == padding[1]
+        assert isinstance(dilation, list) and dilation[0] == dilation[1]
+        self.stride = stride[0]
+        self.padding = padding[0]
+        self.dilation = dilation[0]
+
+    def forward(self, grad_last):
+        output_padding0 = (
+            int(self.fw_module.input_shape[2])
+            - (int(self.fw_module.output_shape[2]) - 1) * self.stride
+            + 2 * self.padding - 1 - (int(self.weight.size()[2] - 1) * self.dilation))
+        output_padding1 = (
+            int(self.fw_module.input_shape[3])
+            - (int(self.fw_module.output_shape[3]) - 1) * self.stride
+            + 2 * self.padding - 1 - (int(self.weight.size()[3] - 1) * self.dilation))
+
+        return Conv2dGradOp.apply(
+            grad_last, self.weight, self.stride, self.padding, self.dilation,
+            self.groups, output_padding0, output_padding1)
+
+
+class Conv2dGradOp(Function):
+    @staticmethod
+    def symbolic(g, x, w, stride, padding, dilation, groups,
+                 output_padding0, output_padding1):
+        return g.op(
+            'grad::Conv2d', x, w, stride_i=stride, padding_i=padding,
+            dilation_i=dilation, groups_i=groups,
+            output_padding0_i=output_padding0,
+            output_padding1_i=output_padding1).setType(x.type())
+
+    @staticmethod
+    def forward(
+            ctx, grad_last, w, stride, padding, dilation, groups, output_padding0,
+            output_padding1):
+        grad_shape = grad_last.shape
+        grad = F.conv_transpose2d(
+            grad_last.view(grad_shape[0], *grad_shape[1:]), w, None,
+            stride=stride, padding=padding, dilation=dilation,
+            groups=groups, output_padding=(output_padding0, output_padding1))
+
+        grad = grad.view((grad_shape[0], *grad.shape[1:]))
+        return grad
+
+
+class BoundConv2dGrad(Bound):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.stride = attr['stride']
+        self.padding = attr['padding']
+        self.dilation = attr['dilation']
+        self.groups = attr['groups']
+        self.output_padding = [
+            attr.get('output_padding0', 0),
+            attr.get('output_padding1', 0)
+        ]
+        self.has_bias = len(inputs) == 3
+        self.mode = options.get('conv_mode', 'matrix')
+        self.patches_start = True
+
+    def forward(self, *x):
+        # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
+        return F.conv_transpose2d(
+            x[0], x[1], None,
+            stride=self.stride, padding=self.padding, dilation=self.dilation,
+            groups=self.groups, output_padding=self.output_padding)
+
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
+        assert not self.is_input_perturbed(1)
+
+        lA_y = uA_y = lA_bias = uA_bias = None
+        weight = x[1].lower
+
+        def _bound_oneside(last_A):
+            if last_A is None:
+                return None, 0
+
+            if isinstance(last_A, torch.Tensor):
+                shape = last_A.size()
+                next_A = F.conv2d(
+                    last_A.reshape(shape[0] * shape[1], *shape[2:]),
+                    weight, None, stride=self.stride, padding=self.padding,
+                    dilation=self.dilation, groups=self.groups)
+                next_A = next_A.view(
+                    shape[0], shape[1], *next_A.shape[1:])
+                if self.has_bias:
+                    sum_bias = (last_A.sum((3, 4)) * x[2].lower).sum(2)
+                else:
+                    sum_bias = 0
+                return next_A, sum_bias
+            elif isinstance(last_A, Patches):
+                # Here we build and propagate a Patch object with
+                # (patches, stride, padding)
+                assert self.stride == 1, 'The patches mode only supports stride = 1'
+                if last_A.identity == 1:
+                    # create a identity patch
+                    # [out_dim, batch, out_c, out_h, out_w, in_dim, in_c, in_h, in_w]
+                    patch_shape = last_A.shape
+                    if last_A.unstable_idx is not None:
+                        # FIXME Somehow the usage of unstable_idx seems to have
+                        # been changed, and the previous code is no longer working.
+                        raise NotImplementedError(
+                            'Sparse patches for '
+                            'BoundConv2dGrad is not supported yet.')
+                        output_shape = last_A.output_shape
+                        patches = torch.eye(
+                            patch_shape[0]).to(weight)
+                        patches = patches.view([
+                            patch_shape[0], 1, 1, 1, 1, patch_shape[0], 1, 1])
+                        # [out_dim, bsz, out_c, out_h, out_w, out_dim, in_c, in_h, in_w]
+                        patches = patches.expand([
+                            patch_shape[0], patch_shape[1], patch_shape[2],
+                            output_shape[2], output_shape[3],
+                            patch_shape[0], 1, 1])
+                        patches = patches.transpose(0, 1)
+                        patches = patches[
+                            :,torch.tensor(list(range(patch_shape[0]))),
+                            last_A.unstable_idx[0], last_A.unstable_idx[1],
+                            last_A.unstable_idx[2]]
+                        patches = patches.transpose(0, 1)
+                    else:
+                        # out_dim * out_c
+                        patches = torch.eye(patch_shape[0]).to(weight)
+                        patches = patches.view([
+                            patch_shape[0], 1, 1, 1, patch_shape[0], 1, 1])
+                        patches = patches.expand(patch_shape)
+                else:
+                    patches = last_A.patches
+
+                if self.has_bias:
+                    # bias is x[2] (lower and upper are the same), and has
+                    # shape (c,).
+                    # Patches either has
+                    # [out_dim, batch, out_c, out_h, out_w, out_dim, c, h, w]
+                    # or [unstable_size, batch, out_dim, c, h, w].
+                    # sum_bias has shape (out_dim, batch, out_c, out_h, out_w)
+                    # or (unstable_size, batch).
+                    sum_bias = torch.einsum(
+                        'sb...ochw,c->sb...', patches, x[2].lower)
+                else:
+                    sum_bias = 0
+
+                flattened_patches = patches.reshape(
+                    -1, patches.size(-3), patches.size(-2), patches.size(-1))
+                # Pad to the full size
+                pieces = F.conv2d(
+                    flattened_patches, weight, stride=self.stride,
+                    padding=weight.shape[2]-1)
+                # New patch size:
+                # (out_c, batch, out_h, out_w, c, h, w)
+                # or (unstable_size, batch, c, h, w).
+                pieces = pieces.view(
+                    *patches.shape[:-3], pieces.size(-3), pieces.size(-2),
+                    pieces.size(-1))
+
+                # (left, right, top, bottom)
+                padding = last_A.padding if last_A is not None else (0, 0, 0, 0)
+                stride = last_A.stride if last_A is not None else 1
+
+                if isinstance(padding, int):
+                    padding = padding + weight.shape[2] - 1
+                else:
+                    padding = tuple(p + weight.shape[2] - 1 for p in padding)
+
+                return Patches(
+                    pieces, stride, padding, pieces.shape,
+                    unstable_idx=last_A.unstable_idx,
+                    output_shape=last_A.output_shape), sum_bias
+            else:
+                raise NotImplementedError()
+
+        lA_x, lbias = _bound_oneside(last_lA)
+        uA_x, ubias = _bound_oneside(last_uA)
+        return [(lA_x, uA_x), (lA_y, uA_y), (lA_bias, uA_bias)], lbias, ubias
+
+    def interval_propagate(self, *v, C=None):
+        assert not self.is_input_perturbed(1)
+
+        norm = Interval.get_perturbation(v[0])[0]
+        h_L, h_U = v[0]
+
+        weight = v[1][0]
+        bias = v[2][0] if self.has_bias else None
+
+        if norm == torch.inf:
+            mid = (h_U + h_L) / 2.0
+            diff = (h_U - h_L) / 2.0
+            weight_abs = weight.abs()
+            deviation = F.conv_transpose2d(
+                diff, weight_abs, None, stride=self.stride,
+                padding=self.padding, dilation=self.dilation,
+                groups=self.groups, output_padding=self.output_padding)
+        else:
+            raise NotImplementedError
+        center = F.conv_transpose2d(
+            mid, weight, bias, stride=self.stride, padding=self.padding,
+            dilation=self.dilation, groups=self.groups,
+            output_padding=self.output_padding)
+        upper = center + deviation
+        lower = center - deviation
+        return lower, upper

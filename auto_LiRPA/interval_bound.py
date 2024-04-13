@@ -1,3 +1,19 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import torch
 from .bound_ops import *
 from .utils import logger
@@ -12,14 +28,13 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
 
     logger.debug('IBP for %s', node)
 
-    def _delete_unused_bounds(node_list):
+    def _delete_unused_bounds(node_list: List[Bound]):
         """Delete bounds from input layers after use to save memory. Used when
         sparse_intermediate_bounds_with_ibp is true."""
         if delete_bounds_after_use:
             for n in node_list:
                 del n.interval
-                del n.lower
-                del n.upper
+                n.delete_lower_and_upper_bounds()
 
     if self.bound_opts.get('loss_fusion', False):
         res = self._IBP_loss_fusion(node, C)
@@ -63,6 +78,7 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
     else:
         _delete_unused_bounds(to_be_deleted_bounds)
         return node.interval
+
 
 def _IBP_loss_fusion(self: 'BoundedModule', node, C):
     """Merge BoundLinear, BoundGatherElements and BoundSub.
@@ -117,8 +133,23 @@ def check_IBP_intermediate(self: 'BoundedModule', node):
 
     Currently, assume all eligible operators have exactly one input.
     """
+    tighten_input_bounds = (
+        self.bound_opts['optimize_bound_args']['tighten_input_bounds']
+    )
+    directly_optimize_layer_names = (
+        self.bound_opts['optimize_bound_args']['directly_optimize']
+    )
+    if isinstance(node, BoundInput) and tighten_input_bounds:
+        return False
+    if node.name in directly_optimize_layer_names:
+        return False
+
+    if self.ibp_nodes is not None and node.name in self.ibp_nodes:
+        self.IBP_general(node)
+        return True
+
     if (isinstance(node, BoundReshape)
-            and hasattr(node.inputs[0], 'lower')
+            and node.inputs[0].is_lower_bound_current()
             and hasattr(node.inputs[1], 'value')):
         # Node for input value.
         val_input = node.inputs[0]
@@ -129,18 +160,18 @@ def check_IBP_intermediate(self: 'BoundedModule', node):
         node.interval = (node.lower, node.upper)
         return True
 
+    # Use IBP if node.ibp_intermediate == True (for nodes such as ReLU)
     nodes = []
-    while (getattr(node, 'lower', None) is None
-            or getattr(node, 'upper', None) is None):
+    while (not node.is_lower_bound_current() or not node.is_upper_bound_current()):
         if not node.ibp_intermediate:
             return False
         assert len(node.inputs) == 1, (
             'Nodes with ibp_intermediate=True cannot have more than one input')
         nodes.append(node)
-        node = node.inputs[0]  # FIXME: this cannot handle multiple inputs.
+        node = node.inputs[0]
     nodes.reverse()
     for n in nodes:
-        n.interval = self.IBP_general(n)
+        self.IBP_general(n)
 
     return True
 
@@ -151,6 +182,17 @@ def check_IBP_first_linear(self: 'BoundedModule', node):
     Disable this optimization when we need the A matrix of the first nonlinear
     layer, forcibly use CROWN to record A matrix.
     """
+    tighten_input_bounds = (
+        self.bound_opts['optimize_bound_args']['tighten_input_bounds']
+    )
+    directly_optimize_layer_names = (
+        self.bound_opts['optimize_bound_args']['directly_optimize']
+    )
+    if isinstance(node, BoundInput) and tighten_input_bounds:
+        return False
+    if node.name in directly_optimize_layer_names:
+        return False
+
     # This is the list of all intermediate layers where we need to refine.
     if self.intermediate_constr is not None:
         intermediate_beta_enabled_layers = [

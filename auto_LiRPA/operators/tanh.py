@@ -1,6 +1,23 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """BoundTanh and similar ops."""
 import warnings
 import torch
+from torch.nn import Module
 from .base import *
 from .activation_base import BoundOptimizableActivation
 
@@ -19,6 +36,7 @@ def darctan(x):
     return (x.square() + 1.).reciprocal()
 
 
+# TODO refactor BoundTanh into a general op class for convex/concave like nonlinear functions.
 class BoundTanh(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
                  activation=('tanh', torch.tanh, dtanh), precompute=True):
@@ -32,7 +50,7 @@ class BoundTanh(BoundOptimizableActivation):
         self.activation_forward = activation[1]
         self.activation_backward = activation[2]
         if precompute:
-            self.precompute_relaxation(*activation)
+            self.precompute_relaxation(self.activation_forward, self.activation_backward)
         # TODO make them configurable when implementing a general nonlinear activation.
         # Neurons whose gap between pre-activation bounds is smaller than this
         # threshold will be masked and don't need branching.
@@ -44,25 +62,28 @@ class BoundTanh(BoundOptimizableActivation):
         # The initialization will be adjusted if the pre-activation bounds are too loose.
         self.loose_threshold = options.get('tanh', {}).get(
             'loose_threshold', None)
+        self.convex_concave = None
 
     def opt_init(self):
         super().opt_init()
         self.tp_both_lower_init = {}
         self.tp_both_upper_init = {}
 
-    def _init_opt_parameters_impl(self, size_spec, name_start):
+    def _init_opt_parameters_impl(self, size_spec, name_start, num_params=8):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
         shape = l.shape
-        # Alpha dimension is (8, output_shape, batch, *shape) for Tanh.
-        alpha = torch.empty(8, size_spec, *shape, device=l.device)
-        alpha.data[:4] = ((l + u) / 2)
+        # Alpha dimension is (num_params, output_shape, batch, *shape) for Tanh.
+        alpha = torch.empty(num_params, size_spec, *shape, device=l.device)
+        alpha.data[:4] = (l + u) / 2
         alpha.data[4:6] = self.tp_both_lower_init[name_start]
         alpha.data[6:8] = self.tp_both_upper_init[name_start]
+        if num_params > 8:
+            alpha.data[8:] = 0
         return alpha
 
     @torch.no_grad()
-    def precompute_relaxation(self, name, func, dfunc, x_limit=500):
+    def precompute_relaxation(self, func, dfunc, x_limit=500):
         """
         This function precomputes the tangent lines that will be used as
         lower/upper bounds for S-shapes functions.
@@ -73,16 +94,18 @@ class BoundTanh(BoundOptimizableActivation):
         max_iter = 100
 
         logger.debug('Precomputing relaxation for %s (pre-activation limit: %f)',
-                     name, x_limit)
+                     self.__class__.__name__, x_limit)
 
         def check_lower(upper, d):
-            """Given two points upper, d (d <= upper), check if the slope at d will be less than f(upper) at upper."""
+            """Given two points upper, d (d <= upper),
+            check if the slope at d will be less than f(upper) at upper."""
             k = dfunc(d)
             # Return True if the slope is a lower bound.
             return k * (upper - d) + func(d) <= func(upper)
 
         def check_upper(lower, d):
-            """Given two points lower, d (d >= lower), check if the slope at d will be greater than f(lower) at lower."""
+            """Given two points lower, d (d >= lower),
+            check if the slope at d will be greater than f(lower) at lower."""
             k = dfunc(d)
             # Return True if the slope is a upper bound.
             return k * (lower - d) + func(d) >= func(lower)
@@ -132,6 +155,45 @@ class BoundTanh(BoundOptimizableActivation):
     def forward(self, x):
         return self.activation_forward(x)
 
+    def retrieve_from_precompute(self, precomputed_d, input_bound, default_d):
+        """
+        precomputed_d: The precomputed tangent points.
+        input_bound: The input bound of the function.
+        default_d: If input bound goes out of precompute range, we will use default_d.
+        All of the inputs should share the same shape.
+        """
+
+        # divide input bound into number of steps to the inflection point
+        index = torch.max(
+            torch.zeros(input_bound.numel(), dtype=torch.long, device=input_bound.device),
+            (input_bound / self.step_pre).to(torch.long).reshape(-1)
+        ) + 1
+        # If precompute range is smaller than input, tanget points will be taken from default.
+        # The default value should be a guaranteed bound
+        if index.max() >= precomputed_d.numel():
+            warnings.warn(f'Pre-activation bounds are too loose for {self}')
+            return torch.where(
+                (index < precomputed_d.numel()).view(input_bound.shape),
+                torch.index_select(
+                    precomputed_d, 0, index.clamp(max=precomputed_d.numel() - 1)
+                ).view(input_bound.shape),
+                default_d,
+            ).view(input_bound.shape)
+        else:
+            return torch.index_select(precomputed_d, 0, index).view(input_bound.shape)
+
+    def generate_d_lower_upper(self, lower, upper):
+        # Indices of neurons with input upper bound >=0, whose optimal slope to
+        # lower bound the function was pre-computed.
+        # Note that for neurons with also input lower bound >=0,
+        # they will be masked later.
+        d_lower = self.retrieve_from_precompute(self.d_lower, upper, lower)
+
+        # Indices of neurons with lower bound <=0, whose optimal slope to upper
+        # bound the function was pre-computed.
+        d_upper = self.retrieve_from_precompute(self.d_upper, -lower, upper)
+        return d_lower, d_upper
+
     def bound_relax_impl(self, x, func, dfunc):
         lower, upper = x.lower, x.upper
         y_l, y_u = func(lower), func(upper)
@@ -146,48 +208,20 @@ class BoundTanh(BoundOptimizableActivation):
         self.add_linear_relaxation(
             mask=self.mask_pos, type='lower', k=k_direct, x0=lower, y0=y_l)
 
-        # Indices of neurons with input upper bound >=0, whose optimal slope to lower bound the function was pre-computed.
-        # Note that for neurons with also input lower bound >=0, they will be masked later.
-        index = torch.max(
-            torch.zeros(upper.numel(), dtype=torch.long, device=upper.device),
-            (upper / self.step_pre).to(torch.long).reshape(-1)
-        ) + 1
-        if index.max() >= self.d_lower.numel():
-            warnings.warn(f'Pre-activation bounds are too loose for {self}')
-            # Lookup the lower bound slope from the pre-computed table.
-            d_lower = torch.where(
-                (index < self.d_lower.numel()).view(lower.shape),
-                torch.index_select(
-                    self.d_lower, 0, index.clamp(max=self.d_lower.numel() - 1)
-                ).view(lower.shape),
-                lower,
-                # If the pre-activation bounds are too loose, just use IBP.
-                # torch.ones_like(index).to(lower) * (-100.)
-            ).view(lower.shape)
-        else:
-            # Lookup the lower bound slope from the pre-computed table.
-            d_lower = torch.index_select(
-                self.d_lower, 0, index).view(lower.shape)
+        d_lower, d_upper = self.generate_d_lower_upper(lower, upper)
 
-        # Indices of neurons with lower bound <=0, whose optimal slope to upper
-        # bound the function was pre-computed.
-        index = torch.max(
-            torch.zeros(lower.numel(), dtype=torch.long, device=lower.device),
-            (lower / -self.step_pre).to(torch.long).reshape(-1)
-        ) + 1
-        if index.max() >= self.d_upper.numel():
-            warnings.warn(f'Pre-activation bounds are too loose for {self}')
-            # Lookup the lower bound slope from the pre-computed table.
-            d_upper = torch.where(
-                (index < self.d_upper.numel()).view(upper.shape),
-                torch.index_select(
-                    self.d_upper, 0, index.clamp(max=self.d_upper.numel() - 1)
-                ).view(upper.shape),
-                upper,
-            )
+        if self.convex_concave is None:
+            mask_direct_lower = k_direct < dfunc(lower)
+            mask_direct_upper = k_direct < dfunc(upper)
         else:
-            d_upper = torch.index_select(
-                self.d_upper, 0, index).view(upper.shape)
+            mask_direct_lower = torch.where(
+                self.convex_concave,
+                k_direct < dfunc(lower), k_direct > dfunc(upper))
+            mask_direct_upper = torch.where(
+                self.convex_concave,
+                k_direct < dfunc(upper), k_direct > dfunc(lower))
+        mask_direct_lower = torch.logical_and(mask_direct_lower, self.mask_both)
+        mask_direct_upper = torch.logical_and(mask_direct_upper, self.mask_both)
 
         if self.opt_stage in ['opt', 'reuse']:
             if not hasattr(self, 'alpha'):
@@ -201,10 +235,22 @@ class BoundTanh(BoundOptimizableActivation):
                 torch.min(self.alpha[ns][0:2], upper), lower)
             self.alpha[ns].data[2:4] = torch.max(
                 torch.min(self.alpha[ns][2:4], upper), lower)
-            self.alpha[ns].data[4:6] = torch.min(
-                self.alpha[ns][4:6], d_lower)
-            self.alpha[ns].data[6:8] = torch.max(
-                self.alpha[ns][6:8], d_upper)
+            if self.convex_concave is None:
+                self.alpha[ns].data[4:6] = torch.min(
+                    self.alpha[ns][4:6], d_lower)
+                self.alpha[ns].data[6:8] = torch.max(
+                    self.alpha[ns][6:8], d_upper)
+            else:
+                self.alpha[ns].data[4:6, :] = torch.where(
+                    self.convex_concave,
+                    torch.max(lower, torch.min(self.alpha[ns][4:6, :], d_lower)),
+                    torch.min(upper, torch.max(self.alpha[ns][4:6, :], d_lower))
+                )
+                self.alpha[ns].data[6:8, :] = torch.where(
+                    self.convex_concave,
+                    torch.min(upper, torch.max(self.alpha[ns][6:8, :], d_upper)),
+                    torch.max(lower, torch.min(self.alpha[ns][6:8, :], d_upper))
+                )
 
             # shape [2, out_c, n, c, h, w].
             tp_pos = self.alpha[ns][0:2]  # For upper bound relaxation
@@ -214,24 +260,24 @@ class BoundTanh(BoundOptimizableActivation):
 
             # No need to use tangent line, when the tangent point is at the left
             # side of the preactivation lower bound. Simply connect the two sides.
-            mask_direct = torch.logical_and(self.mask_both, k_direct < dfunc(lower))
             self.add_linear_relaxation(
-                mask=mask_direct, type='lower', k=k_direct, x0=lower, y0=y_l)
+                mask=mask_direct_lower, type='lower', k=k_direct, x0=lower, y0=y_l)
             self.add_linear_relaxation(
-                mask=torch.logical_xor(self.mask_both, mask_direct), type='lower',
-                k=dfunc(tp_both_lower), x0=tp_both_lower)
-
-            mask_direct = torch.logical_and(self.mask_both, k_direct < dfunc(upper))
-            self.add_linear_relaxation(
-                mask=mask_direct, type='upper', k=k_direct, x0=lower, y0=y_l)
-            self.add_linear_relaxation(
-                mask=torch.logical_xor(self.mask_both, mask_direct), type='upper',
-                k=dfunc(tp_both_upper), x0=tp_both_upper)
+                mask=torch.logical_xor(self.mask_both, mask_direct_lower), type='lower',
+                k=dfunc(tp_both_lower), x0=tp_both_lower, y0=func(tp_both_lower))
 
             self.add_linear_relaxation(
-                mask=self.mask_neg, type='lower', k=dfunc(tp_neg), x0=tp_neg)
+                mask=mask_direct_upper, type='upper', k=k_direct, x0=lower, y0=y_l)
             self.add_linear_relaxation(
-                mask=self.mask_pos, type='upper', k=dfunc(tp_pos), x0=tp_pos)
+                mask=torch.logical_xor(self.mask_both, mask_direct_upper), type='upper',
+                k=dfunc(tp_both_upper), x0=tp_both_upper, y0=func(tp_both_upper))
+
+            self.add_linear_relaxation(
+                mask=self.mask_neg, type='lower', k=dfunc(tp_neg),
+                x0=tp_neg, y0=func(tp_neg))
+            self.add_linear_relaxation(
+                mask=self.mask_pos, type='upper', k=dfunc(tp_pos),
+                x0=tp_pos, y0=func(tp_pos))
         else:
             if self.opt_stage == 'init':
                 # Initialize optimizable slope.
@@ -273,27 +319,24 @@ class BoundTanh(BoundOptimizableActivation):
             k = dfunc(d_lower)
             # Another possibility is to use the direct line as the lower bound, when this direct line does not intersect with f.
             # This is only valid when the slope at the input lower bound has a slope greater than the direct line.
-            mask_direct = torch.logical_and(self.mask_both, k_direct < dfunc(lower))
-            self.add_linear_relaxation(mask=mask_direct, type='lower', k=k_direct, x0=lower, y0=y_l)
+            self.add_linear_relaxation(mask=mask_direct_lower, type='lower', k=k_direct, x0=lower, y0=y_l)
             # Otherwise we do not use the direct line, we use the d_lower slope.
             self.add_linear_relaxation(
-                mask=torch.logical_xor(self.mask_both, mask_direct),
-                type='lower', k=k, x0=d_lower)
+                mask=torch.logical_xor(self.mask_both, mask_direct_lower),
+                type='lower', k=k, x0=d_lower, y0=func(d_lower))
 
             # Do the same for the upper bound side when input lower bound <=0 and upper bound >= 0.
             k = dfunc(d_upper)
-            mask_direct = torch.logical_and(self.mask_both, k_direct < dfunc(upper))
             self.add_linear_relaxation(
-                mask=mask_direct, type='upper', k=k_direct, x0=lower, y0=y_l)
+                mask=mask_direct_upper, type='upper', k=k_direct, x0=lower, y0=y_l)
             self.add_linear_relaxation(
-                mask=torch.logical_xor(self.mask_both, mask_direct),
-                type='upper', k=k, x0=d_upper)
+                mask=torch.logical_xor(self.mask_both, mask_direct_upper),
+                type='upper', k=k, x0=d_upper, y0=func(d_upper))
 
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:
             self.init_linear_relaxation(x, dim_opt)
-        self.bound_relax_impl(
-            x, self.activation_forward, self.activation_backward)
+        self.bound_relax_impl(x, self.activation_forward, self.activation_backward)
 
     def get_split_mask(self, lower, upper, input_index):
         assert input_index == 0
@@ -302,6 +345,15 @@ class BoundTanh(BoundOptimizableActivation):
             torch.logical_or(upper >= self.split_range[0],
                              lower <= self.split_range[1])
         )
+
+    def build_gradient_node(self, grad_upstream):
+        if self.activation_name == 'tanh':
+            node_grad = TanhGrad()
+            grad_input = (grad_upstream, self.inputs[0].forward_value)
+            grad_extra_nodes = [self.inputs[0]]
+            return [(node_grad, grad_input, grad_extra_nodes)]
+        else:
+            raise NotImplementedError(self.activation_name)
 
 
 class BoundSigmoid(BoundTanh):
@@ -380,3 +432,7 @@ class BoundTan(BoundAtan):
         self.uw = new_upper_slope
         self.ub = new_upper_bias
 
+
+class TanhGrad(Module):
+    def forward(self, g, preact):
+        return g * (1 - torch.tanh(preact)**2).unsqueeze(1)

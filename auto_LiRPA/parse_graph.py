@@ -1,10 +1,26 @@
-import os
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import torch
 from torch.onnx.utils import _optimize_graph
-from torch.onnx.symbolic_helper import _set_opset_version
 from collections import OrderedDict
 from collections import namedtuple
+from packaging import version
 import re
+import os
 from .bounded_tensor import BoundedTensor, BoundedParameter
 from .utils import logger, unpack_inputs
 
@@ -148,10 +164,40 @@ def get_output_template(out):
     else:
         raise NotImplementedError
 
+def parse_source(node):
+    kind = node.kind()
+    if hasattr(node, 'sourceRange'):
+        source_range_str = node.sourceRange()
+        # divide source_range_str by '\n' and drop any lines containing 'torch.nn'
+        source_range_str = '\n'.join([line for line in source_range_str.split('\n') if 'torch/nn' not in line])
+        match = re.match(r'([^ ]+\.py)\((\d+)\)', source_range_str)
+        if match:
+            # match.group(1) is the file name
+            # match.group(2) is the line number
+            return f"{kind}_{os.path.basename(match.group(1)).split('.')[0]}_{match.group(2)}"
+    return kind
+
+def update_debug_names(trace_graph):
+    visited = []
+    for n in trace_graph.nodes():
+        for input in n.inputs():
+            if input.debugName() not in visited:
+                input.setDebugName(f"{input.debugName()}_{parse_source(n)}")
+                visited.append(input.debugName())
+        for output in n.outputs():
+            if output.debugName() not in visited:
+                output.setDebugName(f"{output.debugName()}_{parse_source(n)}")
+                visited.append(output.debugName())
+
 def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
     params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
     trace, out = torch.jit._get_trace_graph(module, inputs)
-    _set_opset_version(12)
+    if version.parse(torch.__version__) < version.parse("2.0.0"):
+        from torch.onnx.symbolic_helper import _set_opset_version
+        _set_opset_version(12)
+
+    logger.debug("Graph before ONNX convertion:")
+    logger.debug(trace)
 
     # Assuming that the first node in the graph is the primary input node.
     # It must have a batch dimension.
@@ -163,11 +209,11 @@ def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=No
         dynamic_axes={primary_input: {0: 'batch'}})
     logger.debug('trace_graph: %s', trace_graph)
 
-    if int(os.environ.get('AUTOLIRPA_DEBUG_GRAPH', 0)) > 0:
-        print("Graph before ONNX convertion:")
-        print(trace)
-        print("ONNX graph:")
-        print(trace_graph)
+    if os.environ.get('AUTOLIRPA_DEBUG_NAMES', 0):
+        update_debug_names(trace_graph)
+
+    logger.debug("ONNX graph:")
+    logger.debug(trace_graph)
 
     if not isinstance(inputs, tuple):
         inputs = (inputs, )

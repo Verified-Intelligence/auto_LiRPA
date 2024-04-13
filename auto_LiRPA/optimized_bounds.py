@@ -1,8 +1,23 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import time
 import os
 from collections import OrderedDict
 from contextlib import ExitStack
-from auto_LiRPA.operators.leaf import BoundInput
 
 import torch
 from torch import optim
@@ -20,7 +35,13 @@ default_optimize_bound_args = {
     'enable_alpha_crown': True,  # Enable optimization of alpha.
     'enable_beta_crown': False,  # Enable beta split constraint.
 
-    'apply_output_constraints_to': None,  # Enable optimization w.r.t. output constraints.
+    'apply_output_constraints_to': [],  # Enable optimization w.r.t. output constraints.
+    'tighten_input_bounds': False,  # Don't tighten input bounds
+    # If output constraints are activated, use only bounds computed with them.
+    'best_of_oc_and_no_oc': False,
+    'directly_optimize': [],  # No layer should be directly optimized
+    'oc_lr': 0.1,  # learning rate for dualized output constraints
+    'share_gammas': False,
 
     'iteration': 20,  # Number of alpha/beta optimization iterations.
     # Share some alpha variables to save memory at the cost of slightly
@@ -109,10 +130,12 @@ def _set_gammas(nodes, parameters):
     Adds gammas to parameters list
     """
     gammas = []
+    gamma_lr = 0.1
     for node in nodes:
         if hasattr(node, 'gammas'):
-            gammas.append(node.gammas)
-    gamma_lr = 0.1
+            gammas.append(node.gammas_underlying_tensor)
+            # The learning rate is the same for all layers
+            gamma_lr = node.options['optimize_bound_args']['oc_lr']
     parameters.append({'params': gammas, 'lr': gamma_lr})
 
 def _save_ret_first_time(bounds, fill_value, x, best_ret):
@@ -388,6 +411,19 @@ def _get_optimized_bounds(
     if aux_reference_bounds is None:
         aux_reference_bounds = {}
 
+    if len(apply_output_constraints_to) > 0:
+        # INVPROP requires that all layers have cached bounds. This may not be the case
+        # unless we explicitly compute them.
+        self.bound_opts['optimize_bound_args']['apply_output_constraints_to'] = []
+        with torch.no_grad():
+            self.compute_bounds(
+                x=x, C=C, method='backward', bound_lower=bound_lower,
+                bound_upper=bound_upper, final_node_name=final_node_name,
+                interm_bounds=interm_bounds)
+        self.bound_opts['optimize_bound_args']['apply_output_constraints_to'] = (
+            apply_output_constraints_to
+        )
+
     need_grad = True
     patience = 0
     for i in range(iteration):
@@ -421,6 +457,19 @@ def _get_optimized_bounds(
             self.last_update_preserve_mask = pruner.preserve_mask
             pruner.cache_full_sized_alpha(optimizable_activations)
 
+        # If input bounds are tightened with output constraints, they depend on the
+        # relaxations of all other layers. The current iteration will recompute them.
+        # This involves concretizing them, so they will depend on themselves.
+        # To avoid a loop of gradients, remove gradients here.
+        tighten_input_bounds = (
+                self.bound_opts['optimize_bound_args']['tighten_input_bounds']
+        )
+        if tighten_input_bounds:
+            for root in self.roots():
+                if hasattr(root, 'perturbation') and root.perturbation is not None:
+                    root.perturbation.x_L = root.perturbation.x_L.detach()
+                    root.perturbation.x_U = root.perturbation.x_U.detach()
+
         with torch.no_grad() if not need_grad else ExitStack():
             # ret is lb, ub or lb, ub, A_dict (if return_A is set to true)
             ret = self.compute_bounds(
@@ -440,7 +489,31 @@ def _get_optimized_bounds(
                 # corresponding A matrices and biases.
                 intermediate_constr=intermediate_constr,
                 needed_A_dict=needed_A_dict,
-                update_mask=pruner.preserve_mask if pruner else None)
+                update_mask=pruner.preserve_mask if pruner else None,
+                cache_bounds=len(apply_output_constraints_to) > 0,
+            )
+        # If output constraints are used, it's possible that no inputs satisfy them.
+        # If one of the layer that uses output constraints realizes this, it sets
+        # self.infeasible_bounds = True for this element in the batch.
+        if self.infeasible_bounds is not None and torch.any(self.infeasible_bounds):
+            if ret[0] is not None:
+                ret = (
+                    torch.where(
+                        self.infeasible_bounds.unsqueeze(1),
+                        torch.full_like(ret[0], float('inf')),
+                        ret[0],
+                    ),
+                    ret[1],
+                )
+            if ret[1] is not None:
+                ret = (
+                    ret[0],
+                    torch.where(
+                        self.infeasible_bounds.unsqueeze(1),
+                        torch.full_like(ret[1], float('-inf')),
+                        ret[1],
+                    ),
+                )
         ret_l, ret_u = ret[0], ret[1]
 
         if pruner:
@@ -501,15 +574,18 @@ def _get_optimized_bounds(
 
         loss_ = l if bound_lower else -u
         total_loss = -1 * loss_
+        directly_optimize_layers = self.bound_opts['optimize_bound_args']['directly_optimize']
+        for directly_optimize_layer_name in directly_optimize_layers:
+            total_loss += (
+                self[directly_optimize_layer_name].upper.sum()
+                - self[directly_optimize_layer_name].lower.sum()
+            )
 
         if type(stop_criterion) == bool:
             loss = total_loss.sum() * (not stop_criterion)
         else:
             assert total_loss.shape == stop_criterion.shape
             loss = (total_loss * stop_criterion.logical_not()).sum()
-        # For logging, print the total sum. Otherwise the loss may appear
-        # to be increasing as more examples are stopped.
-        loss_sum = total_loss.sum()
 
         stop_criterion_final = isinstance(
             stop_criterion, torch.Tensor) and stop_criterion.all()
@@ -599,7 +675,7 @@ def _get_optimized_bounds(
 
         if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
             print(f'****** iter [{i}]',
-                  f'loss: {loss_sum.item()}, lr: {opt.param_groups[0]["lr"]}',
+                  f'loss: {loss.item()}, lr: {opt.param_groups[0]["lr"]}',
                   (' pruning_in_iteration open status: '
                      f'{pruner.pruning_in_iteration}') if pruner else '')
 
@@ -638,7 +714,10 @@ def _get_optimized_bounds(
             loss.backward()
 
             # All intermediate variables are not needed at this point.
-            self._clear_and_set_new(None)
+            self._clear_and_set_new(
+                None,
+                cache_bounds=len(apply_output_constraints_to) > 0,
+            )
             if opt_choice == 'adam-autolr':
                 opt.step(lr_scale=[loss_weight, loss_weight])
             else:
@@ -700,7 +779,7 @@ def _get_optimized_bounds(
     if interm_bounds is not None and not fix_interm_bounds:
         for l in self._modules.values():
             if (l.name in interm_bounds.keys()
-                    and hasattr(l, 'lower')):
+                    and l.is_lower_bound_current()):
                 l.lower = torch.max(l.lower, interm_bounds[l.name][0])
                 l.upper = torch.min(l.upper, interm_bounds[l.name][1])
                 infeasible_neurons = l.lower > l.upper
@@ -770,6 +849,14 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
             self.bound_opts['optimize_bound_args']['apply_output_constraints_to'] = (
                 apply_output_constraints_to
             )
+            if len(apply_output_constraints_to) > 0:
+                # Some layers, such as the BoundTanh layer, do some of their initialization
+                # in the forward pass. We need to call the forward pass again to ensure
+                # that they are initialized for the output constraints, too.
+                l, u = self.compute_bounds(
+                    x=x, C=c, method=method, bound_lower=bound_lower,
+                    bound_upper=bound_upper, final_node_name=final_node_name,
+                    interm_bounds=interm_bounds, cache_bounds=True)
     else:
         # we skip, but we still would like to figure out the "used",
         # "perturbed", "backward_from" of each note in the graph
@@ -786,26 +873,11 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
         if method in ['forward', 'forward+backward']:
             start_nodes.append(('_forward', 1, None, False))
         if method in ['backward', 'forward+backward']:
-            if (
-                apply_output_constraints_to is not None
-                and len(apply_output_constraints_to) > 0
-            ):
-                input_node = None
-                for potential_input_node_name in self.input_name:
-                    if type(self[potential_input_node_name]) is BoundInput:
-                        assert input_node is None, 'Only a single input node is supported'
-                        input_node = self[potential_input_node_name]
-                assert input_node is not None
-
-                backward_from_node = input_node
-            else:
-                backward_from_node = node
             start_nodes += self.get_alpha_crown_start_nodes(
                 node,
                 c=c,
                 share_alphas=share_alphas,
                 final_node_name=final_node_name,
-                backward_from_node=backward_from_node
             )
         if skipped:
             node.restore_optimized_params(activation_opt_params[node.name])
@@ -824,8 +896,24 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
         and len(apply_output_constraints_to) > 0
         and hasattr(self, 'constraints')
     ):
+        # self.constraints.shape = (batch_size, num_constraints, num_output_neurons)
+        # For abCROWN we know that:
+        # If the output constraints are a conjunction, the shape is (1, num_constraints, *)
+        # If the output constraints are a disjunction, the shape is (num_constraints, 1, *)
+        # Checking which entry is 1 allows to discern both cases.
+        # If auto_LiRPA is used directly, we could have batches of inputs with more than one
+        # constraint. This is currently not supported.
+        if self.constraints.size(0) == 1:
+            num_gammas = self.constraints.size(1)
+        elif self.constraints.size(1) == 1:
+            num_gammas = self.constraints.size(0)
+        else:
+            raise NotImplementedError(
+                'To use output constraints, either have a batch size of 1 or use only one '
+                'output constraint'
+            )
         for node in self.nodes():
-            node.init_gammas(self.constraints.size(0))
+            node.init_gammas(num_gammas)
 
     if self.bound_opts['verbosity'] >= 1:
         print('Optimizable variables initialized.')

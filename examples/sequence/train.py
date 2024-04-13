@@ -83,7 +83,7 @@ def train(epoch):
         meter.update('acc_rob', acc_robust)
         meter.update('loss', loss)
         if (i + 1) % args.log_interval == 0:
-            logger.info("Epoch %d, training step %d/%d: %s, eps {:.3f}".format(
+            logger.info("Epoch {}, training step {}/{}: {}, eps {:.3f}".format(
                 epoch, i + 1, len(train_batches), meter, eps))
     model.save(epoch)
 
@@ -98,7 +98,7 @@ def test(epoch, batches):
         meter.update('acc', acc)
         meter.update('acc_rob', acc_robust)
         meter.update('loss', loss)
-    logger.info("Epoch %d test: {%s}".format(epoch, meter))
+    logger.info("Epoch {} test: {}".format(epoch, meter))
 
 # Load MNIST dataset
 logger.info("Loading data...")
