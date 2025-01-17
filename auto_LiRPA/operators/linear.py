@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -58,6 +58,7 @@ class BoundLinear(BoundOptimizableActivation):
         self.use_seperate_weights_for_lower_and_upper_bounds = False
         self.batched_weight_and_bias = False
         self.share_alphas = options.get('matmul', {}).get('share_alphas', False)
+        self.mul_middle = options.get('mul', {}).get('middle', False)
 
     def _preprocess(self, a, b, c=None):
         """Handle tranpose and linear coefficients."""
@@ -456,7 +457,7 @@ class BoundLinear(BoundOptimizableActivation):
          alpha_u, beta_u, gamma_u) = self.mul_helper.get_relaxation(
             *self._reshape(input_lb[0], input_ub[0], input_lb[1], input_ub[1]),
             self.opt_stage, getattr(self, 'alpha', None),
-            getattr(self, '_start', None))
+            getattr(self, '_start', None), middle=self.mul_middle)
         x_shape = input_lb[0].size()
         if reduce_bias:
             gamma_l = torch.sum(gamma_l, dim=-1)
@@ -813,12 +814,12 @@ class BoundLinear(BoundOptimizableActivation):
                     This should not affect the solver's result correctness,
                     since the tighter lb and ub can be inferred by the solver.
                 """
-                diff = out_ub - out_lb
-                avg = (out_ub + out_lb) / 2.0
-                condition = (diff < EPS)
-                out_lb = np.where(condition, avg - EPS / 2.0, out_lb)
-                out_ub = np.where(condition, avg + EPS / 2.0, out_ub)
-
+                if out_lb != float('-inf') and out_ub != float('inf'):
+                    diff = out_ub - out_lb
+                    avg = (out_ub + out_lb) / 2.0
+                    condition = (diff < EPS)
+                    out_lb = np.where(condition, avg - EPS / 2.0, out_lb)
+                    out_ub = np.where(condition, avg + EPS / 2.0, out_ub)
             lin_expr = 0
             if has_bias:
                 lin_expr = this_layer_bias[neuron_idx].item()
@@ -844,7 +845,7 @@ class BoundLinear(BoundOptimizableActivation):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        if not self.inputs[1].from_input:
+        if not self.is_input_perturbed(1):
             if isinstance(self.inputs[1], BoundParams):
                 w = self.inputs[1].param
             else:
@@ -922,7 +923,8 @@ class BoundMatMul(BoundLinear):
         else:
             # Both inputs are perturbed. Need relaxation.
             self.requires_input_bounds = [0, 1]
-            self.splittable = True
+            if not self.force_not_splittable:
+                self.splittable = True
 
 
 class BoundNeg(Bound):

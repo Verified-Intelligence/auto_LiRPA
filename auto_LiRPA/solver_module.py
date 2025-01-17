@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -97,11 +97,18 @@ def _build_solver_general(self: 'BoundedModule', node: Bound, C=None, model_type
         # just return output node gurobi vars
         return solver_vars
 
-def _reset_solver_vars(self: 'BoundedModule', node: Bound):
+def _reset_solver_vars(self: 'BoundedModule', node: Bound, iteration=True):
     if hasattr(node, 'solver_vars'):
         del node.solver_vars
-    for n in node.inputs:
-        self._reset_solver_vars(n)
+    if iteration:
+        if hasattr(node, 'inputs'):
+            for n in node.inputs:
+                self._reset_solver_vars(n)
+                
+def _reset_solver_model(self: 'BoundedModule'):
+    self.solver_model.remove(self.solver_model.getVars())
+    self.solver_model.remove(self.solver_model.getConstrs())
+    self.solver_model.update()
 
 def _build_solver_input(self: 'BoundedModule', node):
     ## Do the input layer, which is a special case
@@ -121,23 +128,16 @@ def _build_solver_input(self: 'BoundedModule', node):
     x_L = x_L.squeeze(0)
     x_U = x_U.squeeze(0)
 
-    # Recursive function to create Gurobi variables
-    idx = [0]
-    def create_gurobi_vars(x_L, x_U, solver_model):
-        if x_L.dim() == 0:
-            v = solver_model.addVar(lb=x_L, ub=x_U, obj=0,
-                                    vtype=grb.GRB.CONTINUOUS,
-                                    name=f'inp_{idx[0]}')
-            idx[0] += 1
-            return v
-        else:
-            vars_list = []
-            for i, (sub_x_L, sub_x_U) in enumerate(zip(x_L, x_U)):
-                vars_list.append(create_gurobi_vars(sub_x_L, sub_x_U, solver_model))
-            return vars_list
+    input_shape = x_L.shape
+    name_array = [f'inp_{idx}' for idx in range(prod(input_shape))]
+    inp_gurobi_vars_dict = self.solver_model.addVars(*input_shape, lb=x_L, ub=x_U,
+                                                      obj=0, vtype=grb.GRB.CONTINUOUS, name=name_array)
 
-    inp_gurobi_vars = create_gurobi_vars(x_L, x_U, self.solver_model)
-
+    inp_gurobi_vars = np.empty(input_shape, dtype=object)
+    for idx in inp_gurobi_vars_dict:
+        inp_gurobi_vars[idx] = inp_gurobi_vars_dict[idx]
+    inp_gurobi_vars = inp_gurobi_vars.tolist()
+    
     node.solver_vars = inp_gurobi_vars
     # Save the gurobi input variables so that we can later extract primal values in input space easily.
     self.input_vars = inp_gurobi_vars

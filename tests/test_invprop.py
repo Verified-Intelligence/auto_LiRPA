@@ -96,7 +96,7 @@ class TestInvpropOODExample(TestCase):
         x = torch.tensor([[-1., -1.]])
         model = BoundedModule(model_ori, torch.empty_like(x), bound_opts={
             'optimize_bound_args': {
-                'apply_output_constraints_to': ['BoundInput', "/input", "/input.3", "/21"],
+                'apply_output_constraints_to': ['BoundInput', "/input", "/input-3", "/21"],
                 'tighten_input_bounds': True,
                 'best_of_oc_and_no_oc': True,
                 'directly_optimize': ['/21'],

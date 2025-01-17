@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -18,6 +18,7 @@
 import copy
 
 import torch
+import torch.nn as nn
 
 from .base import *
 from .constant import BoundConstant
@@ -297,3 +298,33 @@ class BoundBatchNormalization(Bound):
 
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
+
+
+class LayerNormImpl(nn.Module):
+    def __init__(self, axis, epsilon):
+        super().__init__()
+        self.axis = axis
+        self.epsilon = epsilon
+
+    def forward(self, x, scale, bias):
+        mean = x.mean(self.axis, keepdim=True)
+        d = x - mean
+        dd = d**2
+        var = dd.mean(self.axis, keepdim=True)
+        var_eps = var + self.epsilon
+        std_dev = torch.sqrt(var_eps)
+        inv_std_dev = torch.reciprocal(std_dev)
+        normalized = d * inv_std_dev
+        normalized_scaled = normalized * scale + bias
+        return normalized_scaled
+
+
+class BoundLayerNormalization(Bound):
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
+        self.complex = True
+        self.model = LayerNormImpl(self.attr['axis'], self.attr['epsilon'])
+
+    def forward(self, x, scale, bias):
+        self.input = (x, scale, bias)
+        return self.model(x, scale, bias)

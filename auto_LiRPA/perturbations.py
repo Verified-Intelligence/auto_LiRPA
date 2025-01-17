@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -210,7 +210,6 @@ class PerturbationLpNorm(Perturbation):
             if not A.identity == 1:
                 bound = A.matmul(center)
                 bound_diff = A.matmul(diff, patch_abs=True)
-
                 if sign == 1:
                     bound += bound_diff
                 elif sign == -1:
@@ -250,11 +249,14 @@ class PerturbationLpNorm(Perturbation):
         if A is None:
             return None
         if isinstance(A, eyeC) or isinstance(A, torch.Tensor):
-            return self.concretize_matrix(x, A, sign)
+            ret = self.concretize_matrix(x, A, sign)
         elif isinstance(A, Patches):
-            return self.concretize_patches(x, A, sign)
+            ret = self.concretize_patches(x, A, sign)
         else:
             raise NotImplementedError()
+        if ret.ndim > 2:
+            ret = ret.reshape(A.shape[1], -1)
+        return ret
 
     def init_sparse_linf(self, x, x_L, x_U):
         """ Sparse Linf perturbation where only a few dimensions are actually perturbed"""

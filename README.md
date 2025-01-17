@@ -12,8 +12,9 @@
 
 ## What's New?
 
+- [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2024](https://sites.google.com/view/vnn2024). Our tool is **ranked top-1** in all benchmarks (including 12 [regular track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_regular_track.pdf) and 9 [extended track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_extended_track.pdf) benchmarks). (08/2024)
 - The [INVPROP algorithm](https://arxiv.org/pdf/2302.01404.pdf) allows to compute overapproximationsw of preimages (the set of inputs of an NN generating a given output set) and tighten bounds using output constraints. (03/2024)
-- New activation functions (sin, cos, tan, GeLU) with optimizable bounds (α-CROWN) and [branch and bound support](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf) for non-ReLU activation functions. We achieve significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks. (09/2023)
+- Branch-and-bound support for non-ReLU and general nonlinearities ([GenBaB](https://arxiv.org/pdf/2405.21063)) with optimizable bounds (α-CROWN) for new nonlinear functions (sin, cos, GeLU). We achieve significant improvements on verifying neural networks with non-ReLU nonlinearities such as Transformers, LSTM, and [ML4ACOPF](https://github.com/AI4OPT/ml4acopf_benchmark). (09/2023)
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2023](https://sites.google.com/view/vnn2023). (08/2023)
 - Bound computation for higher-order computational graphs to support bounding Jacobian, Jacobian-vector products, and [local Lipschitz constants](https://arxiv.org/abs/2210.07394). (11/2022)
 - Our neural network verification tool [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2022](https://sites.google.com/view/vnn2022). Our library supports the large CIFAR100, TinyImageNet and ImageNet models in VNN-COMP 2022. (09/2022)
@@ -49,9 +50,10 @@ Our library supports the following algorithms:
 
 * Backward mode LiRPA bound propagation ([CROWN](https://arxiv.org/pdf/1811.00866.pdf)/[DeepPoly](https://files.sri.inf.ethz.ch/website/papers/DeepPoly.pdf))
 * Backward mode LiRPA bound propagation with optimized bounds ([α-CROWN](https://arxiv.org/pdf/2011.13824.pdf))
-* Backward mode LiRPA bound propagation with split constraints ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf)) for ReLU, and ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) for general nonlinear functions
+* Backward mode LiRPA bound propagation with split constraints ([β-CROWN](https://arxiv.org/pdf/2103.06624.pdf) for ReLU, and [GenBaB](https://arxiv.org/pdf/2405.21063) for general nonlinear functions)
 * Generalized backward mode LiRPA bound propagation with general cutting plane constraints ([GCP-CROWN](https://arxiv.org/pdf/2208.05740.pdf))
 * Backward mode LiRPA bound propagation with bounds tightened using output constraints ([INVPROP](https://arxiv.org/pdf/2302.01404.pdf))
+* Generalized backward mode LiRPA bound propagation for higher-order computational graphs  ([Shi et al., 2022](https://arxiv.org/abs/2210.07394))
 * Forward mode LiRPA bound propagation ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920))
 * Forward mode LiRPA bound propagation with optimized bounds (similar to [α-CROWN](https://arxiv.org/pdf/2011.13824.pdf))
 * Interval bound propagation ([IBP](https://arxiv.org/pdf/1810.12715.pdf))
@@ -96,10 +98,10 @@ user-defined ranges.  We get guaranteed output ranges (bounds):
 
 ## Installation
 
-Python 3.7+ and PyTorch 1.11+ are required.
+Python 3.11+ and PyTorch 2.0+ are required.
 It is highly recommended to have a pre-installed PyTorch
-that matches your system and our version requirement.
-See [PyTorch Get Started](https://pytorch.org/get-started).
+that matches your system and our version requirement
+(see [PyTorch Get Started](https://pytorch.org/get-started)).
 Then you can install `auto_LiRPA` via:
 
 ```bash
@@ -109,11 +111,6 @@ pip install .
 ```
 
 If you intend to modify this library, use `pip install -e .` instead.
-
-Optionally, you may build and install native CUDA modules (CUDA toolkit required):
-```bash
-python auto_LiRPA/cuda_utils.py install
-```
 
 ## Quick Start
 
@@ -165,7 +162,7 @@ We provide [a wide range of examples](doc/src/examples.md) of using `auto_LiRPA`
 * [Certified Adversarial Defense Training on Sequence Data with **LSTM**](doc/src/examples.md#certified-adversarial-defense-training-for-lstm-on-mnist)
 * [Certifiably Robust Language Classifier using **Transformers**](doc/src/examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm)
 * [Certified Robustness against **Model Weight Perturbations**](doc/src/examples.md#certified-robustness-against-model-weight-perturbations-and-certified-defense)
-* [Bounding **Jacobian** and **local Lipschitz constants**](examples/vision/jacobian_new.py)
+* [Bounding **Jacobian** and **local Lipschitz constants**](examples/vision/jacobian.py)
 * [Compute an Overapproximate of Neural Network **Preimage**](examples/simple/invprop.py)
 
 `auto_LiRPA` has also been used in the following works:
@@ -189,38 +186,45 @@ Please kindly cite our papers if you use the `auto_LiRPA` library. Full [BibTeX 
 The general LiRPA based bound propagation algorithm was originally proposed in our paper:
 
 * [Automatic Perturbation Analysis for Scalable Certified Robustness and Beyond](https://arxiv.org/pdf/2002.12920).
-NeurIPS 2020
+NeurIPS 2020.
 Kaidi Xu\*, Zhouxing Shi\*, Huan Zhang\*, Yihan Wang, Kai-Wei Chang, Minlie Huang, Bhavya Kailkhura, Xue Lin, Cho-Jui Hsieh (\* Equal contribution)
 
-The `auto_LiRPA` library is further extended to allow optimized bound (α-CROWN), split constraints (β-CROWN) general constraints (GCP-CROWN), and higher-order computational graphs:
+The `auto_LiRPA` library is further extended to support:
 
-* [Fast and Complete: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers](https://arxiv.org/pdf/2011.13824.pdf).
-ICLR 2021.
-Kaidi Xu\*, Huan Zhang\*, Shiqi Wang, Yihan Wang, Suman Jana, Xue Lin and Cho-Jui Hsieh (\* Equal contribution).
+* Optimized bounds (α-CROWN):
 
-* [Beta-CROWN: Efficient Bound Propagation with Per-neuron Split Constraints for Complete and Incomplete Neural Network Verification](https://arxiv.org/pdf/2103.06624.pdf).
-NeurIPS 2021.
-Shiqi Wang\*, Huan Zhang\*, Kaidi Xu\*, Suman Jana, Xue Lin, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution).
+  [Fast and Complete: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers](https://arxiv.org/pdf/2011.13824.pdf). ICLR 2021. Kaidi Xu\*, Huan Zhang\*, Shiqi Wang, Yihan Wang, Suman Jana, Xue Lin and Cho-Jui Hsieh (\* Equal contribution).
 
-* [GCP-CROWN: General Cutting Planes for Bound-Propagation-Based Neural Network Verification](https://arxiv.org/abs/2208.05740).
-Huan Zhang\*, Shiqi Wang\*, Kaidi Xu\*, Linyi Li, Bo Li, Suman Jana, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution).
+* Split constraints (β-CROWN):
 
-* [Efficiently Computing Local Lipschitz Constants of Neural Networks via Bound Propagation](https://arxiv.org/abs/2210.07394).
-NeurIPS 2022.
-Zhouxing Shi, Yihan Wang, Huan Zhang, Zico Kolter, Cho-Jui Hsieh.
+  [Beta-CROWN: Efficient Bound Propagation with Per-neuron Split Constraints for Complete and Incomplete Neural Network Verification](https://arxiv.org/pdf/2103.06624.pdf). NeurIPS 2021. Shiqi Wang\*, Huan Zhang\*, Kaidi Xu\*, Suman Jana, Xue Lin, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution).
 
-Certified robust training using `auto_LiRPA` is improved to allow much shorter warmup and faster training:
-* [Fast Certified Robust Training with Short Warmup](https://arxiv.org/pdf/2103.17268.pdf).
-NeurIPS 2021.
-Zhouxing Shi\*, Yihan Wang\*, Huan Zhang, Jinfeng Yi and Cho-Jui Hsieh (\* Equal contribution).
+* General constraints (GCP-CROWN):
 
-Branch and bound for non-ReLU and general activation functions:
-* [Formal Verification for Neural Networks with General Nonlinearities via Branch-and-Bound](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf).
-Zhouxing Shi\*, Qirui Jin\*, Zico Kolter, Suman Jana, Cho-Jui Hsieh, Huan Zhang (\* Equal contribution).
+  [GCP-CROWN: General Cutting Planes for Bound-Propagation-Based Neural Network Verification](https://arxiv.org/abs/2208.05740). Huan Zhang\*, Shiqi Wang\*, Kaidi Xu\*, Linyi Li, Bo Li, Suman Jana, Cho-Jui Hsieh and Zico Kolter (\* Equal contribution).
 
-Tightening of bounds and preimage computation using the INVPROP algorithm:
-* [Provably Bounding Neural Network Preimages](https://arxiv.org/pdf/2302.01404.pdf).
-Suhas Kotha\*, Christopher Brix\*, Zico Kolter, Krishnamurthy (Dj) Dvijotham\*\*, Huan Zhang\*\* (\* Equal contribution; \*\* Equal advising).
+* Higher-order computational graphs (Lipschitz constants and Jacobian):
+
+  [Efficiently Computing Local Lipschitz Constants of Neural Networks via Bound Propagation](https://arxiv.org/abs/2210.07394). NeurIPS 2022. Zhouxing Shi, Yihan Wang, Huan Zhang, Zico Kolter, Cho-Jui Hsieh.
+
+* Branch-and-bound for non-ReLU and general nonlinear functions (GenBaB):
+
+  [Neural Network Verification with Branch-and-Bound for General Nonlinearities](https://arxiv.org/pdf/2405.21063). TACAS 2025. Zhouxing Shi\*, Qirui Jin\*, Zico Kolter, Suman Jana, Cho-Jui Hsieh, Huan Zhang (\* Equal contribution).
+
+* Tightening of bounds and preimage computation using the INVPROP algorithm:
+
+  [Provably Bounding Neural Network Preimages](https://arxiv.org/pdf/2302.01404.pdf). NeurIPS 2023. Suhas Kotha\*, Christopher Brix\*, Zico Kolter, Krishnamurthy (Dj) Dvijotham\*\*, Huan Zhang\*\* (\* Equal contribution; \*\* Equal advising).
+
+Certified training (verification-aware training by optimizing bounds) using `auto_LiRPA` is improved with:
+
+* Much shorter warmup schedule and faster training:
+
+  [Fast Certified Robust Training with Short Warmup](https://arxiv.org/pdf/2103.17268.pdf). NeurIPS 2021. Zhouxing Shi\*, Yihan Wang\*, Huan Zhang, Jinfeng Yi and Cho-Jui Hsieh (\* Equal contribution).
+
+* Training-time branch-and-bound:
+
+  [Certified Training with Branch-and-Bound: A Case Study on Lyapunov-stable Neural Control](https://arxiv.org/abs/2411.18235). Zhouxing Shi, Cho-Jui Hsieh, and Huan Zhang.
+
 
 ## Developers and Copyright
 
@@ -228,19 +232,23 @@ Team lead:
 * Huan Zhang (huan@huan-zhang.com), UIUC
 
 Current developers:
-* Zhouxing Shi (zshi@cs.ucla.edu), UCLA
+* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA (Student Lead)
+* Xiangru Zhong (xiangruzh0915@gmail.com), UIUC
+* Jorge Chavez (jorgejc2@illinois.edu), UIUC
+* Duo Zhou (duozhou2@illinois.edu), UIUC
 * Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
+* Keyi Shen (keyis2@illinois.edu), UIUC
+* Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
 * Kaidi Xu (kx46@drexel.edu), Drexel University
-* Xiangru Zhong (xiangruzh0915@gmail.com), Sun Yat-sen University
-* Qirui Jin (qiruijin@umich.edu), University of Michigan
 * Hao Chen (haoc8@illinois.edu), UIUC
-* Hongji Xu (hx84@duke.edu), Duke University
-
+* Keyu Lu (keyulu2@illinois.edu), UIUC
 
 Past developers:
+* Sanil Chawla (schawla7@illinois.edu), UIUC
 * Linyi Li (linyi2@illinois.edu), UIUC
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
 * Zhuowen Yuan (realzhuowen@gmail.com), UIUC
+* Qirui Jin (qiruijin@umich.edu), University of Michigan
 * Shiqi Wang (sw3215@columbia.edu), Columbia University
 * Yihan Wang (yihanwang@ucla.edu), UCLA
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU

@@ -4,7 +4,7 @@ import os
 import shutil
 from pygit2 import Repository
 
-repo = 'https://github.com/KaidiXu/auto_LiRPA'
+repo = 'https://github.com/Verified-Intelligence/auto_LiRPA'
 branch = Repository('.').head.shorthand
 repo_file_path = os.path.join(repo, 'tree', branch)
 

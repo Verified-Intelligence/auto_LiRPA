@@ -69,22 +69,21 @@ def example_local_lipschitz(model_ori, x0, bound_opts, device):
     """Example: computing Linf local Lipschitz constant."""
 
     class LocalLipschitzWrapper(nn.Module):
-        def __init__(self, model, mask):
+        def __init__(self, model):
             super().__init__()
             self.model = model
-            self.mask = mask
             self.grad_norm = GradNorm(norm=1)
 
-        def forward(self, x):
+        def forward(self, x, mask):
             y = self.model(x)
-            y_selected = y.matmul(self.mask)
+            y_selected = y.matmul(mask)
             jacobian = JacobianOP.apply(y_selected, x)
             lipschitz = self.grad_norm(jacobian)
             return lipschitz
 
     mask = torch.zeros(10, 1, device=device)
     mask[1, 0] = 1
-    model = BoundedModule(LocalLipschitzWrapper(model_ori, mask=mask), (x0),
+    model = BoundedModule(LocalLipschitzWrapper(model_ori), (BoundedTensor(x0), mask),
                           bound_opts=bound_opts, device=device)
 
     y = model_ori(x0.requires_grad_(True))
@@ -124,7 +123,7 @@ def example_jvp(model_ori, x0, bound_opts, device):
             return jvp
 
     vector = torch.rand_like(x0)
-    model = BoundedModule(JVPWrapper(model_ori), (x0, vector),
+    model = BoundedModule(JVPWrapper(model_ori), (BoundedTensor(x0), vector),
                           bound_opts=bound_opts, device=device)
 
     def func(x0):

@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -76,20 +76,31 @@ class BoundAdd(Bound):
         # we have both gurobi vars as inputs
         this_layer_shape = self.output_shape
         gvar_array1 = np.array(v[0])
-        gvar_array2 = np.array(v[1])
-        assert gvar_array1.shape == gvar_array2.shape and gvar_array1.shape == this_layer_shape[1:]
+        if isinstance(v[1], Tensor):
+            var2 = v[1].cpu().numpy()
+            # flatten to create vars and constrs first
+            gvar_array1 = gvar_array1.reshape(-1)
+            new_layer_gurobi_vars = []
+            for neuron_idx, var1 in enumerate(gvar_array1):
+                var = model.addVar(lb=-float('inf'), ub=float('inf'), obj=0,
+                                   vtype=grb.GRB.CONTINUOUS,
+                                   name=f'lay{self.name}_{neuron_idx}')
+                model.addConstr(var == (var1 + var2), name=f'lay{self.name}_{neuron_idx}_eq')
+                new_layer_gurobi_vars.append(var)
+        else:
+            gvar_array2 = np.array(v[1])
+            assert gvar_array1.shape == gvar_array2.shape and gvar_array1.shape == this_layer_shape[1:]
 
-        # flatten to create vars and constrs first
-        gvar_array1 = gvar_array1.reshape(-1)
-        gvar_array2 = gvar_array2.reshape(-1)
-        new_layer_gurobi_vars = []
-        for neuron_idx, (var1, var2) in enumerate(zip(gvar_array1, gvar_array2)):
-            var = model.addVar(lb=-float('inf'), ub=float('inf'), obj=0,
-                            vtype=grb.GRB.CONTINUOUS,
-                            name=f'lay{self.name}_{neuron_idx}')
-            model.addConstr(var == (var1 + var2), name=f'lay{self.name}_{neuron_idx}_eq')
-            new_layer_gurobi_vars.append(var)
-
+            # flatten to create vars and constrs first
+            gvar_array1 = gvar_array1.reshape(-1)
+            gvar_array2 = gvar_array2.reshape(-1)
+            new_layer_gurobi_vars = []
+            for neuron_idx, (var1, var2) in enumerate(zip(gvar_array1, gvar_array2)):
+                var = model.addVar(lb=-float('inf'), ub=float('inf'), obj=0,
+                                vtype=grb.GRB.CONTINUOUS,
+                                name=f'lay{self.name}_{neuron_idx}')
+                model.addConstr(var == (var1 + var2), name=f'lay{self.name}_{neuron_idx}_eq')
+                new_layer_gurobi_vars.append(var)
         # reshape to the correct list shape of solver vars
         self.solver_vars = np.array(new_layer_gurobi_vars).reshape(this_layer_shape[1:]).tolist()
         model.update()

@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -336,6 +336,12 @@ def compute_patches_stride_padding(input_shape, patches_padding, patches_stride,
 def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
                       unstable_idx=None, inserted_zeros=0):
     """Converting a Patches piece into a full dense matrix."""
+
+    # torch.as_strided may cause unpredictable error under deterministic mode,
+    # so we temporarily disable it.
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(False)
+
     if type(padding) == int:
         padding = (padding, padding, padding, padding)
 
@@ -396,6 +402,9 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
     if inserted_zeros > 0:
         A_matrix = A_matrix[:,:,:, ::(inserted_zeros+1), ::(inserted_zeros+1)]
 
+    # Re-enable deterministic if needed.
+    torch.use_deterministic_algorithms(deterministic)
+
     return A_matrix
 
 
@@ -411,8 +420,8 @@ def check_patch_biases(lb, ub, lower_b, upper_b):
         ub = ub.expand(ub.size(0), ub.size(1), upper_b.size(0)//ub.size(1))
         ub = ub.reshape(ub.size(0), -1).t()
     elif lower_b.ndim > lb.ndim:
-        lower_b = lower_b.transpose(0,1).reshape(lower_b.size(1), -1).t()
-        upper_b = upper_b.transpose(0,1).reshape(upper_b.size(1), -1).t()
+        lower_b = lower_b.transpose(0, 1).reshape(lower_b.size(1), -1).t()
+        upper_b = upper_b.transpose(0, 1).reshape(upper_b.size(1), -1).t()
     return lb, ub, lower_b, upper_b
 
 
@@ -523,7 +532,7 @@ def maybe_unfold_patches(d_tensor, last_A, alpha_lookup_idx=None):
             # The spec dimension may be sparse and contains unstable neurons for the spec layer only.
             if alpha_lookup_idx is None:
                 # alpha is spec-dense. Possible because the number of unstable neurons may decrease.
-                if last_A.size(0) == d_unfolded_r.size(0):
+                if last_A.output_shape[1] == d_unfolded_r.size(0):
                     # Non spec-sparse, partially shared alpha among output channel dimension.
                     # Shape after unfolding is (out_c, batch, out_h, out_w, in_c, patch_h, patch_w).
                     d_unfolded_r = d_unfolded_r[last_A.unstable_idx[0], :, last_A.unstable_idx[1], last_A.unstable_idx[2]]

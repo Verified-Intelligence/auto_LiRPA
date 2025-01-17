@@ -54,6 +54,10 @@ if torch.cuda.is_available():
 # and its content is not important.
 lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device)
 print('Running on', image.device)
+# Visualize the lirpa_model
+# Visualization file is saved as "bounded_mnist_model.png" or "bounded_mnist_model.dot"
+lirpa_model.visualize("bounded_mnist_model")
+print()
 
 ## Step 4: Compute bounds using LiRPA given a perturbation
 eps = 0.3

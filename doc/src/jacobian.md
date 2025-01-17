@@ -20,13 +20,13 @@ class JacobianWrapper(nn.Module):
 ```
 Note that `JacobianOP.apply` only returns dummy values if we directly run this PyTorch model.
 The actual Jacobian computation will be parsed when the model is wrapped into a `BoundedModule`.
-See more [examples](../../examples/jacobian_new.py) including computing local Lipschitz constants and Jacobian-Vector products using `JacobianOP`.
+See more [examples](../../examples/vision/jacobian.py) including computing local Lipschitz constants and Jacobian-Vector products using `JacobianOP`.
 
 ## Adding new operators
 
 To support the Jacobian bounds for a new operator, we need to ensure that there are bound operators implemented for the forward computation (the computation of the operator itself) and the backward computation (the computation of gradient) respectively.
 Builtin operators are implemented in [auto_LiRPA/operators](../../auto_LiRPA/operators).
-For example, for ReLU, we have [`BoundRelu`](../../auto_LiRPA/operators/relu.py) for the forward computation and [`BoundReluGrad`](../../auto_LiRPA/operators/gradient_bounds.py) for the backward computation.
+For example, for ReLU(../../auto_LiRPA/operators/relu.py), we have `BoundRelu` for the forward computation and `BoundReluGrad` for the backward computation.
 Follow the [document](custom_op.md) to add new custom operators if necessary.
 
 Then for the forward operator, implement a `build_gradient_node` function.

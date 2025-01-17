@@ -24,7 +24,7 @@ class TestBoundOp(TestCase):
         device = 'cpu'
         batch_size = 5
         dim_final = 7
-        dim_output = 11
+        dim_output = 9
         dim_input = 11
 
         # multiplication of [batch_size, dim_input] and [dim_output, dim_input]^T
@@ -39,7 +39,7 @@ class TestBoundOp(TestCase):
         dummy_bias = Dummy(bias)
 
         op = BoundLinear(
-            attr={},
+            attr={'transB': 1},
             inputs=[dummy_in, dummy_weight, dummy_bias],
             output_index=0, options={})
         op.batch_dim = 0
@@ -113,17 +113,14 @@ class TestBoundOp(TestCase):
 
         if self.generate:
             self.save()
+            self.reference = self.result
 
         A_ref, lbias_ref, ubias_ref, bound_out_ref = self.reference
         for i in range(3):
             for j in range(2):
                 if A_ref[i][j] is not None:
                     ref = A_ref[i][j]
-                    # legacy reference
-                    if ref.shape[0] == batch_size:
-                        ref = ref.transpose(0, 1)
                     self.assertEqual(A[i][j], ref)
-        lbias, ubias = lbias.transpose(0, 1), ubias.transpose(0, 1)
         self.assertEqual(lbias, lbias_ref)
         self.assertEqual(ubias, ubias_ref)
         self.assertEqual(bound_out[0], bound_out_ref[0])
@@ -133,4 +130,5 @@ class TestBoundOp(TestCase):
 if __name__ == '__main__':
     # Change to generate=True when genearting reference results
     testcase = TestBoundOp(generate=False)
+    testcase.setUp()
     testcase.test()

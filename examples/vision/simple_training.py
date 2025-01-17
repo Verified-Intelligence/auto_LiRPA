@@ -189,7 +189,7 @@ def main(args):
 
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
-    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts, 'conv_mode': args.conv_mode}, device=args.device)
+    model = BoundedModule(model_ori, dummy_input, bound_opts={'activation_bound_option':args.bound_opts, 'conv_mode': args.conv_mode}, device=args.device)
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
     opt = optim.Adam(model.parameters(), lr=args.lr)

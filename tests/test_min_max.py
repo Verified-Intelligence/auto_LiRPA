@@ -41,33 +41,44 @@ class TestMinMax(TestCase):
             seed=1, ref_path='data/min_max_test_data', generate=generate)
 
     def test(self):
+        self.result = []
         for conv_mode in ['patches', 'matrix']:
-            model = Test_Model()
-            checkpoint = torch.load(
-                os.path.join(os.path.dirname(__file__), '../examples/vision/pretrained/test_min_max.pth'),
-                map_location=torch.device('cpu'))
-            model.load_state_dict(checkpoint)
+            for use_shared_alpha in [True, False]:
+                model = Test_Model()
+                checkpoint = torch.load(
+                    os.path.join(os.path.dirname(__file__), '../examples/vision/pretrained/test_min_max.pth'),
+                    map_location=torch.device('cpu'))
+                model.load_state_dict(checkpoint)
 
-            test_data = torchvision.datasets.MNIST(
-                './data', train=False, download=True,
-                transform=torchvision.transforms.ToTensor())
+                test_data = torchvision.datasets.MNIST(
+                    './data', train=False, download=True,
+                    transform=torchvision.transforms.ToTensor())
 
-            N = 2
-            image = test_data.data[:N].view(N,1,28,28)
-            image = image.to(torch.float32) / 255.0
+                N = 2
+                image = test_data.data[:N].view(N,1,28,28)
+                image = image.to(torch.float32) / 255.0
 
-            lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device, bound_opts={"conv_mode": conv_mode})
+                lirpa_model = BoundedModule(model, torch.empty_like(image), device=image.device, bound_opts={"conv_mode": conv_mode})
 
-            eps = 0.3
-            ptb = PerturbationLpNorm(eps = eps)
-            image = BoundedTensor(image, ptb)
+                eps = 0.3
+                ptb = PerturbationLpNorm(eps = eps)
+                image = BoundedTensor(image, ptb)
 
-            lirpa_model.set_bound_opts({'optimize_bound_args': {'iteration': 20, 'lr_alpha': 0.1}})
-            lb, ub = lirpa_model.compute_bounds(x=(image,), method='CROWN-Optimized')
+                lirpa_model.set_bound_opts({
+                    'optimize_bound_args': {
+                        'iteration': 20,
+                        'lr_alpha': 0.1,
+                        'use_shared_alpha': use_shared_alpha,
+                    }
+                })
+                lb, ub = lirpa_model.compute_bounds(x=(image,), method='CROWN-Optimized')
+                print(lb, ub)
 
-            self.result = (lb, ub)
-            self.setUp()
-            self.check()
+                self.result.append((lb, ub))
+
+        self.setUp()
+        self.rtol = 1e-4
+        self.check()
 
 if __name__ == "__main__":
     testcase = TestMinMax(generate=False)

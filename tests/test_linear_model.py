@@ -46,6 +46,7 @@ class TestLinearModel(TestCase):
         expected_lb = -eps * norm + expected_pred
 
         # Check equivalence.
+        self.rtol = 1e-4
         self.assertEqual(expected_pred, pred)
         self.assertEqual(expected_ub, ub)
         self.assertEqual(expected_lb, lb)

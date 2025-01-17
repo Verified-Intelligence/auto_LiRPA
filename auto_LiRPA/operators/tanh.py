@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -51,6 +51,7 @@ class BoundTanh(BoundOptimizableActivation):
         self.activation_backward = activation[2]
         if precompute:
             self.precompute_relaxation(self.activation_forward, self.activation_backward)
+            self.precompute_dfunc_values(self.activation_forward, self.activation_backward)
         # TODO make them configurable when implementing a general nonlinear activation.
         # Neurons whose gap between pre-activation bounds is smaller than this
         # threshold will be masked and don't need branching.
@@ -58,11 +59,12 @@ class BoundTanh(BoundOptimizableActivation):
         # Neurons whose pre-activation bounds don't overlap with this range
         # are considered as stable (with values either 0 or 1) and don't need
         # branching.
-        self.split_range = (-10, 10)
+        self.split_range = (self.range_l, self.range_u)
         # The initialization will be adjusted if the pre-activation bounds are too loose.
         self.loose_threshold = options.get('tanh', {}).get(
             'loose_threshold', None)
         self.convex_concave = None
+        self.activation_bound_option = options.get('activation_bound_option', 'adaptive')
 
     def opt_init(self):
         super().opt_init()
@@ -152,6 +154,13 @@ class BoundTanh(BoundOptimizableActivation):
 
         logger.debug('Done')
 
+    def precompute_dfunc_values(self, func, dfunc, x_limit=500):
+        """
+        This function precomputes a list of values for dfunc.
+        """
+        upper = self.step_pre * torch.arange(0, self.num_points_pre + 5, device=self.device)
+        self.dfunc_values = dfunc(upper)
+
     def forward(self, x):
         return self.activation_forward(x)
 
@@ -193,6 +202,70 @@ class BoundTanh(BoundOptimizableActivation):
         # bound the function was pre-computed.
         d_upper = self.retrieve_from_precompute(self.d_upper, -lower, upper)
         return d_lower, d_upper
+
+    def retrieve_d_from_k(self, k, func):
+        d_indices = torch.searchsorted(torch.flip(self.dfunc_values, [0]), k, right=False)
+        d_indices = self.num_points_pre - d_indices + 4
+        d_left = d_indices * self.step_pre
+        d_right = d_left + self.step_pre
+        y_left = func(d_left)
+        y_right = func(d_right)
+        k_left = self.dfunc_values[d_indices]
+        k_right = self.dfunc_values[torch.clamp(d_indices+1, max=self.dfunc_values.shape[0]-1)]
+        # We choose the intersection of two tangent lines
+        d_return = (k_left * d_left - k_right * d_right - y_left + y_right) / (k_left - k_right).clamp(min=1e-8)
+        mask_almost_the_same = abs(k_left - k_right) < 1e-5
+        d_return[mask_almost_the_same] = d_left[mask_almost_the_same]
+        y_d = k_left * (d_return - d_left) + y_left
+        return d_return, y_d
+
+    def bound_relax_impl_same_slope(self, x, func, dfunc):
+        lower, upper = x.lower, x.upper
+        y_l, y_u = func(lower), func(upper)
+        # k_direct is the slope of the line directly connect (lower, func(lower)), (upper, func(upper)).
+        k_direct = k = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
+        mask_almost_the_same = abs(upper - lower) < 1e-4
+        k_direct[mask_almost_the_same] = dfunc(lower)[mask_almost_the_same]
+
+        mask_direct_lower = k_direct <= dfunc(lower)
+        mask_direct_upper = k_direct <= dfunc(upper)
+
+        # We now find the tangent line with the same slope of k_direct
+        # In the case of "mask_direct_lower(or upper)", there should be only one possible tangent point
+        # at which we obtain the same slope within the interval [lower, upper]
+        d, y_d = self.retrieve_d_from_k(k_direct, func)
+        d[lower + upper < 0] *= -1  # This is the case "direct upper"
+        y_d[lower + upper < 0] = 2 * func(torch.tensor(0)) - y_d[lower + upper < 0]
+        d_clamped = torch.clamp(d, min=lower, max=upper)
+        y_d[d_clamped != d] = func(d_clamped[d_clamped != d])
+        self.add_linear_relaxation(
+            mask=mask_direct_lower, type='lower', k=k_direct, x0=lower, y0=y_l
+        )
+        self.add_linear_relaxation(
+            mask=mask_direct_lower, type='upper', k=k_direct, x0=d_clamped, y0=y_d
+        )
+        self.add_linear_relaxation(
+            mask=mask_direct_upper, type='upper', k=k_direct, x0=upper, y0=y_u
+        )
+        self.add_linear_relaxation(
+            mask=mask_direct_upper, type='lower', k=k_direct, x0=d_clamped, y0=y_d
+        )
+        # Now we turn to the case where no direct line can be used
+        d_lower, d_upper = self.generate_d_lower_upper(lower, upper)
+        mask_both = torch.logical_not(mask_direct_upper + mask_direct_lower)
+        # To make sure upper and lower bounds have the same slope,
+        # we need the two tangents to be symmetrical
+        d_same_slope = torch.max(torch.abs(d_lower), torch.abs(d_upper))
+        k = dfunc(d_same_slope)
+        y_d_same_slope = func(d_same_slope)
+        y_d_same_slope_opposite = 2*func(torch.tensor(0)) - y_d_same_slope
+        self.add_linear_relaxation(
+            mask=mask_both, type='upper', k=k, x0=d_same_slope, y0=y_d_same_slope
+        )
+        self.add_linear_relaxation(
+            mask=mask_both, type='lower', k=k, x0=-d_same_slope, y0=y_d_same_slope_opposite
+        )
+
 
     def bound_relax_impl(self, x, func, dfunc):
         lower, upper = x.lower, x.upper
@@ -336,7 +409,10 @@ class BoundTanh(BoundOptimizableActivation):
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:
             self.init_linear_relaxation(x, dim_opt)
-        self.bound_relax_impl(x, self.activation_forward, self.activation_backward)
+        if self.activation_bound_option == 'same-slope':
+            self.bound_relax_impl_same_slope(x, self.activation_forward, self.activation_backward)
+        else:
+            self.bound_relax_impl(x, self.activation_forward, self.activation_backward)
 
     def get_split_mask(self, lower, upper, input_index):
         assert input_index == 0
@@ -418,7 +494,7 @@ class BoundTan(BoundAtan):
         inverse_x = lambda: None
         inverse_x.lower = torch.tan(x.lower)
         inverse_x.upper = torch.tan(x.upper)
-        super().bound_relax(inverse_x, init=init)
+        super().bound_relax(inverse_x, init=init, dim_opt=dim_opt)
         # Lower slope, lower bias, upper slope and upper bias are saved to
         # self.lw, self.lb, self.uw, self.ub. We need to reverse them.
         # E.g., y = self.lw * x + self.lb, now becomes x = 1./self.lw * y - self.lb / self.lw
@@ -427,6 +503,18 @@ class BoundTan(BoundAtan):
         new_upper_bias = - self.lb / self.lw - periods / self.lw
         new_lower_slope = 1. / self.uw
         new_lower_bias = - self.ub / self.uw - periods / self.uw
+
+        # NaN can happen if lw=0 or uw=0 when the pre-activation bounds are too close
+        # Replace the bounds with interval bounds.
+        if (self.lw == 0).any():
+            mask = self.lw == 0
+            new_upper_slope[mask] = 0
+            new_upper_bias[mask] = inverse_x.upper[mask]
+        if (self.uw == 0).any():
+            mask = self.uw == 0
+            new_lower_slope[mask] = 0
+            new_lower_bias[mask] = inverse_x.lower[mask]
+
         self.lw = new_lower_slope
         self.lb = new_lower_bias
         self.uw = new_upper_slope

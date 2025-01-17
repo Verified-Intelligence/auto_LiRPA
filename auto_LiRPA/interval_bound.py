@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -165,8 +165,6 @@ def check_IBP_intermediate(self: 'BoundedModule', node):
     while (not node.is_lower_bound_current() or not node.is_upper_bound_current()):
         if not node.ibp_intermediate:
             return False
-        assert len(node.inputs) == 1, (
-            'Nodes with ibp_intermediate=True cannot have more than one input')
         nodes.append(node)
         node = node.inputs[0]
     nodes.reverse()
@@ -209,3 +207,15 @@ def check_IBP_first_linear(self: 'BoundedModule', node):
             return True
 
     return False
+
+
+def compare_with_IBP(self, node, lower, upper, C=None):
+    """Re-compute the bounds by IBP given the existing intermediate bounds.
+    Update the bounds if IBP gives tighter bounds."""
+
+    lower_ibp, upper_ibp = self.IBP_general(node, C=C, delete_bounds_after_use=True)
+    if lower is not None:
+        lower = torch.max(lower, lower_ibp)
+    if upper is not None:
+        upper = torch.min(upper, upper_ibp)
+    return lower, upper

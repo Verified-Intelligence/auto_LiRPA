@@ -9,7 +9,7 @@ from torch.nn import CrossEntropyLoss
 from auto_LiRPA import BoundedModule, BoundedTensor, BoundDataParallel, CrossEntropyWrapper
 from auto_LiRPA.bound_ops import BoundExp
 from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix
+from auto_LiRPA.utils import MultiAverageMeter, logger, get_spec_matrix, sync_params
 import models
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
@@ -235,9 +235,9 @@ def main(args):
 
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
-    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+    model = BoundedModule(model_ori, dummy_input, bound_opts={'activation_bound_option':args.bound_opts}, device=args.device)
     model_loss = BoundedModule(CrossEntropyWrapper(model_ori), (dummy_input, torch.zeros(1, dtype=torch.long)),
-                               bound_opts= { 'relu': args.bound_opts, 'loss_fusion': True }, device=args.device)
+                               bound_opts= { 'activation_bound_option': args.bound_opts, 'loss_fusion': True }, device=args.device)
     model_loss = BoundDataParallel(model_loss)
 
     ## Step 4 prepare optimizer, epsilon scheduler and learning rate scheduler
@@ -272,7 +272,6 @@ def main(args):
     else:
         timer = 0.0
         best_err = 1e10
-        # with torch.autograd.detect_anomaly():
         for t in range(epoch + 1, args.num_epochs + 1):
             logger.info("Epoch {}, learning rate {}".format(t, lr_scheduler.get_last_lr()))
             start_time = time.time()
@@ -285,12 +284,7 @@ def main(args):
             logger.info("Evaluating...")
             torch.cuda.empty_cache()
 
-            # remove 'model.' in state_dict
-            state_dict_loss = model_loss.state_dict()
-            state_dict = {}
-            for name in state_dict_loss:
-                assert (name.startswith('model.'))
-                state_dict[name[6:]] = state_dict_loss[name]
+            state_dict = sync_params(model_ori, model_loss, loss_fusion=True)
 
             with torch.no_grad():
                 if int(eps_scheduler.params['start']) + int(eps_scheduler.params['length']) > t >= int(
@@ -298,7 +292,7 @@ def main(args):
                     m = Train(model_loss, t, test_data, eps_scheduler, norm, False, None, args.bound_type, loss_fusion=True)
                 else:
                     model_ori.load_state_dict(state_dict)
-                    model = BoundedModule(model_ori, dummy_input, bound_opts={'relu':args.bound_opts}, device=args.device)
+                    model = BoundedModule(model_ori, dummy_input, bound_opts={'activation_bound_option':args.bound_opts}, device=args.device)
                     model = BoundDataParallel(model)
                     m = Train(model, t, test_data, eps_scheduler, norm, False, None, 'IBP', loss_fusion=False)
                     del model

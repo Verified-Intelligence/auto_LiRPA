@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -41,6 +41,7 @@ warnings.simplefilter("once")
 # Special identity matrix. Avoid extra computation of identity matrix multiplication in various places.
 eyeC = namedtuple('eyeC', 'shape device')
 OneHotC = namedtuple('OneHotC', 'shape device index coeffs')
+BatchedCrownC = namedtuple('BatchedCrownC', 'type')
 
 def onehotc_to_dense(one_hot_c: OneHotC, dtype: torch.dtype) -> torch.Tensor:
     shape = one_hot_c.shape  # [spec, batch, C, H, W]
@@ -318,18 +319,61 @@ def unravel_index(
     return list(reversed(coord))
 
 
-def fill_template(out, template):
-    if template is None:
-        return out.popleft()
-    elif isinstance(template, (list, tuple)):
-        res = []
-        for t in template:
-            res.append(fill_template(t))
-        return tuple(res) if isinstance(template, tuple) else res
-    elif isinstance(template, dict):
-        res = {}
-        for key in template:
-            res[key] = fill_template(template[key])
-        return res
-    else:
-        raise NotImplementedError
+class AutoBatchSize:
+    def __init__(self, init_batch_size, device, vram_ratio=0.9, enable=True):
+        self.batch_size = init_batch_size
+        self.max_actual_batch_size = 0
+        self.device = device
+        self.vram_ratio = vram_ratio
+        self.enable = enable
+
+    def record_actual_batch_size(self, actual_batch_size):
+        """Record the actual batch size used.
+
+        It may be smaller than self.batch_size, especially for the early batches.
+        """
+        self.max_actual_batch_size = max(self.max_actual_batch_size, actual_batch_size)
+
+    def update(self):
+        """Check if the batch size can be enlarged."""
+        if not self.enable:
+            return None
+        # Only try to update the batch size if the current batch size has
+        # been actually used, as indicated by `max_actual_batch_size`
+        if self.device == 'cpu' or self.max_actual_batch_size < self.batch_size:
+            return None
+        total_vram = torch.cuda.get_device_properties(self.device).total_memory
+        current_vram = torch.cuda.memory_reserved(self.device)
+        if current_vram * 2 >= total_vram * self.vram_ratio:
+            return None
+        new_batch_size = self.batch_size * 2
+        self.batch_size = new_batch_size
+        logger.debug('Automatically updated batch size to %d', new_batch_size)
+        return {
+            'current_vram': current_vram,
+            'total_vram': total_vram,
+        }
+
+
+def sync_params(model_ori: torch.nn.Module,
+                model: 'BoundedModule',
+                loss_fusion: bool = False):
+    """Sync the parameters from a BoundedModule to the original model."""
+    state_dict_loss = model.state_dict()
+    state_dict = model_ori.state_dict()
+    for name in state_dict_loss:
+        v = state_dict_loss[name]
+        if name.endswith('.param'):
+            name = name[:-6]
+        elif name.endswith('.buffer'):
+            name = name[:-7]
+        else:
+            raise NameError(name)
+        name_ori = model[name].ori_name
+        if loss_fusion:
+            assert name_ori.startswith('model.')
+            name_ori = name_ori[6:]
+        assert name_ori in state_dict
+        state_dict[name_ori] = v
+    model_ori.load_state_dict(state_dict)
+    return state_dict

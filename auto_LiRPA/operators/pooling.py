@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -523,28 +523,58 @@ class BoundAveragePool(Bound):
         def _bound_oneside(last_A):
             if last_A is None:
                 return None, 0
+            equal_kernel_stride = (self.kernel_size[0] == self.stride[0]
+                                   and self.kernel_size[1] == self.stride[1])
             if isinstance(last_A, torch.Tensor):
                 shape = last_A.size()
-                # propagate A to the next layer, with batch concatenated together
-                next_A = F.interpolate(
-                    last_A.reshape(shape[0] * shape[1], *shape[2:]),
-                    scale_factor=self.kernel_size) / (prod(self.kernel_size))
-                next_A = F.pad(next_A, (0, self.input_shape[-2] - next_A.shape[-2], 0, self.input_shape[-1] - next_A.shape[-1]))
-                next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
+                if equal_kernel_stride:
+                    # propagate A to the next layer, with batch concatenated together
+                    next_A = F.interpolate(
+                        last_A.reshape(shape[0] * shape[1], *shape[2:]),
+                        scale_factor=self.kernel_size
+                    ) / (prod(self.kernel_size))
+                    next_A = F.pad(
+                        next_A, (0, self.input_shape[-2] - next_A.shape[-2],
+                                 0, self.input_shape[-1] - next_A.shape[-1]))
+                    next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
+                else:
+                    # Treat pooling as a general convolution
+                    weight = torch.zeros(
+                        self.input_shape[1], self.output_shape[1], *self.kernel_size,
+                        dtype=last_A.dtype, device=last_A.device)
+                    assert self.input_shape[1] == self.output_shape[1]
+                    weight = torch.eye(self.input_shape[1], dtype=last_A.dtype, device=last_A.device)
+                    weight = weight / prod(self.kernel_size)
+                    weight = weight.view(self.output_shape[1], self.input_shape[1], 1, 1)
+                    weight = weight.expand(self.output_shape[1], self.input_shape[1], *self.kernel_size)
+                    output_padding0 = (
+                        int(self.input_shape[2])
+                        - (int(self.output_shape[2]) - 1) * self.stride[0]
+                        + 2 * self.padding[0] - 1 - (int(weight.size()[2] - 1)))
+                    output_padding1 = (
+                        int(self.input_shape[3])
+                        - (int(self.output_shape[3]) - 1) * self.stride[1]
+                        + 2 * self.padding[1] - 1 - (int(weight.size()[3] - 1)))
+                    next_A = F.conv_transpose2d(
+                        last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
+                        stride=self.stride, padding=self.padding,
+                        output_padding=(output_padding0, output_padding1))
+                    next_A = next_A.view(shape[0], shape[1], *next_A.shape[1:])
             elif isinstance(last_A, Patches):
                 patches = last_A.patches
                 shape = patches.size()
                 # When the number of inserted zeros can cancel out the stride, we use a shortcut that can reduce computation.
-                simplify_patch = ((last_A.inserted_zeros + 1 == self.kernel_size[0])
-                                  and (self.kernel_size[0] == self.kernel_size[1]))
+                simplify_patch = (equal_kernel_stride
+                                  and last_A.inserted_zeros + 1 == self.kernel_size[0]
+                                  and self.kernel_size[0] == self.kernel_size[1])
                 padding, stride, output_padding = compute_patches_stride_padding(
-                        self.input_shape, last_A.padding, last_A.stride,
-                        self.padding, self.stride,
-                        inserted_zeros=last_A.inserted_zeros,
-                        output_padding=last_A.output_padding,
-                        simplify=not simplify_patch)
+                    self.input_shape, last_A.padding, last_A.stride,
+                    self.padding, self.stride,
+                    inserted_zeros=last_A.inserted_zeros,
+                    output_padding=last_A.output_padding,
+                    simplify=not simplify_patch)
                 inserted_zeros = last_A.inserted_zeros
-                if last_A.inserted_zeros == 0:
+                if equal_kernel_stride and last_A.inserted_zeros == 0:
                     # No inserted zeros, can be handled using interpolate.
                     if last_A.unstable_idx is None:
                         # shape is: [out_C, batch, out_H, out_W, in_c, patch_H, patch_W]
@@ -614,7 +644,7 @@ class BoundAveragePool(Bound):
                     output_padding=output_padding,
                     inserted_zeros=inserted_zeros)
             else:
-                raise ValueError(f'last_A has unexpected shape {type(last_A)}')
+                raise ValueError(f'last_A has unexpected type {type(last_A)}')
             return next_A, 0.
 
         lA, lbias = _bound_oneside(last_lA)

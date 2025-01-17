@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -31,9 +31,8 @@ sys.setrecursionlimit(1000000)
 
 def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize=False,
                     offset=0):
-    if self.bound_opts['dynamic_forward']:
-        return self.forward_general_dynamic(C, node, concretize, offset)
-
+    if self.dynamic:
+        return self.forward_general_dynamic(C=C, node=node, concretize=concretize, offset=offset)
     if C is None:
         if hasattr(node, 'linear'):
             return node.linear.lower, node.linear.upper
@@ -277,11 +276,10 @@ def init_forward(self: 'BoundedModule', roots, dim_in):
     prev_dim_in = 0
     # Assumption: roots[0] is the input node which implies batch_size
     batch_size = roots[0].value.shape[0]
-    dynamic = self.bound_opts['dynamic_forward']
     for i in range(len(roots)):
         if hasattr(roots[i], 'perturbation') and roots[i].perturbation is not None:
             shape = roots[i].linear.lw.shape
-            if dynamic:
+            if self.dynamic:
                 if shape[1] != dim_in:
                     raise NotImplementedError('Dynamic forward bound is not supported yet when there are multiple perturbed inputs.')
                 ptb = roots[i].perturbation

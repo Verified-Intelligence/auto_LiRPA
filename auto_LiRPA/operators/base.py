@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -138,6 +138,7 @@ class Bound(nn.Module):
         self.bounded = False
         self.IBP_rets = None
         self.requires_input_bounds = []
+        self.from_complex_node = None
         # If True, when building the Jacobian graph, this node should be treated
         # as a constant and there is no need to further propagate Jacobian.
         self.no_jacobian = False
@@ -146,7 +147,7 @@ class Bound(nn.Module):
         # instead of CROWN. Currently only operators with a single input can be
         # supported.
         self.ibp_intermediate = False
-        self.splittable = False
+        self.splittable = self.force_not_splittable = False
         # Determine if this node has a perturbed output or not. The function BoundedModule._mark_perturbed_nodes() will set this property.
         self.perturbed = False
         self.never_perturbed = False

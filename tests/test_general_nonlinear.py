@@ -49,7 +49,7 @@ def bab(model_ori, data, target, norm, eps, data_max=None, data_min=None):
     c[0, 0, pred] = 1
     c[0, 0, target] = -1
 
-    arguments.Config.parse_config()
+    arguments.Config.parse_config(args={})
 
     arguments.Config["solver"]["batch_size"] = 200
     arguments.Config["bab"]["decision_thresh"] = np.float64(10)  # naive float obj has no max() function, np.inf will lead infeasible domain

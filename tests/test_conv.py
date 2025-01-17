@@ -6,7 +6,7 @@ from testcase import TestCase
 
 
 class cnn_model(nn.Module):
-    def __init__(self, layers, padding, stride, linear=True):
+    def __init__(self, layers, padding, stride, linear):
         super(cnn_model, self).__init__()
         self.module_list = []
         channel = 1
@@ -47,13 +47,12 @@ class TestConv(TestCase):
             for padding in paddings:
                 for stride in strides:
                     for linear in [True, False]:
-                        model_ori = cnn_model(layer_num, padding, stride)
+                        model_ori = cnn_model(layer_num, padding, stride, linear)
                         print('Model:', model_ori)
 
                         model = BoundedModule(model_ori, image, bound_opts={"conv_mode": "patches"})
                         eps = 0.3
-                        norm = np.inf
-                        ptb = PerturbationLpNorm(norm=norm, eps=eps)
+                        ptb = PerturbationLpNorm(x_L=image-eps, x_U=image+eps)
                         image = BoundedTensor(image, ptb)
                         pred = model(image)
                         lb, ub = model.compute_bounds()
@@ -70,6 +69,10 @@ class TestConv(TestCase):
                         if not linear and layer_num == 1:
                             pred = model(image)
                             lb_forward, ub_forward = model.compute_bounds(method='forward')
+                            self.assertEqual(lb, lb_forward)
+                            self.assertEqual(ub, ub_forward)
+                            pred = model(image)
+                            lb_forward, ub_forward = model.compute_bounds(method='dynamic-forward+backward')
                             self.assertEqual(lb, lb_forward)
                             self.assertEqual(ub, ub_forward)
 

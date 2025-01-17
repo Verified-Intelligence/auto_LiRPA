@@ -53,7 +53,7 @@ if torch.cuda.is_available():
 lirpa_model_default = BoundedModule(model, torch.empty_like(image), device=image.device)
 # Use same-slope option for ReLU functions
 lirpa_model_sameslope = BoundedModule(model, torch.empty_like(image), device=image.device, 
-                                      bound_opts={'relu': 'same-slope'})
+                                      bound_opts={'activation_bound_option': 'same-slope'})
 print('Running on', image.device)
 
 ## Step 4: Compute bounds using LiRPA given a perturbation

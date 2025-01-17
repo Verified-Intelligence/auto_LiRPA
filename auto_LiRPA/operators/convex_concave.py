@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -21,6 +21,10 @@ from .activation_base import BoundActivation, BoundOptimizableActivation
 
 
 class BoundLog(BoundActivation):
+
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.range_l = 1e-6
 
     def forward(self, x):
         # NOTE adhoc implementation for loss fusion
@@ -63,6 +67,7 @@ class BoundSqrt(BoundOptimizableActivation):
         super().__init__(attr, inputs, output_index, options)
         self.use_prior_constraint = True
         self.has_constraint = True
+        self.range_l = 1e-6
 
     def forward(self, x):
         return torch.sqrt(x)
@@ -114,6 +119,7 @@ class BoundReciprocal(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.splittable = True
+        self.range_l = 1e-6
 
     def forward(self, x):
         return torch.reciprocal(x)
@@ -128,7 +134,7 @@ class BoundReciprocal(BoundOptimizableActivation):
         if init:
             self.init_linear_relaxation(x, dim_opt)
 
-        assert x.lower.min() > 0
+        assert x.lower.min() >= 0
 
         ku = -1. / (x.lower * x.upper)
         self.add_linear_relaxation(mask=None, type='upper', k=ku, x0=x.lower)
@@ -143,6 +149,23 @@ class BoundReciprocal(BoundOptimizableActivation):
         self.add_linear_relaxation(
             mask=None, type='lower', k=-1./(mid**2), x0=mid)
 
+        if x.lower.min() <= 0:
+            mask = x.lower == 0
+            self.uw[..., mask] = 0
+            self.ub[..., mask] = torch.inf
+        if x.upper.isinf().any():
+            mask = x.upper.isinf()
+            self.lw[..., mask] = 0
+            self.lb[..., mask] = 0
+
+    def bound_backward(self, last_lA, last_uA, x, **kwargs):
+        As, lbias, ubias = super().bound_backward(last_lA, last_uA, x, **kwargs)
+        if isinstance(ubias, torch.Tensor) and ubias.isnan().any():
+            ubias[ubias.isnan()] = torch.inf if (last_uA != 0).any() else 0.
+        if isinstance(lbias, torch.Tensor) and lbias.isnan().any():
+            lbias[lbias.isnan()] = 0.
+        return As, lbias, ubias
+
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
@@ -154,6 +177,8 @@ class BoundReciprocal(BoundOptimizableActivation):
 class BoundExp(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
+        if options is None:
+            options = {}
         self.options = options.get('exp', {})
         self.max_input = 0
 
@@ -227,7 +252,35 @@ class BoundExp(BoundOptimizableActivation):
             ubias -= (A.reshape(batch_size, -1) * self.max_input.reshape(batch_size, -1)).sum(dim=-1).unsqueeze(0)
             return [(None, uA)], 0, ubias
         else:
-            return super().bound_backward(last_lA, last_uA, x, **kwargs)
+            As, lbias, ubias = super().bound_backward(last_lA, last_uA, x, **kwargs)
+            lA, uA = As[0]
+            lA, lbias = self._check_nan(lA, lbias, last_lA, 0)
+            uA, ubias = self._check_nan(uA, ubias, last_uA, torch.inf)
+            return [(lA, uA)], lbias, ubias
+
+    def _check_nan(self, A, bias, last_A, const_bound):
+        """Check for NaN caused by 0 in A and inf in lw/lb/uw/ub.
+        It can happen if the pre-activation bounds are very loose for exp.
+        """
+        if A is None:
+            return A, bias
+        if bias.isnan().any():
+            # These assertions ensure that 0 is in A and inf is in lw/lb/uw/ub
+            assert not last_A.isnan().any()
+            assert not last_A.isinf().any()
+            assert not self.lw.isnan().any()
+            assert not self.uw.isnan().any()
+            assert not self.lb.isnan().any()
+            assert not self.ub.isnan().any()
+            A_ = A.view(-1, *A.shape[2:]).clone()
+            bias_ = bias.view(-1).clone()
+            mask = bias_.isnan()
+            A_[mask] = 0
+            assert (last_A >= 0).all()
+            bias_[mask] = const_bound if (last_A != 0).any() else 0.
+            A = A_.view(A.shape)
+            bias = bias_.view(bias.shape)
+        return A, bias
 
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:

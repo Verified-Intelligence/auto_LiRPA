@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -15,6 +15,7 @@
 ##                                                                     ##
 #########################################################################
 from collections import OrderedDict
+import numpy as np
 import torch
 from torch import Tensor
 from .patches import Patches, inplace_unfold
@@ -30,7 +31,7 @@ class SparseBeta:
         self.val = torch.zeros(shape)
         self.loc = torch.zeros(shape, dtype=torch.long, device=device)
         self.sign = torch.zeros(shape, device=device)
-        self.bias = torch.zeros(shape) if bias else None
+        self.bias = torch.zeros(shape, device=device) if bias else None
         if betas:
             for bi in range(len(betas)):
                 if betas[bi] is not None:
@@ -39,24 +40,24 @@ class SparseBeta:
             device, non_blocking=True).requires_grad_()
 
     def apply_splits(self, history, key):
+        loc_numpy = np.zeros(self.loc.shape, dtype=np.int32)
+        sign_numpy = np.zeros(self.sign.shape)
+        if self.bias is not None:
+            bias_numpy = np.zeros(self.bias.shape)
         for bi in range(len(history)):
             # Add history splits. (layer, neuron) is the current decision.
             split_locs, split_coeffs = history[bi][key][:2]
             split_len = len(split_locs)
             if split_len > 0:
-                self.sign[bi, :split_len] = torch.as_tensor(
-                    split_coeffs, device=self.device)
-                self.loc[bi, :split_len] = torch.as_tensor(
-                    split_locs, device=self.device)
+                sign_numpy[bi, :split_len] = split_coeffs
+                loc_numpy[bi, :split_len] = split_locs
                 if self.bias is not None:
                     split_bias = history[bi][key][2]
-                    self.bias[bi, :split_len] = torch.as_tensor(
-                        split_bias, device=self.device)
-        self.loc = self.loc.to(device=self.device, non_blocking=True)
-        self.sign = self.sign.to(device=self.device, non_blocking=True)
+                    bias_numpy[bi, :split_len] = split_bias
+        self.loc.copy_(torch.from_numpy(loc_numpy), non_blocking=True)
+        self.sign.copy_(torch.from_numpy(sign_numpy), non_blocking=True)
         if self.bias is not None:
-            self.bias = self.bias.to(device=self.device, non_blocking=True)
-
+            self.bias.copy_(torch.from_numpy(bias_numpy), non_blocking=True)
 
 def get_split_nodes(self: 'BoundedModule'):
     self.split_nodes = []
@@ -71,6 +72,8 @@ def get_split_nodes(self: 'BoundedModule'):
                 split_activations_.append(
                     (activation, activation.inputs.index(layer)))
         if split_activations_:
+            if layer.lower is None and layer.upper is None:
+                continue
             self.split_nodes.append(layer)
             self.split_activations[layer.name] = split_activations_
     return self.split_nodes, self.split_activations

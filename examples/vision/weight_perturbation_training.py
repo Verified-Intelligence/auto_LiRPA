@@ -219,11 +219,11 @@ def main(args):
     ## Step 3: wrap model with auto_LiRPA
     # The second parameter dummy_input is for constructing the trace of the computational graph.
     model = BoundedModule(model_ori, dummy_input, device=args.device, bound_opts={
-        'relu':args.bound_opts, 'sparse_intermediate_bounds': False,
+        'activation_bound_option':args.bound_opts, 'sparse_intermediate_bounds': False,
         'sparse_conv_intermediate_bounds': False, 'sparse_intermediate_bounds_with_ibp': False})
     final_name1 = model.final_name
     model_loss = BoundedModule(CrossEntropyWrapper(model_ori), (dummy_input, torch.zeros(1, dtype=torch.long)),
-            device=args.device, bound_opts= {'relu': args.bound_opts, 'loss_fusion': True,
+            device=args.device, bound_opts= {'activation_bound_option': args.bound_opts, 'loss_fusion': True,
                                              'sparse_intermediate_bounds': False,
                                              'sparse_conv_intermediate_bounds': False,
                                              'sparse_intermediate_bounds_with_ibp': False})
@@ -286,12 +286,7 @@ def main(args):
             logger.info("Evaluating...")
             torch.cuda.empty_cache()
 
-            # remove 'model.' in state_dict (hack for saving models so far...)
-            state_dict_loss = model_loss.state_dict()
-            state_dict = {}
-            for name in state_dict_loss:
-                assert (name.startswith('model.'))
-                state_dict[name[6:]] = state_dict_loss[name]
+            state_dict = model_loss.state_dict()
 
             # Test one epoch.
             with torch.no_grad():

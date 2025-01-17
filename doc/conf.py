@@ -23,7 +23,7 @@ subprocess.run(['python', 'process.py'])
 # -- Project information -----------------------------------------------------
 
 project = 'auto_LiRPA'
-author = '<a href="https://github.com/KaidiXu/auto_LiRPA#developers-and-copyright">auto-LiRPA authors</a>'
+author = '<a href="https://github.com/Verified-Intelligence/auto_LiRPA#developers-and-copyright">auto-LiRPA authors</a>'
 copyright = f'2021, {author}'
 
 
@@ -80,4 +80,4 @@ def linkcode_resolve(domain, info):
     fn, lineno_start, lineno_end = find_source()
     filename = f'{fn}#L{lineno_start}-L{lineno_end}'
 
-    return f"https://github.com/KaidiXu/auto_LiRPA/blob/{branch}/doc/{filename}"
+    return f"https://github.com/Verified-Intelligence/auto_LiRPA/blob/{branch}/doc/{filename}"

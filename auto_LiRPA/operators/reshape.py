@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -43,35 +43,29 @@ class BoundReshape(Bound):
             if A is None:
                 return None
             if type(A) == Patches:
+                # output shape should be [batch, in_c, in_H, in_W] since it's followed by Conv2d
+                assert len(self.output_shape) == 4
                 if type(self.inputs[0]) == BoundLinear:
                     # Save the shape and it will be converted to matrix in Linear layer.
                     return A.create_similar(input_shape=self.output_shape)
                 if A.unstable_idx is None:
                     patches = A.patches
                     # non-sparse: [batch, out_dim, out_c, out_H, out_W, out_dim, in_c, H, W]
-                    # [batch, out_dim*out_c, out_H, out_W, out_dim*in_c, H, W]
+                    # [out_dim*out_c, batch, out_H, out_W, out_dim*in_c, H, W]
                     # expected next_A shape [batch, spec, in_c, in_H , in_W].
                     next_A = patches_to_matrix(
-                        patches, [
-                            self.input_shape[0]*self.input_shape[1],
-                            patches.shape[-3],
-                            int(math.sqrt(self.input_shape[-1]//A.patches.shape[-3])),
-                            int(math.sqrt(self.input_shape[-1]//A.patches.shape[-3]))],
-                        A.stride, A.padding)
+                        pieces=patches, input_shape=self.output_shape,
+                        stride=A.stride, padding=A.padding)
                 else:
                     # sparse: [spec, batch, in_c, patch_H, patch_W] (specs depends on the number of unstable neurons).
                     patches = A.patches
                     # expected next_A shape [batch, spec, input_c, in_H, in_W].
-                    next_A = patches_to_matrix(patches, [
-                        self.input_shape[0],
-                        patches.shape[-3],
-                        int(math.sqrt(self.input_shape[-1]//patches.shape[-3])),
-                        int(math.sqrt(self.input_shape[-1]//patches.shape[-3]))],
-                        A.stride, A.padding, output_shape=A.output_shape,
-                        unstable_idx=A.unstable_idx)
-                # Reshape it to [batch, spec, *input_shape]  (input_shape is the shape before Reshape operation).
-                next_A = next_A.reshape(A.shape[1], -1, *self.input_shape[1:])
-                return next_A.transpose(0,1)
+                    next_A = patches_to_matrix(
+                        pieces=patches, input_shape=self.output_shape,
+                        stride=A.stride, padding=A.padding, 
+                        output_shape=A.output_shape, unstable_idx=A.unstable_idx)
+                # Reshape it to [spec, batch, *input_shape]  (input_shape is the shape before Reshape operation).
+                return next_A.reshape(-1, A.shape[1], *self.input_shape[1:])
             else:
                 return A.reshape(A.shape[0], A.shape[1], *self.input_shape[1:])
         #FIXME check reshape or view
@@ -255,6 +249,39 @@ class BoundFlatten(Bound):
         node_grad = ReshapeGrad()
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(node_grad, grad_input, [])]
+
+
+class BoundATenUnflatten(BoundReshape):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+    
+    def forward(self, x, dim, sizes):
+        self.dim = dim.item()
+        self.sizes = sizes.tolist()
+        fval = torch.unflatten(x, self.dim, self.sizes)
+        self.shape = fval.shape
+        return fval
+    
+    def bound_backward(self, last_lA, last_uA, *x, **kwargs):
+        A, lbias, ubias = super().bound_backward(last_lA, last_uA, x[0], shape=None, kwargs=kwargs)
+        # One more input for Unflatten
+        A.append((None, None))
+        return A, lbias, ubias
+
+    def bound_forward(self, dim_in, *x):
+        return super().bound_forward(dim_in=dim_in, x=x[0], shape=None)
+    
+    def bound_dynamic_forward(self, *x, max_dim=None, offset=0):
+        return super().bound_dynamic_forward(x=x[0], shape=None, max_dim=max_dim, offset=offset)
+
+    def interval_propagate(self, x, dim, sizes):
+        return Interval.make_interval(
+            self.forward(x[0], dim[0], sizes[0]),
+            self.forward(x[1], dim[0], sizes[0]), x)
+    
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        shape = torch.tensor(v[0].shape[0], *self.shape[1:])
+        return super().build_solver((v[0], shape), model=model, C=C, model_type=model_type, solver_pkg=solver_pkg)
 
 
 class ReshapeGrad(Module):

@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -201,17 +201,18 @@ class CutModule():
 
     @staticmethod
     @torch.jit.script
-    def jit_arelu_lA(last_lA, lower, upper, beta_mm_coeffs, unstable_or_cut_index, upper_d):
+    def jit_arelu_lA(last_lA, lower, upper, beta_mm_coeffs, unstable_or_cut_index, upper_d, I_z1, I_z0):
         nu_hat_pos = last_lA.clamp(max=0.).abs()
-        tao = (-lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[0]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
+        # gamma = (-lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[0]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
         pi = (upper.unsqueeze(0) * nu_hat_pos + beta_mm_coeffs[0]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
-        tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-        tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-        new_upper_d = pi / (pi + tao + 1e-10)
+        pi = torch.min(pi, nu_hat_pos)#, torch.min(gamma, nu_hat_pos)
+        pi = pi.clamp(min=0.)#, gamma.clamp(min=0.)
+        pi = nu_hat_pos * I_z1 + pi * (~I_z1 * ~I_z0)
+        new_upper_d = pi / (nu_hat_pos + 1e-10)
         # need to customize the upper bound slope and lbias for (1) unstable relus and
         # (2) relus that are used with upper boundary relaxation
-        # original upper bound slope is u/(u-l) also equal to pi/(pi+tao) if no beta_mm_coeffs[0]
-        # now the upper bound slope should be pi/(p+tao) updated with beta_mm_coeffs[0]
+        # original upper bound slope is u/(u-l) also equal to pi/(pi+gamma) if no beta_mm_coeffs[0]
+        # now the upper bound slope should be pi/(pi+gamma) updated with beta_mm_coeffs[0]
         unstable_upper_bound_index = unstable_or_cut_index.unsqueeze(0).logical_and(last_lA < 0)
         # conv layer:
         # upper_d: 1, batch, current_c, current_w, current_h
@@ -219,13 +220,14 @@ class CutModule():
         # dense layer:
         # upper_d: 1, batch, current flattened nodes
         # unstable_upper_bound_index, new_upper_d: spec unstable, batch, current flattened nodes
-        new_upper_d = new_upper_d * unstable_upper_bound_index.float() + \
-                      upper_d * (1. - unstable_upper_bound_index.float())
-        return nu_hat_pos, tao, pi, new_upper_d, unstable_upper_bound_index
+        # we may need a new mask to filter out the unstable nodes that are not in the current layer
+        new_upper_d = (new_upper_d * unstable_upper_bound_index.to(lower.dtype) +
+                      upper_d * (1. - unstable_upper_bound_index.to(lower.dtype)))
+        return nu_hat_pos, pi, new_upper_d, unstable_upper_bound_index
 
     @staticmethod
     @torch.jit.script
-    def jit_arelu_lbias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, lower, upper, lbias, pi, tao):
+    def jit_arelu_lbias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, lower, upper, lbias, pi, I_z1, I_z0):
         # if no unstable, following bias should always be 0
         if unstable_or_cut_index.sum() > 0:
             # update lbias with new form, only contribued by unstable relus
@@ -234,8 +236,13 @@ class CutModule():
             # lbias: (spec unstable, batch, current flattened nodes) same as lA
             lbias = (pi * lower.unsqueeze(0))
 
-            uC_mask = (beta_mm_coeffs[0] <= uC).to(lbias)
-            lC_mask = (beta_mm_coeffs[0] >= lC).to(lbias)
+            # previous implementation
+            # uC_mask = (beta_mm_coeffs[0] <= uC).to(lbias)
+            # lC_mask = (beta_mm_coeffs[0] >= lC).to(lbias)
+
+            # complete implementation
+            uC_mask = ((beta_mm_coeffs[0] <= uC) | I_z0).to(lbias)
+            lC_mask = ((beta_mm_coeffs[0] >= lC) | I_z1).to(lbias)
             default_mask = ((1-uC_mask) * (1-lC_mask)).to(lbias)
             lbias = - beta_mm_coeffs[0].to(lbias) * lC_mask + lbias * default_mask
 
@@ -243,51 +250,100 @@ class CutModule():
             # lbias[beta_mm_coeffs[0] >= lC] = -beta_mm_coeffs[0][beta_mm_coeffs[0] >= lC].to(lbias)
 
             # final lbias: (spec unstable, batch)
-            lbias = (lbias * unstable_or_cut_index.unsqueeze(0).float()).view(lbias.shape[0], lbias.shape[1], -1).sum(-1)
+            lbias = (lbias * unstable_or_cut_index.unsqueeze(0).to(lower.dtype)).view(lbias.shape[0], lbias.shape[1], -1).sum(-1)
         return lbias
 
     @staticmethod
     @torch.jit.script
-    def jit_arelu_uA(last_uA, lower, upper, beta_mm_coeffs, unstable_or_cut_index, upper_d):
+    def jit_arelu_uA(last_uA, lower, upper, beta_mm_coeffs, unstable_or_cut_index, upper_d, I_z1, I_z0):
         nu_hat_pos = (-last_uA).clamp(max=0.).abs()
-        tao = (- lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[1]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
+        # gamma = (- lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[1]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
         pi = (upper.unsqueeze(0) * nu_hat_pos + beta_mm_coeffs[1]) / (upper.unsqueeze(0) - lower.unsqueeze(0) + 1e-10)
-        tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-        tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-        new_upper_d = pi / (pi + tao + 1e-10)
+        pi = pi.clamp(min=0.)
+        pi = torch.min(pi, nu_hat_pos)
+        pi = pi * I_z1 + nu_hat_pos * (~I_z1 * ~I_z0)
+        new_upper_d = pi / (nu_hat_pos + 1e-10)
 
-        # assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
+        # assert ((gamma + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+gamma should always be the same as nu_hat_pos"
 
-        # unstable_or_cut_index = self.I.logical_or(self.arelu_coeffs.sum(0).view(self.I.shape) != 0)
+        # unstable_or_cut_index = self.I.logical_or(self.arelu_coeffs.abs().sum(0).view(self.I.shape) != 0)
         unstable_upper_bound_index = unstable_or_cut_index.unsqueeze(0).logical_and(-last_uA < 0)
-        new_upper_d = new_upper_d * unstable_upper_bound_index.float() + \
-                      upper_d * (1. - unstable_upper_bound_index.float())
-        return nu_hat_pos, tao, pi, new_upper_d, unstable_upper_bound_index
+        new_upper_d = new_upper_d * unstable_upper_bound_index.to(lower.dtype) + \
+                      upper_d * (1. - unstable_upper_bound_index.to(lower.dtype))
+        return nu_hat_pos, pi, new_upper_d, unstable_upper_bound_index
 
     @staticmethod
     @torch.jit.script
-    def jit_arelu_ubias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, lower, upper, ubias, pi, tao):
+    def jit_arelu_ubias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, lower, upper, ubias, pi, I_z1, I_z0):
         if unstable_or_cut_index.sum() > 0:
             uC = -upper.unsqueeze(0) * nu_hat_pos
             lC = -lower.unsqueeze(0) * nu_hat_pos
             ubias = -(pi * lower.unsqueeze(0))
 
-            uC_mask = (beta_mm_coeffs[1] <= uC).to(ubias)
-            lC_mask = (beta_mm_coeffs[1] >= lC).to(ubias)
+            # uC_mask = (beta_mm_coeffs[1] <= uC).to(ubias)
+            # lC_mask = (beta_mm_coeffs[1] >= lC).to(ubias)
+            uC_mask = ((beta_mm_coeffs[1] <= uC) | I_z0).to(ubias)
+            lC_mask = ((beta_mm_coeffs[1] >= lC) | I_z1).to(ubias)
+
             default_mask = ((1-uC_mask) * (1-lC_mask)).to(ubias)
             ubias = beta_mm_coeffs[1].to(ubias) * lC_mask + ubias * default_mask
 
             # ubias[beta_mm_coeffs[1] <= uC] = 0.
             # ubias[beta_mm_coeffs[1] >= lC] = beta_mm_coeffs[1][beta_mm_coeffs[1] >= lC].to(ubias)
 
-            ubias = (ubias * unstable_or_cut_index.unsqueeze(0).float()).view(ubias.shape[0], ubias.shape[1], -1).sum(-1)
+            ubias = (ubias * unstable_or_cut_index.unsqueeze(0).to(lower.dtype)).view(ubias.shape[0], ubias.shape[1], -1).sum(-1)
         return ubias
 
 
     def arelu_cut(self, start_node, layer_name, last_lA, last_uA, lower_d, upper_d,
-                  lower_b, upper_b, lb_lower_d, ub_lower_d, I, x, patch_size,
+                  lower_b, upper_b, lb_lower_d, ub_lower_d, relu_indicators, x, patch_size,
                   current_layer_shape, unstable_idx=None, batch_mask=None):
+        """
+        We want to calculate the pi and gamma for the lower bound of the next layer.
+        To make the GCP CROWN complete, we have to consider the case when z is a constant.
+        Now discuss the case when z = 0, z = 1 (constant), and 0 < z < 1 (variable).
+            lbias is h(beta) in the paper.
+            upper_d is the upper bound slope of the current layer.
+        1. z = 0 -> pi = 0, gamma = nu_hat_pos, tao = 0, mu = (alpha) * nu_hat_neg
+            lbias = 0.
+            upper_d = pi / (pi + gamma) = 0.
+        2. z = 1 -> pi = nu_hat_pos, gamma = 0, tao = alpha * nu_hat_neg, mu = 0
+            lbias = - beta_mm_coeffs[0].
+            upper_d = pi / (pi + gamma) = 1.
+        3. 0 < z < 1. We do the regular calculation using the closed form solution.
+            lbias = pi * lower, if -upper * nu_hat_pos <= beta_mm_coeffs[0] <= -lower * nu_hat_pos
+            lbias = 0, if beta_mm_coeffs[0] <= -upper * nu_hat_pos
+            lbias = -beta_mm_coeffs[0], if beta_mm_coeffs[0] >= -lower * nu_hat_pos
+            upper_d = pi / (nu_hat_pos).
+            where
+                pi = (upper * nu_hat_pos + beta_mm_coeffs[0]) / (upper - lower),
+                pi = min(pi, nu_hat_pos),
+                pi = max(pi, 0),
+                gamma = (-lower * nu_hat_pos - beta_mm_coeffs[0]) / (upper - lower).
+                gamma = min(gamma, nu_hat_pos),
+                gamma = max(gamma, 0).
+        Thus, we have the following implementation.
+        if z = 0:
+            pi = 0.
+        if z = 1:
+            pi = nu_hat_pos.
+        Otherwise:
+            if -upper * nu_hat_pos <= beta_mm_coeffs[0] <= -lower * nu_hat_pos:
+                pi = (upper * nu_hat_pos + beta_mm_coeffs[0]) / (upper - lower),
+                pi = min(pi, nu_hat_pos),
+                pi = max(pi, 0),
+                lbias = pi * lower,
+                upper_d = pi / (nu_hat_pos).
+            if beta_mm_coeffs[0] <= -upper * nu_hat_pos:
+                lbias = 0.
+            if beta_mm_coeffs[0] >= -lower * nu_hat_pos:
+                lbias = -beta_mm_coeffs[0].
+        """
         # propagate integer var of relu neuron (arelu) in cut constraints through relu layer
+        # I[0]. unstable neuron mask.
+        # I[1]. previous unstable now split on z = 1.
+        # I[2]. previous unstable now split on z = 0.
+        unstable_neurons_mask, z_split_to_1_mask, z_split_to_0_mask = relu_indicators
         arelu_coeffs = self.arelu_coeffs[layer_name]
         active_cuts = self.active_cuts[start_node.name]
         # active_cuts.size(0) == 0 means all constraints containing this layer have deep layer nodes
@@ -309,10 +365,13 @@ class CutModule():
         # not patches: (2(0 lower, 1 upper), unstable, batch, current flattened layer nodes)
         beta_mm_coeffs = self.general_beta_coeffs_mm(general_beta, arelu_coeffs, A, current_layer_shape)
         # unstable_this_layer = torch.logical_and(x.lower < 0, x.upper > 0).unsqueeze(0)
-        # I is the unstable index in this relu layer: (batch, *layer shape)
+        # relu_indicator is the unstable index in this relu layer: (batch, *layer shape)
         # if there is node in cut constraint that is stable, also need to count its effect
         # self.arelu_coeffs: (num_constrs, flattened current layer)
-        unstable_or_cut_index = I.logical_or(arelu_coeffs.sum(0).view(I[0:1].shape) != 0)
+        # self.arelu_coeffs do not have a batch dimension - only one cut can be applied to all batch elements.
+        # We will handle the neurons which are unstable or those have cut constraints below, thus creating the mask.
+        unstable_or_cut_index = unstable_neurons_mask.logical_or(arelu_coeffs.abs().sum(0).view(unstable_neurons_mask[0:1].shape) != 0)
+        # Shape of unstable_or_cut_index is (batch, num_neurons). It is a binary mask.
 
         if type(A) is Patches:
             # patches mode, conv layer only
@@ -331,21 +390,21 @@ class CutModule():
             unstable_or_cut_index = _maybe_unfold(unstable_or_cut_index.unsqueeze(0), A)
             if last_lA is not None:
                 assert beta_mm_coeffs[0].shape == last_lA.shape, f"{beta_mm_coeffs[0].shape} != {last_lA.shape}"
-                # last_lA.patches, nu_hat_pos, tao, pi: (unstable, batch, in_c, H, W)
+                # last_lA.patches, nu_hat_pos, gamma, pi: (unstable, batch, in_c, H, W)
                 nu_hat_pos = last_lA.patches.clamp(max=0.).abs()
-                tao = (-x_lower_unfold * nu_hat_pos - beta_mm_coeffs[0]) / (x_upper_minus_lower_unfold.clamp(min=1e-10))
+                # gamma = (-x_lower_unfold * nu_hat_pos - beta_mm_coeffs[0]) / (x_upper_minus_lower_unfold.clamp(min=1e-10))
                 pi = (x_upper_unfold * nu_hat_pos + beta_mm_coeffs[0]) / (x_upper_minus_lower_unfold.clamp(min=1e-10))
-                tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-                tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-                new_upper_d = pi / (pi + tao + 1e-10)
+                pi = torch.min(pi, nu_hat_pos).clamp(min=0.)
+                pi = nu_hat_pos * z_split_to_1_mask + pi * (~z_split_to_1_mask * ~z_split_to_0_mask)
+                new_upper_d = pi / (nu_hat_pos + 1e-10)
 
-                assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
+                # assert ((gamma + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+gamma should always be the same as nu_hat_pos"
 
                 # unstable_upper_bound_index: spec unstable, batch, in_C, H, W (same as patches last_lA)
                 unstable_upper_bound_index = unstable_or_cut_index.logical_and(last_lA.patches < 0)
                 # upper_d: (spec unstable, 1, in_C, H, W) (unfolded shape, same as patches last_lA)
-                new_upper_d = new_upper_d * unstable_upper_bound_index.float() + \
-                              upper_d * (1. - unstable_upper_bound_index.float())
+                new_upper_d = new_upper_d * unstable_upper_bound_index.to(x_lower_unfold.dtype) + \
+                              upper_d * (1. - unstable_upper_bound_index.to(x_lower_unfold.dtype))
 
                 if last_uA is None: uA, ubias = None, 0.
                 # lbias: unstable, batch
@@ -358,25 +417,27 @@ class CutModule():
                     uC = -x_upper_unfold * nu_hat_pos
                     lC = -x_lower_unfold * nu_hat_pos
                     lbias = (pi * x_lower_unfold)
-                    lbias[beta_mm_coeffs[0] <= uC] = 0.
-                    lbias[beta_mm_coeffs[0] >= lC] = -beta_mm_coeffs[0][beta_mm_coeffs[0] >= lC].to(lbias)
+                    # lbias[beta_mm_coeffs[0] <= uC] = 0.
+                    # lbias[beta_mm_coeffs[0] >= lC] = -beta_mm_coeffs[0][beta_mm_coeffs[0] >= lC].to(lbias)
+                    lbias[(beta_mm_coeffs[0] <= uC)| z_split_to_0_mask] = 0.
+                    lbias[(beta_mm_coeffs[0] >= lC)| z_split_to_1_mask] = -beta_mm_coeffs[0][(beta_mm_coeffs[0] >= lC)| z_split_to_1_mask].to(lbias)
                     # lbias: unstable, batch, in_C, H, W (same as patches last_lA) => lbias: (unstable, batch)
-                    lbias = (lbias * unstable_or_cut_index.float()).view(lbias.shape[0], lbias.shape[1], -1).sum(-1)
+                    lbias = (lbias * unstable_or_cut_index.to(x_lower_unfold.dtype)).view(lbias.shape[0], lbias.shape[1], -1).sum(-1)
 
             if last_uA is not None:
                 # get the upper bound
                 nu_hat_pos = (-last_uA.patches).clamp(max=0.).abs()
-                tao = (-x_lower_unfold * nu_hat_pos - beta_mm_coeffs[1]) / (x_upper_minus_lower_unfold + 1e-10)
+                # gamma = (-x_lower_unfold * nu_hat_pos - beta_mm_coeffs[1]) / (x_upper_minus_lower_unfold + 1e-10)
                 pi = (x_upper_unfold * nu_hat_pos + beta_mm_coeffs[1]) / (x_upper_minus_lower_unfold + 1e-10)
-                tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-                tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-                new_upper_d = pi / (pi + tao + 1e-10)
+                pi = torch.min(pi, nu_hat_pos).clamp(min=0.)
+                pi = nu_hat_pos * z_split_to_1_mask + pi * (~z_split_to_1_mask * ~z_split_to_0_mask)
+                new_upper_d = pi / (nu_hat_pos + 1e-10)
 
-                assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
+                # assert ((gamma + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+gamma should always be the same as nu_hat_pos"
 
                 unstable_upper_bound_index = unstable_or_cut_index.logical_and((-last_uA.patches) < 0)
-                new_upper_d = new_upper_d * unstable_upper_bound_index.float() + \
-                              upper_d * (1. - unstable_upper_bound_index.float())
+                new_upper_d = new_upper_d * unstable_upper_bound_index.to(x_lower_unfold.dtype) + \
+                              upper_d * (1. - unstable_upper_bound_index.to(x_lower_unfold.dtype))
 
                 uA, ubias = _bound_oneside(last_uA, new_upper_d, ub_lower_d if lower_d is None else lower_d, upper_b, lower_b, start_node, patch_size)
                 if last_lA is None: lA, lbias = None, 0.
@@ -385,10 +446,12 @@ class CutModule():
                     uC = -x_upper_unfold * nu_hat_pos
                     lC = -x_lower_unfold * nu_hat_pos
                     ubias = -(pi * x_lower_unfold)
-                    ubias[beta_mm_coeffs[1] <= uC] = 0.
-                    ubias[beta_mm_coeffs[1] >= lC] = beta_mm_coeffs[1][beta_mm_coeffs[1] >= lC].to(ubias)
+                    # ubias[beta_mm_coeffs[1] <= uC] = 0.
+                    # ubias[beta_mm_coeffs[1] >= lC] = beta_mm_coeffs[1][beta_mm_coeffs[1] >= lC].to(ubias)
+                    ubias[(beta_mm_coeffs[1] <= uC) | z_split_to_0_mask] = 0.
+                    ubias[(beta_mm_coeffs[1] >= lC) | z_split_to_1_mask] = beta_mm_coeffs[1][(beta_mm_coeffs[1] >= lC) | z_split_to_1_mask].to(ubias)
                     # ubias: unstable, batch, in_C, H, W (same as patches last_uA) => ubias: (unstable, batch)
-                    ubias = (ubias * unstable_or_cut_index.float()).view(ubias.shape[0], ubias.shape[1], -1).sum(-1)
+                    ubias = (ubias * unstable_or_cut_index.to(x_lower_unfold.dtype)).view(ubias.shape[0], ubias.shape[1], -1).sum(-1)
         else:
             # dense
             if last_lA is not None:
@@ -396,84 +459,34 @@ class CutModule():
                 # # C is nu_hat_pos
                 # # last_lA: (spec unstable, batch, current flattened nodes (current_c*current_h*current_w))
                 # nu_hat_pos = last_lA.clamp(max=0.).abs()
-                # # pi, tao: spec_unstable, batch, current layer shape (same as last_lA)
-                # tao = (-x.lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[0]) / (x.upper.unsqueeze(0) - x.lower.unsqueeze(0) + 1e-10)
-                # pi = (x.upper.unsqueeze(0) * nu_hat_pos + beta_mm_coeffs[0]) / (x.upper.unsqueeze(0) - x.lower.unsqueeze(0) + 1e-10)
-                # tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-                # tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-                # new_upper_d = pi / (pi + tao + 1e-10)
-
-                # assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
+                # # pi, gamma: spec_unstable, batch, current layer shape (same as last_lA)
 
                 # # need to customize the upper bound slope and lbias for (1) unstable relus and
                 # # (2) relus that are used with upper boundary relaxation
-                # # original upper bound slope is u/(u-l) also equal to pi/(pi+tao) if no beta_mm_coeffs[0]
-                # # now the upper bound slope should be pi/(p+tao) updated with beta_mm_coeffs[0]
-                # unstable_upper_bound_index = unstable_or_cut_index.unsqueeze(0).logical_and(last_lA < 0)
+                # # original upper bound slope is u/(u-l) also equal to pi/(pi+gamma) if no beta_mm_coeffs[0]
+                # # now the upper bound slope should be pi/(p+gamma) updated with beta_mm_coeffs[0]
+
                 # # conv layer:
                 # # upper_d: 1, batch, current_c, current_w, current_h
                 # # unstable_upper_bound_index, new_upper_d: spec unstable, batch, current_c, current_w, current_h
                 # # dense layer:
                 # # upper_d: 1, batch, current flattened nodes
                 # # unstable_upper_bound_index, new_upper_d: spec unstable, batch, current flattened nodes
-                # new_upper_d = new_upper_d * unstable_upper_bound_index.float() +\
-                #             upper_d * (1. - unstable_upper_bound_index.float())
-                # #####################
 
-                nu_hat_pos, tao, pi, new_upper_d, unstable_upper_bound_index = self.jit_arelu_lA(last_lA, x.lower, x.upper, beta_mm_coeffs, unstable_or_cut_index, upper_d)
+                nu_hat_pos, pi, new_upper_d, unstable_upper_bound_index = self.jit_arelu_lA(last_lA, x.lower, x.upper, beta_mm_coeffs, unstable_or_cut_index, upper_d, z_split_to_1_mask, z_split_to_0_mask)
 
                 if last_uA is None: uA, ubias = None, 0.
                 lA, lbias = _bound_oneside(last_lA, lb_lower_d if lower_d is None else lower_d, new_upper_d, lower_b, upper_b, start_node, patch_size)
-
-                # if unstable_or_cut_index.sum() == 0: assert (lbias == 0).all(), "lbias should be 0 if no unstable relus"
-
-                # #####################
-                # # if no unstable, following bias should always be 0
-                # if unstable_or_cut_index.sum() > 0:
-                #     # update lbias with new form, only contribued by unstable relus
-                #     uC = -x.upper.unsqueeze(0) * nu_hat_pos
-                #     lC = -x.lower.unsqueeze(0) * nu_hat_pos
-                #     # lbias: (spec unstable, batch, current flattened nodes) same as lA
-                #     lbias = (pi * x.lower.unsqueeze(0))
-                #     lbias[beta_mm_coeffs[0] <= uC] = 0.
-                #     lbias[beta_mm_coeffs[0] >= lC] = -beta_mm_coeffs[0][beta_mm_coeffs[0] >= lC].to(lbias)
-                #     # final lbias: (spec unstable, batch)
-                #     lbias = (lbias * unstable_or_cut_index.unsqueeze(0).float()).view(lbias.shape[0], lbias.shape[1], -1).sum(-1)
-                # #####################
-                lbias = self.jit_arelu_lbias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, x.lower, x.upper, lbias, pi, tao)
+                lbias = self.jit_arelu_lbias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, x.lower, x.upper, lbias, pi, z_split_to_1_mask, z_split_to_0_mask)
 
             if last_uA is not None:
                 # # C is nu_hat_pos
-                # nu_hat_pos = (-last_uA).clamp(max=0.).abs()
-                # tao = (- x.lower.unsqueeze(0) * nu_hat_pos - beta_mm_coeffs[1]) / (x.upper.unsqueeze(0) - x.lower.unsqueeze(0) + 1e-10)
-                # pi = (x.upper.unsqueeze(0) * nu_hat_pos + beta_mm_coeffs[1]) / (x.upper.unsqueeze(0) - x.lower.unsqueeze(0) + 1e-10)
-                # tao, pi = tao.clamp(min=0.), pi.clamp(min=0.)
-                # tao, pi = torch.min(tao, nu_hat_pos), torch.min(pi, nu_hat_pos)
-                # new_upper_d = pi / (pi + tao + 1e-10)
-
-                # assert ((tao + pi - nu_hat_pos).abs()*unstable_or_cut_index).max() <= 1e-5, "pi+tao should always be the same as nu_hat_pos"
-
-                # # unstable_or_cut_index = self.I.logical_or(self.arelu_coeffs.sum(0).view(self.I.shape) != 0)
-                # unstable_upper_bound_index = unstable_or_cut_index.unsqueeze(0).logical_and(-last_uA < 0)
-                # new_upper_d = new_upper_d * unstable_upper_bound_index.float() +\
-                #             upper_d * (1. - unstable_upper_bound_index.float())
-                nu_hat_pos, tao, pi, new_upper_d, unstable_upper_bound_index = self.jit_arelu_uA(last_uA, x.lower, x.upper, beta_mm_coeffs, unstable_or_cut_index, upper_d)
+                nu_hat_pos, pi, new_upper_d, unstable_upper_bound_index = self.jit_arelu_uA(last_uA, x.lower, x.upper, beta_mm_coeffs, unstable_or_cut_index, upper_d, z_split_to_1_mask, z_split_to_0_mask)
 
                 # one can test uA by optimize -obj which should have the same obj value
                 uA, ubias = _bound_oneside(last_uA, new_upper_d, ub_lower_d if lower_d is None else lower_d, upper_b, lower_b, start_node, patch_size)
                 if last_lA is None: lA, lbias = None, 0.
-
-                # if unstable_or_cut_index.sum() == 0: assert ubias == 0, "ubias should be 0 if no unstable relus"
-
-                # if unstable_or_cut_index.sum() > 0:
-                #     uC = -x.upper.unsqueeze(0) * nu_hat_pos
-                #     lC = -x.lower.unsqueeze(0) * nu_hat_pos
-                #     ubias = -(pi * x.lower.unsqueeze(0))
-                #     ubias[beta_mm_coeffs[1] <= uC] = 0.
-                #     ubias[beta_mm_coeffs[1] >= lC] = beta_mm_coeffs[1][beta_mm_coeffs[1] >= lC].to(ubias)
-                #     ubias = (ubias * unstable_or_cut_index.unsqueeze(0).float()).view(ubias.shape[0], ubias.shape[1], -1).sum(-1)
-
-                ubias = self.jit_arelu_ubias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, x.lower, x.upper, ubias, pi, tao)
+                ubias = self.jit_arelu_ubias(unstable_or_cut_index, nu_hat_pos, beta_mm_coeffs, x.lower, x.upper, ubias, pi, z_split_to_1_mask, z_split_to_0_mask)
 
         return lA, uA, lbias, ubias
 
@@ -509,7 +522,7 @@ class CutModule():
         # general_beta: (2(0 lower, 1 upper), spec, batch, num_constrs)
         # bias_coeffs: (num_constrs,)
         # beta_bias: (2(0 lower, 1 upper), batch, spec)
-        beta_bias = torch.einsum('sihj,j->shi', general_beta, bias_coeffs)
+        beta_bias = torch.einsum('sihj,j->shi', general_beta.to(lb.dtype), bias_coeffs.to(lb.dtype))
         lb = lb + beta_bias[0] if lb is not None else None
         ub = ub - beta_bias[1] if ub is not None else None
         return lb, ub

@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -27,6 +27,7 @@ class BoundConcat(Bound):
         super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.IBP_rets = None
+        self.ibp_intermediate = True
 
     def forward(self, *x):  # x is a list of tensors
         x = [(item if isinstance(item, Tensor) else torch.tensor(item)) for item in x]
@@ -76,7 +77,12 @@ class BoundConcat(Bound):
             if last_A is None:
                 return None
             if isinstance(last_A, torch.Tensor):
-                return torch.split(last_A, self.input_size, dim=self.axis + 1)
+                ret = list(torch.split(last_A, self.input_size, dim=self.axis + 1))
+                # Skip unused input nodes to reduce the cost of computing unused intermediate bounds
+                for i in range(len(ret)):
+                    if (ret[i] == 0).all():
+                        ret[i] = None
+                return ret
             elif isinstance(last_A, Patches):
                 assert len(self.input_shape) == 4 and self.axis == 1, "Split channel dimension is supported; others are unimplemented."
                 # Patches shape can be [out_c, batch, out_h, out_w, in_c, patch_h, patch_w]
@@ -88,10 +94,22 @@ class BoundConcat(Bound):
 
         uA = _bound_oneside(last_uA)
         lA = _bound_oneside(last_lA)
+
         if uA is None:
-            return [(lA[i] if lA is not None else None, None) for i in range(len(lA))], 0, 0
+            return [(lA[i] if lA is not None else None, None)
+                    for i in range(len(lA))], 0, 0
         if lA is None:
-            return [(None, uA[i] if uA is not None else None) for i in range(len(uA))], 0, 0
+            return [(None, uA[i] if uA is not None else None)
+                    for i in range(len(uA))], 0, 0
+
+        # To avoid issues in other parts of the code, we prune unused
+        # lA and uA only when they are both unused.
+        for i in range(len(lA)):
+            if lA[i] is None and uA[i] is not None:
+                lA[i] = torch.zeros_like(uA[i])
+            elif lA[i] is not None and uA[i] is None:
+                uA[i] = torch.zeros_like(lA[i])
+
         return [(lA[i], uA[i]) for i in range(len(lA))], 0, 0
 
     def bound_forward(self, dim_in, *x):
@@ -125,6 +143,7 @@ class BoundSlice(Bound):
         self.end = attr["ends"][0] if "ends" in attr else None
         self.axes = attr["axes"][0] if "axes" in attr else None
         self.use_default_ibp = False
+        self.ibp_intermediate = True
 
     def __repr__(self):
         attrs = {}

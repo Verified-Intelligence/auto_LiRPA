@@ -31,24 +31,11 @@ class cnn_MNIST(nn.Module):
         return self.fc(x)
 
 
-class cnn_MNIST_nobound(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = FeatureExtraction()
-        self.fc = nn.Linear(256, 10)
-
-    def forward(self, x):
-        x = self.features(x)
-        return self.fc(x)
-
-
-class TestStateDictName(TestCase): 
+class TestStateDictName(TestCase):
     def __init__(self, methodName='runTest', generate=False):
         super().__init__(methodName)
 
     def test(self):
-        nobound_model = cnn_MNIST_nobound()
-
         model = cnn_MNIST()
         state_dict = model.state_dict()
         dummy = torch.randn((1, 1, 28, 28))
@@ -56,14 +43,10 @@ class TestStateDictName(TestCase):
 
         # create second model and load state_dict to test load_state_dict() whether works proper
         model = cnn_MNIST()
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict, strict=True)
         ret2 = model(dummy)
         self.assertEqual(ret1, ret2)
-        self.assertEqual(nobound_model.state_dict().keys(), model.state_dict().keys())
 
-        print('expected', nobound_model.state_dict().keys())
-        print('got', model.state_dict().keys())
-        
 
 if __name__ == '__main__':
     # Change to generate=True when genearting reference results

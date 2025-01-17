@@ -1,4 +1,6 @@
 """Test one dimensional activation functions (e.g., ReLU, tanh, exp, sin, etc)"""
+import functools
+
 import pytest
 import torch
 import torch.nn as nn
@@ -35,20 +37,26 @@ class GELUOp(torch.autograd.Function):
 def GELU(x):
     return GELUOp.apply(x)
 
+def gen_hardtanh(min_val, max_val):
+   return functools.partial(torch.nn.functional.hardtanh, min_val=min_val, max_val=max_val)
+
+
 
 class Test1DActivation(TestCase):
     def __init__(self, methodName='runTest'):
         super().__init__(methodName)
 
+
     def create_test(self, act_func, low, high, ntests=1000, nsamples=1000,
-                    method='IBP'):
-        print(f'Testing activation {act_func} (method {method})')
+                    method='IBP', activation_bound_option='adaptive'):
+        print(f'Testing activation {act_func} (method {method}, activation_bound_option {activation_bound_option})')
 
         model = test_model(act_func)
         image = torch.zeros(1, ntests)
         bounded_model = BoundedModule(
             model, image, bound_opts={
                 'optimize_bound_args': {'iteration': 2},
+                'activation_bound_option': activation_bound_option
             })
 
         # Generate randomly bounded inputs.
@@ -132,7 +140,7 @@ class Test1DActivation(TestCase):
                          torch.sin, torch.cos,
                          torch.tanh, torch.arctan,
                          torch.exp, pow_2, pow_3,
-                         torch.sign, GELU]:
+                         torch.sign, GELU, gen_hardtanh(-1,1),gen_hardtanh(-0.25,0.25),gen_hardtanh(1,10),gen_hardtanh(-5,2)]:
             low, high = -10, 10
             if act_func == torch.reciprocal:
                 # So far only positive values are supported.
@@ -147,6 +155,10 @@ class Test1DActivation(TestCase):
                 test_samples = 10
                 for _ in range(test_samples):
                     self.create_test(act_func=act_func, low=low, high=high, method='CROWN-Optimized')
+            if act_func in [torch.nn.functional.relu]:
+                self.create_test(act_func=act_func, low=low, high=high, method='Dynamic-Forward')
+            if act_func in [torch.nn.functional.relu, torch.tanh]:
+                self.create_test(act_func=act_func, low=low, high=high, method='CROWN', activation_bound_option='same-slope')
 
         print('Testing activations with large input range')
         for act_func in [torch.sin, torch.tanh,

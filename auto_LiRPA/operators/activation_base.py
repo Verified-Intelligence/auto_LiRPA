@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -31,6 +31,9 @@ class BoundActivation(Bound):
         self.requires_input_bounds = [0]
         self.use_default_ibp = True
         self.splittable = False
+        # "core" region of input where precomputation can be done
+        self.range_l = -10
+        self.range_u = 10
 
     def _init_masks(self, x):
         self.mask_pos = x.lower >= 0
@@ -164,12 +167,14 @@ class BoundActivation(Bound):
 
         0: Stable (linear) neuron; 1: unstable (nonlinear) neuron.
         """
-        return torch.ones_like(lower)
+        return torch.ones_like(lower, dtype=torch.bool)
 
 
 class BoundOptimizableActivation(BoundActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
+        if 'optimize_bound_args' not in self.options:
+            self.options['optimize_bound_args'] = {}
         self.optimizable = True
         # Stages:
         #   * `init`: initializing parameters
@@ -215,10 +220,14 @@ class BoundOptimizableActivation(BoundActivation):
         CROWN backward bound propagation"""
         self.alpha = OrderedDict()
         for start_node in start_nodes:
-            ns, size_s = start_node[:2]
-            # TODO do not give torch.Size
-            if isinstance(size_s, (torch.Size, list, tuple)):
-                size_s = prod(size_s)
+            if self.options.get('optimize_bound_args', {}).get('use_shared_alpha', False):
+                size_s = 1
+                ns = start_node[0]
+            else:
+                ns, size_s = start_node[:2]
+                # TODO do not give torch.Size
+                if isinstance(size_s, (torch.Size, list, tuple)):
+                    size_s = prod(size_s)
             self.alpha[ns] = self._init_opt_parameters_impl(size_s, name_start=ns)
 
     def _init_opt_parameters_impl(self, size_spec, name_start=None):

@@ -112,7 +112,7 @@ test_batches = get_batches(data_test, args.batch_size)
 ptb = PerturbationSynonym(budget=args.budget)
 dummy_embeddings = BoundedTensor(dummy_embeddings, ptb)
 model_ori = model.model_from_embeddings
-bound_opts = { 'relu': args.bound_opts_relu, 'exp': 'no-max-input', 'fixed_reducemax_index': True }
+bound_opts = { 'activation_bound_option': args.bound_opts_relu, 'exp': 'no-max-input', 'fixed_reducemax_index': True }
 if isinstance(model_ori, BoundedModule):
     model_bound = model_ori
 else:
@@ -247,8 +247,8 @@ def train(epoch, batches, type):
             eps = eps_scheduler.get_eps()
         else:
             eps = 0
-        acc, loss, acc_robust, loss_robust = \
-            step(model, ptb, batch, eps=eps, train=train)
+        acc, loss, acc_robust, loss_robust = step(
+            model, ptb, batch, eps=eps, train=train)
         meter.update('acc', acc, len(batch))
         meter.update('loss', loss, len(batch))
         meter.update('acc_rob', acc_robust, len(batch))

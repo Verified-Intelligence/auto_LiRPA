@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -17,11 +17,127 @@
 
 from .utils import *
 from .bound_ops import *
-from .operators import Bound
 
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .bound_general import BoundedModule
+
+
+def invprop_enabled(self: 'BoundedModule'):
+    return self.bound_opts['optimize_bound_args']['apply_output_constraints_to']
+
+
+def invprop_init_infeasible_bounds(self: 'BoundedModule', bound_node, C):
+    # Infeasible bounds can result from unsatisfiable output constraints.
+    # We track them to set the corresponding lower bounds to inf and upper bounds to
+    # -inf.
+    if self.infeasible_bounds is None:
+        device = bound_node.attr['device']
+        if isinstance(C, Patches):
+            self.infeasible_bounds = torch.full((C.shape[1],), False, device=device)
+        else:
+            assert isinstance(C, (torch.Tensor, eyeC, OneHotC)), type(C)
+            self.infeasible_bounds = torch.full((C.shape[0],), False, device=device)
+
+
+def invprop_check_infeasible_bounds(self: 'BoundedModule', lb, ub):
+    if torch.any(self.infeasible_bounds):
+        if lb is not None:
+            assert lb.size(0) == self.infeasible_bounds.size(0)
+            lb = torch.where(self.infeasible_bounds.unsqueeze(1),
+                             torch.tensor(float('inf'), device=lb.device), lb)
+        if ub is not None:
+            assert ub.size(0) == self.infeasible_bounds.size(0)
+            ub = torch.where(self.infeasible_bounds.unsqueeze(1),
+                             torch.tensor(float('-inf'), device=ub.device), ub)
+    return lb, ub
+
+
+def backward_general_invprop(
+    self: 'BoundedModule',
+    initial_As, initial_lb, initial_ub,
+    bound_node,
+    C,
+    start_backpropagation_at_node = None,
+    bound_lower=True,
+    bound_upper=True,
+    average_A=False,
+    need_A_only=False,
+    unstable_idx=None,
+    update_mask=None,
+    verbose=True,
+):
+    use_beta_crown = self.bound_opts['optimize_bound_args']['enable_beta_crown']
+    # Sometimes, not using output constraints can give better results.
+    # When this flag is set, the bounds are computed both with and without
+    # output constraints, and the best of the two is returned.
+    best_of_oc_and_no_oc = (
+        self.bound_opts['optimize_bound_args']['best_of_oc_and_no_oc']
+    )
+
+    assert not use_beta_crown
+    assert not self.cut_used
+    assert initial_As is None
+    assert initial_lb is None
+    assert initial_ub is None
+    if best_of_oc_and_no_oc:
+        # Important: If input bounds are tightened, then this call must be done
+        # *before* the use of output constraints.
+        # At the end of backward_general, the bounds are concretized. For the input
+        # bounds, those concrete bounds are used to overwrite the bounds in the
+        # input perturbations, so they'll then be used by all other layers during
+        # their concretization. These input bounds *must* have their gradients
+        # w.r.t. the relaxations set up. The call to backward_general without
+        # output constraints will overwrite these bounds with values that do not
+        # have gradients. So it must come first.
+        with torch.no_grad():
+            o_res = self.backward_general(
+                bound_node=bound_node,
+                C=C,
+                start_backpropagation_at_node=start_backpropagation_at_node,
+                bound_lower=bound_lower,
+                bound_upper=bound_upper,
+                average_A=average_A,
+                need_A_only=need_A_only,
+                unstable_idx=unstable_idx,
+                update_mask=update_mask,
+                verbose=verbose,
+                apply_output_constraints_to=[],
+            )
+    res = self.backward_general_with_output_constraint(
+        bound_node=bound_node,
+        C=C,
+        start_backporpagation_at_node=start_backpropagation_at_node,
+        bound_lower=bound_lower,
+        bound_upper=bound_upper,
+        average_A=average_A,
+        need_A_only=need_A_only,
+        unstable_idx=unstable_idx,
+        update_mask=update_mask,
+        verbose=verbose,
+    )
+    if best_of_oc_and_no_oc:
+        # We use the best of both results. This would convert Infs to NaNs
+        # (because inf - inf = nan), so those entries get masked.
+        res0_inf_mask = torch.isinf(res[0])
+        r0 = res[0] - res[0].detach() + torch.max(res[0].detach(), o_res[0].detach())
+        r0 = torch.where(res0_inf_mask, res[0], r0)
+        res1_inf_mask = torch.isinf(res[1])
+        r1 = res[1] - res[1].detach() + torch.min(res[1].detach(), o_res[1].detach())
+        r1 = torch.where(res1_inf_mask, res[1], r1)
+        if self.return_A:
+            if res[2] != {}:
+                raise NotImplementedError(
+                    "Merging of A not implemented yet. If set, try disabling --best_of_oc_and_no_oc"
+                )
+            res = (r0, r1, {})
+        else:
+            res = (r0, r1)
+    batch_size = res[0].size(0)
+    infeasible_bounds = torch.any(res[0].reshape((batch_size, -1)) > res[1].reshape((batch_size, -1)), dim=1)
+    if torch.any(infeasible_bounds):
+        self.infeasible_bounds = torch.logical_or(self.infeasible_bounds, infeasible_bounds)
+    return res
 
 
 def backward_general_with_output_constraint(
@@ -224,7 +340,7 @@ def backward_general_with_output_constraint(
     # The other half of the residual connection is implemented by explicitly setting
     # the .lA and .uA values of the optimized layer to C.
     # This is done via initial_As, initial_lb, initial_ub.
-   
+
     if isinstance(C, (OneHotC, eyeC)):
         batch_size = C.shape[1]
         assert C.shape[0] <= C.shape[2]

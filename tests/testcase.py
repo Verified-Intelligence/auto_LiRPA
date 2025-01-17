@@ -9,8 +9,10 @@ class TestCase(unittest.TestCase):
     def __init__(self, methodName='runTest', seed=1, ref_path=None, generate=False):
         super().__init__(methodName)
 
-        self.addTypeEqualityFunc(np.ndarray, 'assert_array_equal')
-        self.addTypeEqualityFunc(torch.Tensor, 'assert_tensor_equal')
+        self.addTypeEqualityFunc(np.ndarray, '_assert_array_equal')
+        self.addTypeEqualityFunc(torch.Tensor, '_assert_tensor_equal')
+        self.rtol = 1e-5
+        self.atol = 1e-8
 
         self.set_seed(seed)
         self.ref_path = ref_path
@@ -46,25 +48,32 @@ class TestCase(unittest.TestCase):
         if self.generate:
             self.save()
         else:
-            self.assert_equal(self.result, self.reference)
+            self._assert_equal(self.result, self.reference)
 
-    def assert_equal(self, a, b):
+    def _assert_equal(self, a, b):
         assert type(a) == type(b)
-        if isinstance(a, list):
+        if isinstance(a, (list, tuple)):
             for a_, b_ in zip(a, b):
-                self.assert_equal(a_, b_)
-        elif isinstance(a, tuple):
-            for a_, b_ in zip(a, b):
-                self.assert_equal(a_, b_)
-        elif isinstance(a, np.ndarray):
-            self.assert_array_equal(a, b)
-        elif isinstance(a, torch.Tensor):
-            self.assert_tensor_equal(a, b)
+                self._assert_equal(a_, b_)
         else:
-            assert a == b
+            self.assertEqual(a, b)
 
-    def assert_array_equal(self, a, b, msg=None):
-        return np.allclose(a, b)
+    def _assert_array_equal(self, a, b, msg=None):
+        if not a.shape == b.shape:
+            if msg is None:
+                msg = f"Shapes are not equal: {a.shape} {b.shape}"
+            raise self.failureException(msg)
+        if not np.allclose(a, b, rtol=self.rtol, atol=self.atol):
+            if msg is None:
+                msg = f"Arrays are not equal:\n{a}\n{b}, max diff: {np.max(np.abs(a - b))}"
+            raise self.failureException(msg)
 
-    def assert_tensor_equal(self, a, b, msg=None):
-        return torch.allclose(a, b)
+    def _assert_tensor_equal(self, a, b, msg=None):
+        if not a.shape == b.shape:
+            if msg is None:
+                msg = f"Shapes are not equal: {a.shape} {b.shape}"
+            raise self.failureException(msg)
+        if not torch.allclose(a, b, rtol=self.rtol, atol=self.atol):
+            if msg is None:
+                msg = f"Tensors are not equal:\n{a}\n{b}, max diff: {torch.max(torch.abs(a - b))}"
+            raise self.failureException(msg)

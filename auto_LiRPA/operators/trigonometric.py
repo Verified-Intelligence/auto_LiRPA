@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -111,7 +111,8 @@ class BoundSin(BoundOptimizableNonLinear):
             (upper_clamped_new / self.step_pre).to(torch.long).reshape(-1)
         ) + 1
         # Lookup the lower bound slope from the pre-computed table.
-        d_lower = (torch.index_select(self.d_lower, 0, index).view(lower.shape) + k_tensor * 2 * torch.pi) * case1_mask
+        d_lower = (torch.index_select(self.d_lower, 0, index).view(lower.shape)
+                   + k_tensor * 2 * torch.pi) * case1_mask
 
         case2_mask = torch.logical_and(upper_clamped >= torch.pi, upper_clamped <= 3 * torch.pi / 2)
         upper_clamped_new = upper_clamped.clamp(min=torch.pi, max=3 * torch.pi / 2)
@@ -120,7 +121,8 @@ class BoundSin(BoundOptimizableNonLinear):
             ((torch.pi - upper_clamped_new) / -self.step_pre).to(torch.long).reshape(-1)
         ) + 1
         # Lookup the lower bound slope from the pre-computed table.
-        d_upper = (torch.pi - torch.index_select(self.d_upper, 0, index).view(lower.shape) + k_tensor * 2 * torch.pi) * case2_mask
+        d_upper = (torch.pi - torch.index_select(self.d_upper, 0, index).view(lower.shape)
+                   + k_tensor * 2 * torch.pi) * case2_mask
 
         # Indices of neurons with lower bound <=0, whose optimal slope to upper bound the function was pre-computed.
         k_tensor = torch.floor(lower / (2 * torch.pi))
@@ -131,7 +133,8 @@ class BoundSin(BoundOptimizableNonLinear):
             torch.zeros(lower.numel(), dtype=torch.long, device=lower.device),
             ((lower_clamped_new - 2 * torch.pi) / -self.step_pre).to(torch.long).reshape(-1)
         ) + 1
-        d_upper += (torch.index_select(self.d_upper, 0, index).view(upper.shape) + (k_tensor + 1) * 2 * torch.pi) * case3_mask
+        d_upper += (torch.index_select(self.d_upper, 0, index).view(upper.shape)
+                    + (k_tensor + 1) * 2 * torch.pi) * case3_mask
 
         case4_mask = torch.logical_and(lower_clamped >= torch.pi / 2, lower_clamped <= torch.pi)
         lower_clamped_new = lower_clamped.clamp(min=(torch.pi / 2), max=3 * torch.pi)
@@ -139,18 +142,9 @@ class BoundSin(BoundOptimizableNonLinear):
             torch.zeros(lower.numel(), dtype=torch.long, device=lower.device),
             ((torch.pi - lower_clamped_new) / self.step_pre).to(torch.long).reshape(-1)
         ) + 1
-        d_lower += (torch.pi - torch.index_select(self.d_lower, 0, index).view(upper.shape) + k_tensor * 2 * torch.pi) * case4_mask
+        d_lower += (torch.pi - torch.index_select(self.d_lower, 0, index).view(upper.shape)
+                    + k_tensor * 2 * torch.pi) * case4_mask
         return d_lower, d_upper
-
-    @staticmethod
-    def n_crossing(start, end, s):
-        """Check how many times we will encounter value s + k*2*pi within start and end for any integer k."""
-        cycles = torch.floor((end - start) / (2 * torch.pi))  # Number of 2pi cycles.
-        # Move s and end to the same 2 * pi cycle as start.
-        dist = torch.floor((s - start) / (2 * torch.pi))
-        real_s = s - dist * 2 * torch.pi
-        real_end = end - cycles * 2 * torch.pi
-        return (real_s >= start).to(s) * (real_s <= real_end).to(s) + cycles
 
     @staticmethod
     def arcsin(c):
@@ -177,6 +171,16 @@ class BoundSin(BoundOptimizableNonLinear):
         crossing1 = BoundSin.arcsin(c) - theta
         crossing2 = torch.pi - crossing1 - 2 * theta  # Problematic at exact 1/2 pi, but ok in our case (happens only when lb=ub).
         return BoundSin.n_crossing(start, end, crossing1) + BoundSin.n_crossing(start, end, crossing2)
+
+    @staticmethod
+    def n_crossing(start, end, s):
+        """Check how many times we will encounter value s + k*2*pi within start and end for any integer k."""
+        cycles = torch.floor((end - start) / (2 * torch.pi))  # Number of 2pi cycles.
+        # Move s and end to the same 2 * pi cycle as start.
+        dist = torch.floor((s - start) / (2 * torch.pi))
+        real_s = s - dist * 2 * torch.pi
+        real_end = end - cycles * 2 * torch.pi
+        return (real_s >= start).to(s) * (real_s <= real_end).to(s) + cycles
 
     @staticmethod
     def check_bound(tangent_point, x):
@@ -390,17 +394,14 @@ class BoundSin(BoundOptimizableNonLinear):
         smid = self.func((ub + lb) / 2)
         gap = smid - mid
 
-        min_preact = 1e-3
-        mask_close = (ub - lb) < min_preact
-        case1_line_slope = torch.where(mask_close, self.d_act_func(ub),
-            (sub - slb) / (ub - lb).clamp(min=1e-10))
+        case1_line_slope = (sub - slb) / (ub - lb).clamp(min=1e-10)
         case1_line_bias = slb - case1_line_slope * lb
         # Check if there are crossings between the line and the sin function.
         grad_crossings = self.get_intersection(lb, ub, case1_line_slope, theta=0.5 * torch.pi)
         # If there is no crossing, then we can connect the two points together as a lower/upper bound.
         use_line = grad_crossings == 1
         # Connected line is the upper bound.
-        upper_use_line = torch.logical_and(gap <  0, use_line)
+        upper_use_line = torch.logical_and(gap < 0, use_line)
         # Connected line is the lower bound.
         lower_use_line = torch.logical_and(gap >= 0, use_line)
 
@@ -424,7 +425,6 @@ class BoundSin(BoundOptimizableNonLinear):
 class BoundCos(BoundSin):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-
         self.ibp_max_point = 0.0
         self.ibp_min_point = torch.pi
 

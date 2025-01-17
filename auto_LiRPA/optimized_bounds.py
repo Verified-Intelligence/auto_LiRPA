@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -23,7 +23,7 @@ import torch
 from torch import optim
 from .beta_crown import print_optimized_beta
 from .cuda_utils import double2float
-from .utils import logger, reduction_sum, multi_spec_keep_func_all
+from .utils import reduction_sum, multi_spec_keep_func_all
 from .opt_pruner import OptPruner
 
 from typing import TYPE_CHECKING
@@ -90,6 +90,7 @@ default_optimize_bound_args = {
     # for compatibility with existing use cases.
     # Try to ensure that the parameters always match with the optimized bounds.
     'deterministic': False,
+    'max_time': 1e9,
 }
 
 
@@ -252,6 +253,8 @@ def _update_optimizable_activations(
         # Update best intermediate layer bounds only when they are optimized.
         # If they are already fixed in interm_bounds, then do
         # nothing.
+        if node.name not in best_intermediate_bounds:
+            continue
         if (interm_bounds is None
                 or node.inputs[0].name not in interm_bounds
                 or not fix_interm_bounds):
@@ -312,6 +315,7 @@ def _get_optimized_bounds(
 
     opts = self.bound_opts['optimize_bound_args']
     iteration = opts['iteration']
+    max_time = opts['max_time']
     beta = opts['enable_beta_crown']
     alpha = opts['enable_alpha_crown']
     apply_output_constraints_to = opts['apply_output_constraints_to']
@@ -354,6 +358,8 @@ def _get_optimized_bounds(
     if alpha:
         best_alphas = _set_alpha(
             optimizable_activations, parameters, alphas, opts['lr_alpha'])
+    else:
+        best_alphas = None
     if beta:
         ret_set_beta = self.set_beta(
             enable_opt_interm_bounds, parameters,
@@ -426,6 +432,7 @@ def _get_optimized_bounds(
 
     need_grad = True
     patience = 0
+    ret_0 = None
     for i in range(iteration):
         if cutter:
             # cuts may be optimized by cutter
@@ -541,6 +548,8 @@ def _get_optimized_bounds(
             ret_0 = ret[0].detach().clone() if bound_lower else ret[1].detach().clone()
 
             for node in optimizable_activations:
+                if node.inputs[0].lower is None and node.inputs[0].upper is None:
+                    continue
                 new_intermediate = [node.inputs[0].lower.detach().clone(),
                                     node.inputs[0].upper.detach().clone()]
                 best_intermediate_bounds[node.name] = new_intermediate
@@ -566,7 +575,7 @@ def _get_optimized_bounds(
             (x, C, full_l, full_ret_l, full_ret_u,
              full_ret, stop_criterion) = pruner.prune(
                 x, C, ret_l, ret_u, ret, full_l, full_ret_l, full_ret_u,
-                full_ret, interm_bounds, aux_reference_bounds,
+                full_ret, interm_bounds, aux_reference_bounds, reference_bounds,
                 stop_criterion_func, bound_lower)
         else:
             stop_criterion = (stop_criterion_func(full_ret_l) if bound_lower
@@ -607,6 +616,7 @@ def _get_optimized_bounds(
             # for lb and ub, we update them in every iteration since updating
             # them is cheap
             need_update = False
+            improved_idx = None
             if keep_best:
                 if best_ret_u is not None:
                     best_ret_u, best_ret, need_update, idx_mask, improved_idx = _update_best_ret(
@@ -631,18 +641,22 @@ def _get_optimized_bounds(
             else:
                 patience += 1
 
+            time_spent = time.time() - start
+
             # Save variables if this is the best iteration.
             # To save computational cost, we only check keep_best at the first
             # (in case divergence) and second half iterations
             # or before early stop by either stop_criterion or
             # early_stop_patience reached
             if (i < 1 or i > int(iteration * start_save_best) or deterministic
-                    or stop_criterion_final or patience == early_stop_patience):
+                    or stop_criterion_final or patience == early_stop_patience
+                    or time_spent > max_time):
 
                 # compare with the first iteration results and get improved indexes
                 if bound_lower:
                     if deterministic:
                         idx = improved_idx
+                        idx_mask = None
                     else:
                         idx_mask, idx = _get_idx_mask(
                             0, full_ret_l, ret_0, loss_reduction_func)
@@ -650,6 +664,7 @@ def _get_optimized_bounds(
                 else:
                     if deterministic:
                         idx = improved_idx
+                        idx_mask = None
                     else:
                         idx_mask, idx = _get_idx_mask(
                             1, full_ret_u, ret_0, loss_reduction_func)
@@ -672,7 +687,6 @@ def _get_optimized_bounds(
                         self.update_best_beta(enable_opt_interm_bounds, betas,
                                               best_betas, idx)
 
-
         if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
             print(f'****** iter [{i}]',
                   f'loss: {loss.item()}, lr: {opt.param_groups[0]["lr"]}',
@@ -684,9 +698,13 @@ def _get_optimized_bounds(
             break
 
         if patience > early_stop_patience:
-            logger.debug(
-                f'Early stop at {i}th iter due to {early_stop_patience}'
-                ' iterations no improvement!')
+            print(f'Early stop at {i}th iter due to {early_stop_patience}'
+                  ' iterations no improvement!')
+            break
+
+        if time_spent > max_time:
+            print(f'Early stop at {i}th iter due to exceeding the time limit '
+                  f'for the optimization (time spent: {time_spent})')
             break
 
         if i != iteration - 1 and not loss.requires_grad:
@@ -754,6 +772,8 @@ def _get_optimized_bounds(
         # Set all variables to their saved best values.
         with torch.no_grad():
             for idx, node in enumerate(optimizable_activations):
+                if node.name not in best_intermediate_bounds:
+                    continue
                 if alpha:
                     # Assigns a new dictionary.
                     node.alpha = best_alphas[node.name]
@@ -864,6 +884,7 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
         # this set the "perturbed" property
         self.set_input(*x, interm_bounds=interm_bounds)
         self.backward_from = {node: [final] for node in self._modules}
+        l = u = None
 
     final_node_name = final_node_name or self.final_name
 
@@ -879,6 +900,8 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
                 share_alphas=share_alphas,
                 final_node_name=final_node_name,
             )
+        if not start_nodes:
+            continue
         if skipped:
             node.restore_optimized_params(activation_opt_params[node.name])
         else:
@@ -886,7 +909,9 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
         if node in self.splittable_activations:
             for i in node.requires_input_bounds:
                 input_node = node.inputs[i]
-                if not input_node.perturbed:
+                if (not input_node.perturbed
+                        or node.inputs[i].lower is None
+                        and node.inputs[i].upper is None):
                     continue
                 init_intermediate_bounds[node.inputs[i].name] = (
                     [node.inputs[i].lower.detach(),

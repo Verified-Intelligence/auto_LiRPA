@@ -109,8 +109,8 @@ cd examples/vision
 python tinyimagenet_training.py --batch_size 100 --model wide_resnet_imagenet64
 ```
 
-For downscaled ImageNet, please download raw images (Train and Val, 64x64, npz format) from 
-[Image-Net.org](http://image-net.org/download-images), under the "Download downsampled image data (32x32, 64x64)" section, to `example/vision/data/ImageNet64/raw_data`, 
+For downscaled ImageNet, please download raw images (Train and Val, 64x64, npz format) from
+[Image-Net.org](http://image-net.org/download-images), under the "Download downsampled image data (32x32, 64x64)" section, to `example/vision/data/ImageNet64/raw_data`,
 decompress them and then run data preprocessing:
 
 ```bash
@@ -125,7 +125,7 @@ cd examples/vision
 python imagenet_training.py --batch_size 100 --model wide_resnet_imagenet64_1000class
 ```
 
-<a id="imagenet-pretrained"></a> 
+<a id="imagenet-pretrained"></a>
 **Pretrained models for ImageNet:** We released our certified defense models (trained with loss fusion) for
 [Tiny-Imagenet](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/imagenet-200/)
 and
@@ -134,7 +134,7 @@ To evaluate the clean error and verified error:
 
 ```bash
 # This is the model saved path.
-MODEL=saved_models/wide_resnet_imagenet64_1000	
+MODEL=saved_models/wide_resnet_imagenet64_1000
 # Run evaluation.
 python imagenet_training.py --verify --model wide_resnet_imagenet64_1000class --load $MODEL --eps 0.003921568627451
 ```
@@ -159,7 +159,7 @@ python train.py
 In [examples/language](../../examples/language),  we show that our framework can
 support perturbation specification of word substitution, beyond Lp-ball
 perturbation. We perform certified training for Transformer and LSTM on a
-sentiment classification task. 
+sentiment classification task.
 
 First, [download data](http://download.huan-zhang.com/datasets/language/data_language.tar.gz) and extract them to `examples/language/data`:
 
@@ -183,10 +183,10 @@ python train.py --dir=$DIR --model=lstm --lr=1e-3 --robust --method=IBP+backward
 python train.py --model=lstm --load=$DIR/ckpt_25 --robust --method=IBP+backward # for verification
 ```
 
-<a id="language-pretrained"></a> 
+<a id="language-pretrained"></a>
 **Pretrained models for Transformer/LSTM:** We provide our certified defense models for
 [Transformer](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_transformer)
-and [LSTM](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_lstm). 
+and [LSTM](http://web.cs.ucla.edu/~zshi/files/auto_LiRPA/trained/ckpt_lstm).
 To directly evaluate them:
 
 ```bash
@@ -232,9 +232,10 @@ greatly appreciated.
 
 ## BibTeX Entries
 
-If you find our library useful, please kindly cite our papers:
+If you find our library useful, please kindly cite [our papers](../../README.md#publications):
 
-```
+The original auto_LiRPA paper:
+```bibtex
 @article{xu2020automatic,
   title={Automatic perturbation analysis for scalable certified robustness and beyond},
   author={Xu, Kaidi and Shi, Zhouxing and Zhang, Huan and Wang, Yihan and Chang, Kai-Wei and Huang, Minlie and Kailkhura, Bhavya and Lin, Xue and Hsieh, Cho-Jui},
@@ -242,13 +243,15 @@ If you find our library useful, please kindly cite our papers:
   volume={33},
   year={2020}
 }
+```
 
+Extensions:
+```bibtex
 @inproceedings{xu2021fast,
-    title={{Fast and Complete}: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers},
-    author={Kaidi Xu and Huan Zhang and Shiqi Wang and Yihan Wang and Suman Jana and Xue Lin and Cho-Jui Hsieh},
-    booktitle={International Conference on Learning Representations},
-    year={2021},
-    url={https://openreview.net/forum?id=nVZtXBI6LNn}
+  title={{Fast and Complete}: Enabling Complete Neural Network Verification with Rapid and Massively Parallel Incomplete Verifiers},
+  author={Kaidi Xu and Huan Zhang and Shiqi Wang and Yihan Wang and Suman Jana and Xue Lin and Cho-Jui Hsieh},
+  booktitle={International Conference on Learning Representations},
+  year={2021},
 }
 
 @article{wang2021beta,
@@ -256,5 +259,37 @@ If you find our library useful, please kindly cite our papers:
   author={Wang, Shiqi and Zhang, Huan and Xu, Kaidi and Lin, Xue and Jana, Suman and Hsieh, Cho-Jui and Kolter, J Zico},
   journal={arXiv preprint arXiv:2103.06624},
   year={2021}
+}
+
+@article{zhang2022general,
+  title={General Cutting Planes for Bound-Propagation-Based Neural Network Verification},
+  author={Zhang, Huan and Wang, Shiqi and Xu, Kaidi and Li, Linyi and Li, Bo and Jana, Suman and Hsieh, Cho-Jui and Kolter, J Zico},
+  journal={Advances in Neural Information Processing Systems},
+  year={2022}
+}
+
+@article{shi2022efficiently,
+  title={Efficiently computing local lipschitz constants of neural networks via bound propagation},
+  author={Shi, Zhouxing and Wang, Yihan and Zhang, Huan and Kolter, J Zico and Hsieh, Cho-Jui},
+  journal={Advances in Neural Information Processing Systems},
+  volume={35},
+  pages={2350--2364},
+  year={2022}
+}
+
+@inproceedings{shi2024genbab,
+  title={Neural Network Verification with Branch-and-Bound for General Nonlinearities},
+  author={Shi, Zhouxing and Jin, Qirui and Kolter, Zico and Jana, Suman and Hsieh, Cho-Jui and Zhang, Huan},
+  booktitle={International Conference on Tools and Algorithms for the Construction and Analysis of Systems},
+  year={2025}
+}
+
+@inproceedings{kotha2023provably,
+  author={Kotha, Suhas and Brix, Christopher and Kolter, J. Zico and Dvijotham, Krishnamurthy and Zhang, Huan},
+  booktitle={Advances in Neural Information Processing Systems},
+  pages={80270--80290},
+  title={Provably Bounding Neural Network Preimages},
+  volume={36},
+  year={2023}
 }
 ```

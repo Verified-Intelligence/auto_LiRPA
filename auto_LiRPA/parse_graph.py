@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -21,6 +21,7 @@ from collections import namedtuple
 from packaging import version
 import re
 import os
+import traceback
 from .bounded_tensor import BoundedTensor, BoundedParameter
 from .utils import logger, unpack_inputs
 
@@ -62,19 +63,25 @@ def parse_graph(graph, inputs, params):
 
     def name_with_scope(node):
         name = get_node_name(node)
-        return '/'.join([scope[name], name])
+        name = '/'.join([scope[name], name])
+        if '.' in name:
+            # "." should not be used as it could issues in state_dict loading
+            # where PyTorch would treat it as having submodules
+            name = name.replace('.', '-')
+        return name
 
     nodesOP = []
     for n in graph.nodes():
         attrs = {k: get_node_attribute(n, k) for k in n.attributeNames()}
         n_inputs = [name_with_scope(i) for i in n.inputs()]
         for i, out in enumerate(list(n.outputs())):
-            nodesOP.append(Node(**{'name': name_with_scope(out),
-                                'op': n.kind(),
-                                'inputs': n_inputs,
-                                'attr': attrs,
-                                'output_index': i,
-                                }))
+            nodesOP.append(Node(**{
+                'name': name_with_scope(out),
+                'op': n.kind(),
+                'inputs': n_inputs,
+                'attr': attrs,
+                'output_index': i,
+            }))
 
     # filter out input nodes in `graph.inputs()` that are actually used
     nodesIn = []
@@ -85,6 +92,7 @@ def parse_graph(graph, inputs, params):
         used_by_index.append(used)
         if used:
             nodesIn.append(n)
+
     # filter out input nodes in `inputs` that are actually used
     inputs_unpacked = unpack_inputs(inputs)
     assert len(list(graph.inputs())) == len(inputs_unpacked) + len(params)
@@ -113,16 +121,19 @@ def parse_graph(graph, inputs, params):
         if i > 0 and n.type().sizes() != list(inputs_and_params[i][1].size()):
             raise RuntimeError("Input tensor shapes do not much: {} != {}".format(
                 n.type().sizes(), list(inputs_and_params[i][1].size())))
-        nodesIn[i] = Node(**{'name': name_with_scope(n),
-                             'ori_name': inputs_and_params[i][0],
-                             'op': 'Parameter',
-                             'inputs': [],
-                             'attr': str(n.type()),
-                             'param': inputs_and_params[i][1] if i >= len(inputs) else None,
-                             # index among all the inputs including unused ones
-                             'input_index': input_index[i] if i < len(inputs) else None,
-                             # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
-                             'perturbation': perturbation, })
+        name = name_with_scope(n)
+        nodesIn[i] = Node(**{
+            'name': name,
+            'ori_name': inputs_and_params[i][0],
+            'op': 'Parameter',
+            'inputs': [],
+            'attr': str(n.type()),
+            'param': inputs_and_params[i][1] if i >= len(inputs) else None,
+            # index among all the inputs including unused ones
+            'input_index': input_index[i] if i < len(inputs) else None,
+            # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
+            'perturbation': perturbation,
+        })
 
     return nodesOP, nodesIn, nodesOut
 
@@ -191,7 +202,14 @@ def update_debug_names(trace_graph):
 
 def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
     params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
-    trace, out = torch.jit._get_trace_graph(module, inputs)
+    try:
+        trace, out = torch.jit._get_trace_graph(module, inputs)
+    except:
+        print(traceback.format_exc())
+        raise RuntimeError(
+            'Failed to get the trace. '
+            'Please check that the model and inputs are compatible with torch.jit.')
+
     if version.parse(torch.__version__) < version.parse("2.0.0"):
         from torch.onnx.symbolic_helper import _set_opset_version
         _set_opset_version(12)

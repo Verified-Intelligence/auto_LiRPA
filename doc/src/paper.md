@@ -8,9 +8,9 @@ In our paper, we demonstrated the applications of our framework on robustness ve
 
 For CIFAR-10, we provided some sample models in `examples/vision/models`:
 
-[cnn_7layer_bn](../examples/vision/models/feedforward.py), 
-[DenseNet](../examples/vision/models/densenet.py), 
-[ResNet18](../examples/vision/models/resnet18.py), 
+[cnn_7layer_bn](../examples/vision/models/feedforward.py),
+[DenseNet](../examples/vision/models/densenet.py),
+[ResNet18](../examples/vision/models/resnet18.py),
 [ResNeXt](../examples/vision/models/resnext.py).
 
 To reproduce our state-of-the-art results CNN-7+BN model, just run:
@@ -109,7 +109,7 @@ depends on the model.
 
 ## Language Models
 
-Please follow [this example](examples.html#certifiably-robust-language-classifier-with-transformer-and-lstm) to prepare the data. And we have two environment variables:
+Please follow [this example](examples.md#certifiably-robust-language-classifier-with-transformer-and-lstm) to prepare the data. And we have two environment variables:
 
 - `DIR`: the path of the directory to save or load the trained model.
 - `BUDGET`: the budget for synonym-based word substitution (for testing certifiably trained language models only, set to 1~6 in our paper).

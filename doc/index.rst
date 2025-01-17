@@ -3,7 +3,7 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Documentation for `auto_LiRPA <https://github.com/KaidiXu/auto_LiRPA>`_
+Documentation for `auto_LiRPA <https://github.com/Verified-Intelligence/auto_LiRPA>`_
 ===========================================================================
 
 .. toctree::

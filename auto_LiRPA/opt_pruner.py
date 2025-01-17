@@ -3,10 +3,10 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -45,7 +45,7 @@ class OptPruner:
         self.cached_alphas = {}
 
     def prune(self, x, C, ret_l, ret_u, ret, full_l, full_ret_l, full_ret_u,
-              full_ret, interm_bounds, aux_reference_bounds,
+              full_ret, interm_bounds, aux_reference_bounds, reference_bounds,
               stop_criterion_func, bound_lower):
         # positive domains may already be filtered out, so we use all domains -
         # negative domains to compute
@@ -94,7 +94,7 @@ class OptPruner:
             # prune bounds
             ret_prune = self._prune_bounds_by_mask(
                 ret_l, ret_u, ret,
-                interm_bounds, aux_reference_bounds, pre_prune_size)
+                interm_bounds, aux_reference_bounds, reference_bounds, pre_prune_size)
             full_l, full_ret_l, full_ret_u, full_ret = ret_prune
             self.time += time.time() - stime
 
@@ -194,9 +194,21 @@ class OptPruner:
 
         return x, pre_prune_size
 
+    def _prune_dict_of_lists(self, dict_of_lists, pre_prune_size):
+        if dict_of_lists is not None:
+            for k, v in dict_of_lists.items():
+                v_l, v_r = v[0], v[1]
+                if v_l.shape[0] == pre_prune_size:
+                    # the first dim is batch size and matches the preserve mask
+                    v_l = v_l[self.now_preserve_mask]
+                if v_r.shape[0] == pre_prune_size:
+                    # the first dim is batch size and matches the preserve mask
+                    v_r = v_r[self.now_preserve_mask]
+                dict_of_lists[k] = [v_l, v_r]
+
     @torch.no_grad()
     def _prune_bounds_by_mask(self, ret_l, ret_u, ret, interm_bounds,
-                              aux_reference_bounds, pre_prune_size):
+                              aux_reference_bounds, reference_bounds, pre_prune_size):
         """
         Prune bounds by given now_preserve_mask.
         """
@@ -209,29 +221,10 @@ class OptPruner:
             interval_to_prune = interm_bounds
         else:
             interval_to_prune = None
-        if interval_to_prune is not None:
-            for k, v in interval_to_prune.items():
-                interm_interval_l, interm_interval_r = v[0], v[1]
-                if interm_interval_l.shape[0] == pre_prune_size:
-                    # the first dim is batch size and matches preserve mask
-                    interm_interval_l = interm_interval_l[
-                        self.now_preserve_mask]
-                if interm_interval_r.shape[0] == pre_prune_size:
-                    # the first dim is batch size and matches preserve mask
-                    interm_interval_r = interm_interval_r[
-                        self.now_preserve_mask]
-                interval_to_prune[k] = [interm_interval_l, interm_interval_r]
 
-        if aux_reference_bounds is not None:
-            for k in aux_reference_bounds:
-                aux_ref_l, aux_ref_r = aux_reference_bounds[k]
-                if aux_ref_l.shape[0] == pre_prune_size:
-                    # the first dim is batch size and matches the preserve mask
-                    aux_ref_l = aux_ref_l[self.now_preserve_mask]
-                if aux_ref_r.shape[0] == pre_prune_size:
-                    # the first dim is batch size and matches the preserve mask
-                    aux_ref_r = aux_ref_r[self.now_preserve_mask]
-                aux_reference_bounds[k] = [aux_ref_l, aux_ref_r]
+        self._prune_dict_of_lists(interval_to_prune, pre_prune_size)
+        self._prune_dict_of_lists(aux_reference_bounds, pre_prune_size)
+        self._prune_dict_of_lists(reference_bounds, pre_prune_size)
 
         # update the global mask here for possible next iteration
         self.preserve_mask_next = self.preserve_mask[self.now_preserve_mask]

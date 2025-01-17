@@ -25,10 +25,17 @@ class cnn_4layer_test(nn.Module):
         return x
 
 class TestVisionModels(TestCase):
-    def __init__(self, methodName='runTest', generate=False):
-        super().__init__(methodName, seed=1234,
-            ref_path='data/vision_test_data', generate=generate)
+    def __init__(self, methodName='runTest', ref_path='data/vision_test_data', model=cnn_4layer_test(), generate=False):
+        super().__init__(methodName, seed=1234, ref_path=ref_path, generate=generate)
         self.result = {}
+        self.ref_path = ref_path
+        self.model = model
+
+    def setUp(self):
+        super().setUp()
+        if self.generate:
+            # state_dict from an existing reference is needed 
+            self.reference = torch.load(self.ref_path)
 
     def verify_bounds(self, model, x, IBP, method, forward_ret, lb_name, ub_name):
         lb, ub = model(method_opt="compute_bounds", x=(x,), IBP=IBP, method=method)
@@ -47,21 +54,23 @@ class TestVisionModels(TestCase):
             if method != 'CROWN-Optimized':
                 assert torch.allclose(lb, self.reference[lb_name], 1e-4, atol=2e-7), (lb - self.reference[lb_name]).abs().max()
                 assert torch.allclose(ub, self.reference[ub_name], 1e-4, atol=2e-7), (ub - self.reference[ub_name]).abs().max()
-                assert ((lb - self.reference[lb_name]).pow(2).sum() < 1e-9), (lb - self.reference[lb_name]).pow(2).sum()
-                assert ((ub - self.reference[ub_name]).pow(2).sum() < 1e-9), (ub - self.reference[ub_name]).pow(2).sum()
+                assert ((lb - self.reference[lb_name]).pow(2).sum() < 1.3e-9), (lb - self.reference[lb_name]).pow(2).sum()
+                assert ((ub - self.reference[ub_name]).pow(2).sum() < 1.3e-9), (ub - self.reference[ub_name]).pow(2).sum()
                 if "same-slope" not in lb_name:
                     assert torch.allclose(grad, self.reference[lb_name[:-2] + 'grad'], 1e-4, 1e-6),  (grad - self.reference[lb_name[:-2] + 'grad']).abs().max()
-                    assert (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum() < 1e-9, (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum()
+                    assert (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum() < 1.e-6, (grad - self.reference[lb_name[:-2] + 'grad']).pow(2).sum()
             else:
-                assert torch.allclose(lb, self.reference[lb_name], 1e-4, atol=2e-7), (lb - self.reference[lb_name]).abs().max()
-                assert torch.allclose(ub, self.reference[ub_name], 1e-4, atol=2e-7), (ub - self.reference[ub_name]).abs().max()
-                assert ((lb - self.reference[lb_name]).pow(2).sum() < 1e-9), (lb - self.reference[lb_name]).pow(2).sum()
-                assert ((ub - self.reference[ub_name]).pow(2).sum() < 1e-9), (ub - self.reference[ub_name]).pow(2).sum()
+                assert torch.allclose(lb, self.reference[lb_name], 1e-4, atol=5e-6), (lb - self.reference[lb_name]).abs().max()
+                assert torch.allclose(ub, self.reference[ub_name], 1e-4, atol=5e-6), (ub - self.reference[ub_name]).abs().max()
+                assert ((lb - self.reference[lb_name]).pow(2).sum() < 1.3e-9), (lb - self.reference[lb_name]).pow(2).sum()
+                assert ((ub - self.reference[ub_name]).pow(2).sum() < 1.3e-9), (ub - self.reference[ub_name]).pow(2).sum()
 
 
-    def test_bounds(self):
-        np.random.seed(123) # FIXME inconsistent seeds
-        model_ori = cnn_4layer_test().eval()
+    def test_bounds(self, bound_opts=None, optimize = True):
+        if bound_opts is None:
+            bound_opts = {'activation_bound_option': 'same-slope'}
+        np.random.seed(123)  # FIXME inconsistent seeds
+        model_ori = self.model.eval()
         model_ori.load_state_dict(self.reference['model'])
         dummy_input = self.reference['data']
         inputs = (dummy_input,)
@@ -73,7 +82,7 @@ class TestVisionModels(TestCase):
 
         assert torch.allclose(model_ori(dummy_input), model(dummy_input), 1e-4, 1e-6)
 
-        model_same_slope = BoundedModule(model_ori, inputs, bound_opts={'relu': 'same-slope'})
+        model_same_slope = BoundedModule(model_ori, inputs, bound_opts=bound_opts)
         model_same_slope.set_bound_opts({'optimize_bound_args': {'lr_alpha': 0.1}})
 
         # Linf
@@ -87,12 +96,13 @@ class TestVisionModels(TestCase):
                     ub_name='l_inf_CROWN-IBP_ub')  # CROWN-IBP
         self.verify_bounds(model, x, IBP=False, method='backward', forward_ret=forward_ret, lb_name='l_inf_CROWN_lb',
                     ub_name='l_inf_CROWN_ub')  # CROWN
-        self.verify_bounds(model, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_inf_CROWN-Optimized_lb',
-                    ub_name='l_inf_CROWN-Optimized_ub') # CROWN-Optimized
-        self.verify_bounds(model_same_slope, x, IBP=False, method='backward',forward_ret=forward_ret, lb_name='l_inf_CROWN-same-slope_lb',
+        self.verify_bounds(model_same_slope, x, IBP=False, method='backward', forward_ret=forward_ret, lb_name='l_inf_CROWN-same-slope_lb',
                     ub_name='l_inf_CROWN-same-slope_ub') # CROWN-same-slope
-        self.verify_bounds(model_same_slope, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_inf_CROWN-Optimized-same-slope_lb',
-                    ub_name='l_inf_CROWN-Optimized-same-slope_ub')  # Crown-Optimized-same-slope
+        if optimize:
+            self.verify_bounds(model, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_inf_CROWN-Optimized_lb',
+                        ub_name='l_inf_CROWN-Optimized_ub') # CROWN-Optimized
+            self.verify_bounds(model_same_slope, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_inf_CROWN-Optimized-same-slope_lb',
+                        ub_name='l_inf_CROWN-Optimized-same-slope_ub')  # Crown-Optimized-same-slope
 
 
         # L2
@@ -106,12 +116,13 @@ class TestVisionModels(TestCase):
                     ub_name='l_2_CROWN-IBP_ub')  # CROWN-IBP
         self.verify_bounds(model, x, IBP=False, method='backward', forward_ret=forward_ret, lb_name='l_2_CROWN_lb',
                     ub_name='l_2_CROWN_ub')  # CROWN
-        self.verify_bounds(model, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_2_CROWN-Optimized_lb',
-                    ub_name='l_2_CROWN-Optimized_ub') # CROWN-Optimized
-        self.verify_bounds(model_same_slope, x, IBP=False, method='backward',forward_ret=forward_ret, lb_name='l_2_CROWN-same-slope_lb',
+        self.verify_bounds(model_same_slope, x, IBP=False, method='backward', forward_ret=forward_ret, lb_name='l_2_CROWN-same-slope_lb',
                     ub_name='l_2_CROWN-same-slope_ub') # CROWN-same-slope
-        self.verify_bounds(model_same_slope, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_2_CROWN-Optimized-same-slope_lb',
-                    ub_name='l_2_CROWN-Optimized-same-slope_ub')  # Crown-Optimized-same-slope
+        if optimize:
+            self.verify_bounds(model, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_2_CROWN-Optimized_lb',
+                        ub_name='l_2_CROWN-Optimized_ub') # CROWN-Optimized
+            self.verify_bounds(model_same_slope, x, IBP=False, method='CROWN-Optimized', forward_ret=forward_ret, lb_name='l_2_CROWN-Optimized-same-slope_lb',
+                        ub_name='l_2_CROWN-Optimized-same-slope_ub')  # Crown-Optimized-same-slope
 
         if self.generate:
             self.result['data'] = self.reference['data']
