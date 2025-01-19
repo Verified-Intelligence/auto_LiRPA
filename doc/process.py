@@ -8,7 +8,7 @@ repo = 'https://github.com/Verified-Intelligence/auto_LiRPA'
 branch = Repository('.').head.shorthand
 repo_file_path = os.path.join(repo, 'tree', branch)
 
-""" Parse README.md into sections which can be reused """
+# Parse README.md into sections which can be reused
 heading = ''
 copied = {}
 print('Parsing markdown sections from README:')
@@ -33,32 +33,35 @@ for key in copied:
         file.write(copied[key])
 print()
 
-""" Load source files from src/ and fix links to GitHub """
-for filename in os.listdir('src'):
-    print(f'Processing {filename}')
-    with open(os.path.join('src', filename)) as file:
-        source = file.read()
-    source_new = ''
-    ptr = 0
-    for m in re.finditer('(\[.*\])(\(.*\))', source):
-        assert m.start() >= ptr
-        source_new += source[ptr:m.start()]
-        ptr = m.start()
-        source_new += m.group(1)
-        ptr += len(m.group(1))
-        link_raw = m.group(2)
-        while len(link_raw) >= 2 and link_raw[-2] == ')':
-            link_raw = link_raw[:-1]
-        link = link_raw[1:-1]
-        if link.startswith('https://') or link.startswith('http://') or '.html#' in link:
-            print(f'Skip link {link}')
-            link_new = link
-        else:
-            link_new = os.path.join(repo_file_path, 'docs/src', link)
-            print(f'Fix link {link} -> {link_new}')
-        source_new += f'({link_new})'
-        ptr += len(link_raw)
-    source_new += source[ptr:]
-    with open(filename, 'w') as file:
-        file.write(source_new)
-    print()
+# Load source files and fix links to GitHub
+for folder in ['src', 'sections']:
+    for filename in os.listdir(folder):
+        print(f'Processing {folder}/{filename}')
+        with open(os.path.join(folder, filename)) as file:
+            source = file.read()
+        source_new = ''
+        ptr = 0
+        for m in re.finditer('(\[.*\])(\(.*\))', source):
+            assert m.start() >= ptr
+            source_new += source[ptr:m.start()]
+            ptr = m.start()
+            source_new += m.group(1)
+            ptr += len(m.group(1))
+            link_raw = m.group(2)
+            while len(link_raw) >= 2 and link_raw[-2] == ')':
+                link_raw = link_raw[:-1]
+            link = link_raw[1:-1]
+            if link.startswith('https://') or link.startswith('http://') or '.html#' in link:
+                link_new = link
+            else:
+                if folder == 'sections':
+                    link_new = os.path.join(repo_file_path, link)
+                else:
+                    link_new = os.path.join(repo_file_path, 'docs/src', link)
+                print(f'Fix link {link} -> {link_new}')
+            source_new += f'({link_new})'
+            ptr += len(link_raw)
+        source_new += source[ptr:]
+        with open(filename, 'w') as file:
+            file.write(source_new)
+        print()

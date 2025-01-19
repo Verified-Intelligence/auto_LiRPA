@@ -24,7 +24,7 @@ subprocess.run(['python', 'process.py'])
 
 project = 'auto_LiRPA'
 author = '<a href="https://github.com/Verified-Intelligence/auto_LiRPA#developers-and-copyright">auto-LiRPA authors</a>'
-copyright = f'2021, {author}'
+copyright = f'2020-2025, {author}'
 
 
 # -- General configuration ---------------------------------------------------

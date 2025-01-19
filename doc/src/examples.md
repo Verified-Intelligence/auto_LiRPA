@@ -33,9 +33,8 @@ can be obtained using α-CROWN within a few seconds.
 
 ## Basic Certified Adversarial Defense Training
 
-We provide a [simple example of certified
-training](../../examples/vision/simple_training.py). By default it uses
-[CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf) to train a certifiably robust
+We provide a [simple example of certified training](../../examples/vision/simple_training.py).
+By default it uses [CROWN-IBP](https://arxiv.org/pdf/1906.06316.pdf) to train a certifiably robust
 model:
 
 ```bash

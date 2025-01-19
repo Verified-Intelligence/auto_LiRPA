@@ -9,8 +9,8 @@ Documentation for `auto_LiRPA <https://github.com/Verified-Intelligence/auto_LiR
 .. toctree::
    :hidden:
 
-   sections/installation
-   sections/quick-start
+   installation
+   quick-start
    examples
    api
    custom_op
@@ -23,13 +23,13 @@ Documentation for `auto_LiRPA <https://github.com/Verified-Intelligence/auto_LiR
    <a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_1.png" width="45%" height="45%" float="right"></a>
    </p>
 
-.. mdinclude:: sections/introduction.md
+.. mdinclude:: introduction.md
 
 Usage
 -----
 
-* :doc:`Installation <sections/installation>`
-* :doc:`Quick Start <sections/quick-start>`
+* :doc:`Installation <installation>`
+* :doc:`Quick Start <quick-start>`
 * :doc:`More Working Examples <examples>`
 * :doc:`API Usage <api>`
 * :doc:`Custom Operators <custom_op>`

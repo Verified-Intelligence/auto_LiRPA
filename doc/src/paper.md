@@ -1,4 +1,4 @@
-# Reproducing Our NeurIPS 2020 Paper
+# Reproducing Our [NeurIPS 2020 Paper](https://arxiv.org/abs/2002.12920)
 
 In our paper, we demonstrated the applications of our framework on robustness verification and certified training. Please follow this guide to reproduce the results.
 
