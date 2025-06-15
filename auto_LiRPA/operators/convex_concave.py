@@ -127,17 +127,17 @@ class BoundReciprocal(BoundOptimizableActivation):
     def interval_propagate(self, *v):
         h_L = v[0][0].to(dtype=torch.get_default_dtype())
         h_U = v[0][1].to(dtype=torch.get_default_dtype())
-        assert h_L.min() > 0, 'Only positive values are supported in BoundReciprocal'
-        return torch.reciprocal(h_U), torch.reciprocal(h_L)
+
+        out_L = torch.reciprocal(h_U)
+        out_U = torch.reciprocal(h_L)
+        contains_zero = (h_L <= 0) & (h_U >= 0)
+        out_L = torch.where(contains_zero, -torch.inf, out_L)
+        out_U = torch.where(contains_zero, torch.inf, out_U)
+        return out_L, out_U
 
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:
             self.init_linear_relaxation(x, dim_opt)
-
-        assert x.lower.min() >= 0
-
-        ku = -1. / (x.lower * x.upper)
-        self.add_linear_relaxation(mask=None, type='upper', k=ku, x0=x.lower)
 
         if self.opt_stage in ['opt', 'reuse']:
             self.alpha[self._start].data[:2] = torch.min(torch.max(
@@ -146,24 +146,44 @@ class BoundReciprocal(BoundOptimizableActivation):
         else:
             mid = (x.lower + x.upper) / 2
 
-        self.add_linear_relaxation(
-            mask=None, type='lower', k=-1./(mid**2), x0=mid)
+        x_pos = x.lower > 0
 
-        if x.lower.min() <= 0:
-            mask = x.lower == 0
+        # the upper bound for x > 0 is a lower bound for x < 0
+        pos_ku = -1. / (x.lower * x.upper)
+        pos_kl = -1. / (mid**2)
+
+        self.add_linear_relaxation(mask=x_pos, type='upper', k=pos_ku, x0=x.lower)
+        self.add_linear_relaxation(mask=~x_pos, type='upper', k=pos_kl, x0=mid)
+
+        self.add_linear_relaxation(mask=x_pos, type='lower', k=pos_kl, x0=mid)
+        self.add_linear_relaxation(mask=~x_pos, type='lower', k=pos_ku, x0=x.lower)
+
+        contains_zero = (x.lower <= 0) & (x.upper >= 0)
+        if contains_zero.any():
+            mask = contains_zero & (x.upper > 0)
             self.uw[..., mask] = 0
             self.ub[..., mask] = torch.inf
+
+            mask = contains_zero & (x.lower < 0)
+            self.lw[..., mask] = 0
+            self.lb[..., mask] = -torch.inf
+
         if x.upper.isinf().any():
-            mask = x.upper.isinf()
+            mask = x.upper.isinf() & (x.lower >= 0)
             self.lw[..., mask] = 0
             self.lb[..., mask] = 0
+        if x.lower.isinf().any():
+            mask = x.lower.isinf() & (x.upper <= 0)
+            self.uw[..., mask] = 0
+            self.ub[..., mask] = 0 
+
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
         As, lbias, ubias = super().bound_backward(last_lA, last_uA, x, **kwargs)
         if isinstance(ubias, torch.Tensor) and ubias.isnan().any():
             ubias[ubias.isnan()] = torch.inf if (last_uA != 0).any() else 0.
         if isinstance(lbias, torch.Tensor) and lbias.isnan().any():
-            lbias[lbias.isnan()] = 0.
+            lbias[lbias.isnan()] = -torch.inf if (last_lA != 0).any() else 0.
         return As, lbias, ubias
 
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
