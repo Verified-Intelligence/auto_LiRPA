@@ -205,10 +205,6 @@ class BoundHardTanh(BoundOptimizableActivation):
     def forward(self, x, min_val, max_val):
         return F.hardtanh(x, min_val=min_val, max_val=max_val)
 
-    def clip_alpha(self):
-        for v in self.alpha.values():
-            v.data = torch.clamp(v.data, 0., 1.)
-
     def bound_backward(self, last_lA, last_uA, x, min_val, max_val, start_node=None,
                         reduce_bias=True, **kwargs):
         preact_lb = x.lower
