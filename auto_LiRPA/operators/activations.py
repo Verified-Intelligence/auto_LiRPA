@@ -196,194 +196,127 @@ class BoundSqr(BoundOptimizableActivation):
         return lower, upper
 
 
-class BoundHardTanh(BoundActivation):
-
+class BoundHardTanh(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.splittable = True
         self.activation_name = "HardTanh"
-        self.patch_size = {}
-        self.hardtanh_options = options.get('hardtanh', 'same-slope')
 
     def forward(self, x, min_val, max_val):
-        return F.hardtanh(x, min_val, max_val)
+        return F.hardtanh(x, min_val=min_val, max_val=max_val)
 
     def bound_backward(self, last_lA, last_uA, x, min_val, max_val, start_node=None,
-                       unstable_idx=None, reduce_bias=True, **kwargs):
-        if self.is_input_perturbed(1) or self.is_input_perturbed(
-                2):  # Checking if min_value and max_value are not perturbed
-            raise NotImplementedError(
-                    f'{self.activation_name} is unsupported with perturbed min_val and max_val')
+                        reduce_bias=True, **kwargs):
+        preact_lb = x.lower
+        preact_ub = x.upper
 
-        self.bound_relax(x, min_val, max_val, init=True)
+        a = -1
+        b = 1
 
-        def _bound_oneside(last_A, sign=-1):
-            if last_A is None:
-                return None, 0
-            if sign == -1:
-                w_pos, b_pos, w_neg, b_neg = (
-                    self.lw.unsqueeze(0), self.lb.unsqueeze(0),
-                    self.uw.unsqueeze(0), self.ub.unsqueeze(0))
-            else:
-                w_pos, b_pos, w_neg, b_neg = (
-                    self.uw.unsqueeze(0), self.ub.unsqueeze(0),
-                    self.lw.unsqueeze(0), self.lb.unsqueeze(0))
-            w_pos = maybe_unfold_patches(w_pos, last_A)
-            w_neg = maybe_unfold_patches(w_neg, last_A)
-            b_pos = maybe_unfold_patches(b_pos, last_A)
-            b_neg = maybe_unfold_patches(b_neg, last_A)
+        preact_ub = torch.max(preact_ub, preact_lb + 1e-8)
+        direct_d = (F.hardtanh(preact_ub) - F.hardtanh(preact_lb)) / (
+                    preact_ub - preact_lb)
 
-            # Shapes of w_pos, w_neg, b_pos, b_neg
-            # For toy.py - Final Shape - torch.Size([1, 1, 2]) torch.Size([1, 1, 2]) torch.Size([1, 1, 2]) torch.Size([1, 1, 2])
-            # For simple_verification.py - Final Shape -  torch.Size([1, 2, 16, 14, 14]) torch.Size([1, 2, 16, 14, 14]) torch.Size([1, 2, 16, 14, 14]) torch.Size([1, 2, 16, 14, 14])
+        # Upper bound
+        mask_direct_upper = preact_ub <= b
+        mask_triangle_upper = (preact_ub - b) < (b - preact_lb)
+        upper_triangle = (b - F.hardtanh(preact_lb)) / (b - preact_lb)
 
-            # For all tensors having batch as the first dimension (batch,.....)
-            _A, _bias = multiply_by_A_signs(
-                last_A, w_pos, w_neg, b_pos, b_neg)
+        if self.opt_stage in ['opt', 'reuse'] and hasattr(self, 'alpha'):
+            upper_triangle[preact_lb > a] = 1
+            selected_alpha_upper = self.alpha[start_node.name][0]
 
-            return _A, _bias
+            if last_lA is not None:
+                lb_upper_d = torch.max(torch.min(selected_alpha_upper, upper_triangle),
+                                     torch.zeros_like(selected_alpha_upper))
+                lb_upper_d = mask_direct_upper * direct_d + \
+                             torch.logical_not(mask_direct_upper) * lb_upper_d
+                lb_upper_b = mask_direct_upper * (F.hardtanh(preact_lb) - lb_upper_d * preact_lb) + \
+                             torch.logical_not(mask_direct_upper) * (b - lb_upper_d * b)
 
-        lA, lbias = _bound_oneside(last_lA, sign=-1)
-        uA, ubias = _bound_oneside(last_uA, sign=+1)
+            if last_uA is not None:
+                ub_upper_d = torch.max(torch.min(selected_alpha_upper, upper_triangle),
+                                     torch.zeros_like(selected_alpha_upper))
+                ub_upper_d = mask_direct_upper * direct_d + \
+                             torch.logical_not(mask_direct_upper) * ub_upper_d
+                ub_upper_b = mask_direct_upper * (F.hardtanh(preact_lb) - ub_upper_d * preact_lb) + \
+                             torch.logical_not(mask_direct_upper) * (b - ub_upper_d * b)
+        else:
+            upper_d = mask_direct_upper * direct_d + \
+                      torch.logical_not(mask_direct_upper) * mask_triangle_upper * upper_triangle
+            self.init_upper_d = upper_d
+            lb_upper_d = ub_upper_d = upper_d.unsqueeze(0)
+            lb_upper_b = ub_upper_b = mask_direct_upper * (
+                        F.hardtanh(preact_lb) - lb_upper_d * preact_lb) + \
+                                      torch.logical_not(mask_direct_upper) * (b - lb_upper_d * b)
+
+        # Lower bound
+        mask_direct_lower = preact_lb >= a
+        mask_triangle_lower = (preact_ub - a) > (a - preact_lb)
+        lower_triangle = (F.hardtanh(preact_ub) - a) / (preact_ub - a)
+
+        if self.opt_stage in ['opt', 'reuse'] and hasattr(self, 'alpha'):
+            lower_triangle[preact_lb < b] = 1
+            selected_alpha_lower = self.alpha[start_node.name][1]
+
+            if last_lA is not None:
+                lb_lower_d = torch.max(torch.min(selected_alpha_lower, lower_triangle),
+                                     torch.zeros_like(selected_alpha_lower))
+                lb_lower_d = mask_direct_lower * direct_d + \
+                             torch.logical_not(mask_direct_lower) * lb_lower_d
+                lb_lower_b = mask_direct_lower * (F.hardtanh(preact_ub) - lb_lower_d * preact_ub) + \
+                             torch.logical_not(mask_direct_lower) * (a - lb_lower_d * a)
+
+            if last_uA is not None:
+                ub_lower_d = torch.max(torch.min(selected_alpha_lower, lower_triangle),
+                                     torch.zeros_like(selected_alpha_lower))
+                ub_lower_d = mask_direct_lower * direct_d + \
+                             torch.logical_not(mask_direct_lower) * ub_lower_d
+                ub_lower_b = mask_direct_lower * (F.hardtanh(preact_ub) - ub_lower_d * preact_ub) + \
+                             torch.logical_not(mask_direct_lower) * (a - ub_lower_d * a)
+        else:
+            lower_d = mask_direct_lower * direct_d + \
+                      torch.logical_not(mask_direct_lower) * mask_triangle_lower * lower_triangle
+            self.init_lower_d = lower_d
+            lb_lower_d = ub_lower_d = lower_d.unsqueeze(0)
+            lb_lower_b = ub_lower_b = mask_direct_lower * (
+                        F.hardtanh(preact_ub) - lb_lower_d * preact_ub) + \
+                                      torch.logical_not(mask_direct_lower) * (a - lb_lower_d * a)
+
+        # final bounds
+        uA = lA = None
+        ubias = lbias = 0
+
+        if last_uA is not None:
+            pos_uA = last_uA.clamp(min=0)
+            neg_uA = last_uA.clamp(max=0)
+            uA = ub_upper_d * pos_uA + ub_lower_d * neg_uA
+            ubias = torch.einsum('bij,bij->bi', pos_uA, ub_upper_b) + \
+                    torch.einsum('bij,bij->bi', neg_uA, ub_lower_b)
+        
+        if last_lA is not None:
+            pos_lA = last_lA.clamp(min=0)
+            neg_lA = last_lA.clamp(max=0)
+            lA = lb_upper_d * neg_lA + lb_lower_d * pos_lA
+            lbias = torch.einsum('bij,bij->bi', pos_lA, lb_lower_b) + \
+                    torch.einsum('bij,bij->bi', neg_lA, lb_upper_b)
 
         return [(lA, uA), (None, None), (None, None)], lbias, ubias
 
-    def bound_relax(self, x, min_val, max_val, init=False, dim_opt=None):
-        epsilon = 1e-8
-        preact_lb = x.lower.clamp(max=max_val.value)
-        preact_ub = torch.max(x.upper.clamp(min=min_val.value), preact_lb + epsilon)
-
-        min_val = min_val.value
-        max_val = max_val.value
-
-        uw = torch.zeros_like(preact_ub)
-        ub = torch.zeros_like(preact_ub)
-        lw = torch.zeros_like(preact_lb)
-        lb = torch.zeros_like(preact_lb)
-
-        # Case 1:
-        # When upper bound is smaller than min value,
-        # the activated value will always be min value,
-        # so the upper bound and lower bound are both
-        # min value.
-        case1 = (preact_ub <= min_val).to(preact_ub.dtype)
-
-        # Computing intermediate values only once for Case 1
-        value = case1 * min_val
-        ub += value
-        lb += value
-
-        # Case 2:
-        # When lower bound is larger than max value,
-        # the activated value will always be max value,
-        # so the upper bound and lower bound are both
-        # max value.
-        case2 = (preact_lb >= max_val).to(preact_ub.dtype)
-
-        # Computing intermediate values only once for Case 2
-        value = case2 * max_val
-        ub += value
-        lb += value
-
-        # Case 3:
-        # In this case, the activated output for x is always x
-        # so the bias is always zero and slope will also always
-        # be one.
-        case3 = ((preact_lb >= min_val) & (preact_ub <= max_val)).to(preact_ub.dtype)
-        uw += case3
-        lw += case3
-
-        # Case 4:
-        # Upper bound is larger than max val and lower bound is
-        # smaller than min val, in this case, we will use two
-        # line to bound, the upper bound will pass through points
-        # (max_val, max_val) and (lb_r, min_val) and the lower
-        # bound will pass through (min_val, min_val) and (ub_r, max_val).
-        # So, the slope d of the upper line is (max_val - min_val)/(max_val - lb_r)
-        # and the intercept of the upper line is max_val - d * max_val
-        # Similarly, the slope d of the lower line is (max_val - min_val)/(ub_r - min_val)
-        # and the intercept of the lower line is min_val - d * min_val.
-
-        # Computing intermediate values only once for Case 4
-        diff = max_val - min_val
-        val1 = max_val - preact_lb + epsilon
-
-        case4 = ((preact_lb < min_val) & (preact_ub > max_val)).to(preact_ub.dtype)
-        uw += case4 * diff / val1
-        lw += case4 * diff / (preact_ub - min_val + epsilon)
-        ub = case4 * (max_val - diff / val1 * max_val)
-        lb = case4 * (min_val - diff / (preact_ub - min_val + epsilon) * min_val)
-
-        # Computing intermediate values only once ( Case 5 & 6 )
-        denom = preact_ub - preact_lb + epsilon
-
-        # Case 5:
-        # Lower bound is smaller than the min val and the upper bound
-        # is larger than or equal to the min val and smaller or
-        # equal to max val. In this case, we use a single line that
-        # pass through (lb_r, min_val) and (ub_r, ub_r) as the upper
-        # bound. And for lower bound, we use a line with the same slope
-        # as the upper bound and passes through (min_val, min_val) as
-        # lower bound.
-        # So, the slope d of the upper bound is (ub_r - min_val)/(ub_r - lb_r)
-        # and the intercept of the upper bound is ub_r - d * ub_r.
-        # The slope d of the lower bound is same as upper bound and the
-        # intercept of the lower bound is min_val - d * min_val
-
-        # Computing intermediate values only once for Case 5
-        val1 = preact_ub - min_val
-        case5 = ((preact_lb < min_val) & (min_val <= preact_ub) & (preact_ub <= max_val)).to(preact_ub.dtype)
-        uw += case5 * val1 / denom
-        ub += case5 * (preact_ub - val1 / denom * preact_ub)
-
-        if self.hardtanh_options == "same-slope":
-            lw += case5 * val1 / denom
-            lb += case5 * (min_val - val1 / denom * min_val)
-
-        elif self.hardtanh_options == "adaptive":
-            cond = (uw > 0.5).to(uw)
-            lw += case5 * cond
-            lb += case5 * min_val * (1 - cond)
-
-        # Case 6:
-        # Upper bound is larger than the max val and the lower bound
-        # is larger than or equal to the min val and smaller or
-        # equal to max val. In this case, we use a single line that
-        # pass through (ub_r, max_val) and (lb_r, lb_r) as the lower
-        # bound. And for upper bound, we use a line with the same slope
-        # as lower bound which passes through (max_val, max_val) as the
-        # upper bound.
-        # So, the slope d of the lower bound is (max_val - lb_r)/(ub_r - lb_r).
-        # And the intercept of the lower bound is lb_r - d * lb_r.
-        # The slope d of the upper bound is (max_val - lb_r)/(ub_r - lb_r),
-        # and the intercept of the upper bound is max_val - d * max_val.
-
-        # Computing intermediate values only once for Case 6
-        val1 = max_val - preact_lb
-        case6 = ((min_val <= preact_lb) & (preact_lb <= max_val) & (preact_ub > max_val)).to(preact_ub.dtype)
-        lw += case6 * val1 / denom
-        lb += case6 * (preact_lb - val1 / denom * preact_lb)
-
-        if self.hardtanh_options == "same-slope":
-            uw += case6 * val1 / denom
-            ub += case6 * (max_val - val1 / denom * max_val)
-
-        elif self.hardtanh_options == "adaptive":
-            cond = (lw > 0.5).to(lw)
-            uw += case6 * cond
-            ub += (case6 * max_val) * (1 - cond)
-
-        self.uw = uw
-        self.lw = lw
-        self.ub = ub
-        self.lb = lb
+    def _init_opt_parameters_impl(self, size_spec, name_start=None):
+        if hasattr(self, 'init_upper_d'):
+            alpha = torch.empty(2, size_spec, *self.init_upper_d.shape, device=self.init_upper_d.device)
+            for i in range(size_spec):
+                alpha.data[0, i] = self.init_upper_d
+                alpha.data[1, i] = self.init_lower_d
+            return alpha
+        else:
+            l = self.inputs[0].lower
+            return torch.zeros(2, size_spec, *l.shape, device=l.device, dtype=l.dtype)
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
-        min_val = v[1][0]
-        max_val = v[2][0]
-        assert v[1][0] == v[1][1] and v[2][0] == v[2][1]
-        return self.forward(h_L, min_val, max_val), self.forward(h_U, min_val, max_val)
+        h_L, h_U = v[0]
+        return F.hardtanh(h_L, min_val=-1.0, max_val=1.0), F.hardtanh(h_U, min_val=-1.0, max_val=1.0)
 
 
 class BoundFloor(BoundActivation):
