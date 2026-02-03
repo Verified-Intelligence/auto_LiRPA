@@ -183,10 +183,22 @@ class BoundLinear(BoundOptimizableActivation):
             input_ub = [input_ub[1].transpose(-1, -2) if input_ub[1] is not None else None,
                         input_ub[0].transpose(-1, -2) if input_ub[0] is not None else None,
                         input_ub[2:]]
-            if last_lA is not None and not isinstance(last_lA, eyeC):
-                last_lA = last_lA.transpose(-1, -2)
-            if last_uA is not None and not isinstance(last_uA, eyeC):
-                last_uA = last_uA.transpose(-1, -2)
+            if last_lA is not None:
+                if isinstance(last_lA, torch.Tensor):
+                    last_lA = last_lA.transpose(-1, -2)
+                elif isinstance(last_lA, eyeC):
+                    last_lA = last_lA._replace(shape=last_lA.shape[:-2] + (last_lA.shape[-1], last_lA.shape[-2]))
+                else:
+                    raise NotImplementedError(
+                        f"last_lA's type {type(last_lA)} is not supported for transpose in the case of swapping x and weight.")
+            if last_uA is not None:
+                if isinstance(last_uA, torch.Tensor):
+                    last_uA = last_uA.transpose(-1, -2)
+                elif isinstance(last_uA, eyeC):
+                    last_uA = last_uA._replace(shape=last_uA.shape[:-2] + (last_uA.shape[-1], last_uA.shape[-2]))
+                else:
+                    raise NotImplementedError(
+                        f"last_uA's type {type(last_uA)} is not supported for transpose in the case of swapping x and weight.")
 
         # transpose and scale each term if necessary.
         input_lb = self._preprocess(*input_lb)
@@ -734,13 +746,19 @@ class BoundLinear(BoundOptimizableActivation):
     @staticmethod
     @torch.jit.script
     def bound_forward_mul(x_lw: Tensor, x_lb: Tensor, x_uw: Tensor, x_ub: Tensor,
-                          w: Tensor, weight_has_batch: bool = False):
+                          w: Tensor, weight_has_batch: bool = False, swap_x_and_weight: bool = False):
         w_pos = w.clamp(min=0)
         w_neg = w.clamp(max=0)
-        lw = matmul_maybe_batched(x_lw, w_pos, weight_has_batch) + matmul_maybe_batched(x_uw, w_neg, weight_has_batch)
-        uw = matmul_maybe_batched(x_uw, w_pos, weight_has_batch) + matmul_maybe_batched(x_lw, w_neg, weight_has_batch)
-        lb = matmul_maybe_batched(x_lb, w_pos, weight_has_batch) + matmul_maybe_batched(x_ub, w_neg, weight_has_batch)
-        ub = matmul_maybe_batched(x_ub, w_pos, weight_has_batch) + matmul_maybe_batched(x_lb, w_neg, weight_has_batch)
+        if swap_x_and_weight:
+            lw = matmul_maybe_batched(w_pos, x_lw, weight_has_batch) + matmul_maybe_batched(w_neg, x_uw, weight_has_batch)
+            uw = matmul_maybe_batched(w_pos, x_uw, weight_has_batch) + matmul_maybe_batched(w_neg, x_lw, weight_has_batch)
+            lb = matmul_maybe_batched(w_pos, x_lb, weight_has_batch) + matmul_maybe_batched(w_neg, x_ub, weight_has_batch)
+            ub = matmul_maybe_batched(w_pos, x_ub, weight_has_batch) + matmul_maybe_batched(w_neg, x_lb, weight_has_batch)
+        else:
+            lw = matmul_maybe_batched(x_lw, w_pos, weight_has_batch) + matmul_maybe_batched(x_uw, w_neg, weight_has_batch)
+            uw = matmul_maybe_batched(x_uw, w_pos, weight_has_batch) + matmul_maybe_batched(x_lw, w_neg, weight_has_batch)
+            lb = matmul_maybe_batched(x_lb, w_pos, weight_has_batch) + matmul_maybe_batched(x_ub, w_neg, weight_has_batch)
+            ub = matmul_maybe_batched(x_ub, w_pos, weight_has_batch) + matmul_maybe_batched(x_lb, w_neg, weight_has_batch)
         return lw, lb, uw, ub
 
     # w: an optional argument which can be utilized by BoundMatMul
@@ -781,7 +799,8 @@ class BoundLinear(BoundOptimizableActivation):
         # Here, the transpose of w means transposing the last two dimensions of w.
 
         # Case #1: No weight/bias perturbation, only perturbation on input.
-        if not self.is_input_perturbed(1) and (not has_bias or not self.is_input_perturbed(2)):
+        if ((not self.is_input_perturbed(0) or not self.is_input_perturbed(1)) and
+            (not has_bias or not self.is_input_perturbed(2))):
             if isinstance(w, LinearBound):
                 w = w.lower
             if isinstance(b, LinearBound):
@@ -794,7 +813,9 @@ class BoundLinear(BoundOptimizableActivation):
             else:
                 w = w.transpose(-1, -2)
                 x_lb, x_ub = x.lb, x.ub
-            lw, lb, uw, ub = BoundLinear.bound_forward_mul(x.lw, x_lb, x.uw, x_ub, w, weight_has_batch)
+            lw, lb, uw, ub = BoundLinear.bound_forward_mul(
+                x.lw, x_lb, x.uw, x_ub, w, weight_has_batch,
+                swap_x_and_weight=self.is_input_perturbed(1))
 
             if C is not None:
                 lb, ub = lb.squeeze(1), ub.squeeze(1)
@@ -835,7 +856,7 @@ class BoundLinear(BoundOptimizableActivation):
             y.uw.unsqueeze(-3), y.ub.unsqueeze(-3),
             y.lower.unsqueeze(-3), y.upper.unsqueeze(-3),
         )
-        res_mul = BoundMul.bound_forward_both_perturbed(dim_in, x_unsqueeze, y_unsqueeze)
+        res_mul = BoundMul.bound_forward_both_perturbed(self, dim_in, x_unsqueeze, y_unsqueeze)
         return LinearBound(
             res_mul.lw.sum(dim=-1) if res_mul.lw is not None else None,
             res_mul.lb.sum(dim=-1),
@@ -927,13 +948,8 @@ class BoundLinear(BoundOptimizableActivation):
             node_grad = LinearGrad(w.detach())
             return [(node_grad, (grad_upstream,), [])]
         else:
-            assert not self.transB
-            w = self.inputs[1].forward_value
-            node_grad = MatMulGrad()
-            return [
-                (node_grad, (grad_upstream, self.inputs[1].forward_value), []),
-                (node_grad, (grad_upstream, self.inputs[0].forward_value), []),
-            ]
+            raise NotImplementedError(
+                "Gradient computation for weight perturbation is not supported yet.")
 
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
@@ -984,17 +1000,24 @@ class BoundMatMul(BoundLinear):
         uA_y = self.broadcast_backward(results[0][1][1], x[1])
         return [(lA_x, uA_x), (lA_y, uA_y), results[0][2]], lbias, ubias
 
-    def bound_forward(self, dim_in, x, y, C=None):
-        #TODO: check if we need to swap x and y
-        weight_has_batch = (self.inputs[1].batch_dim != -1)
-        return super().bound_forward(dim_in, x, LinearBound(
-            y.lw.transpose(-1, -2) if y.lw is not None else None,
-            y.lb.transpose(-1, -2) if y.lb is not None else None,
-            y.uw.transpose(-1, -2) if y.uw is not None else None,
-            y.ub.transpose(-1, -2) if y.ub is not None else None,
-            y.lower.transpose(-1, -2) if y.lower is not None else None,
-            y.upper.transpose(-1, -2) if y.upper is not None else None
-        ), C=C, weight_has_batch=weight_has_batch)
+    def bound_forward(self, dim_in, x, y):
+        def _bound_forward(x, y, weight_index=1):
+            # We assume that x is perturbed and y is not perturbed (weight).
+            weight_has_batch = (self.inputs[weight_index].batch_dim != -1)
+            return super(BoundMatMul, self).bound_forward(dim_in, x, LinearBound(
+                y.lw.transpose(-1, -2) if y.lw is not None else None,
+                y.lb.transpose(-1, -2) if y.lb is not None else None,
+                y.uw.transpose(-1, -2) if y.uw is not None else None,
+                y.ub.transpose(-1, -2) if y.ub is not None else None,
+                y.lower.transpose(-1, -2) if y.lower is not None else None,
+                y.upper.transpose(-1, -2) if y.upper is not None else None
+            ), weight_has_batch=weight_has_batch)
+        
+        # Check if we need to swap x and y
+        if not self.is_input_perturbed(0) and self.is_input_perturbed(1):
+            return _bound_forward(y, x, weight_index=0)
+        else:
+            return _bound_forward(x, y, weight_index=1)
 
     def update_requires_input_bounds(self):
         # If any multiplier is a constant, we do not need input bounds.

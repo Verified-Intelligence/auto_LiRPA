@@ -52,7 +52,7 @@ def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize
             self.forward_general(node=l_pre, offset=offset, from_node=from_node)
     inp = [l_pre.linear for l_pre in node.inputs]
     node._start = '_forward'
-    if (C is not None and isinstance(node, BoundLinear) and
+    if (C is not None and type(node) is BoundLinear and
             not node.is_input_perturbed(1) and not node.is_input_perturbed(2)):
         linear = node.bound_forward(self.dim_in, *inp, C=C)
         C_merged = True
