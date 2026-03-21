@@ -37,6 +37,20 @@ class GELUOp(torch.autograd.Function):
 def GELU(x):
     return GELUOp.apply(x)
 
+
+class SiLUOp(torch.autograd.Function):
+    @staticmethod
+    def symbolic(g, x):
+        return g.op('custom::SiLU', x)
+
+    @staticmethod
+    def forward(ctx, x):
+        return torch.nn.functional.silu(x)
+
+
+def SiLU(x):
+    return SiLUOp.apply(x)
+
 def gen_hardtanh(min_val, max_val):
    return functools.partial(torch.nn.functional.hardtanh, min_val=min_val, max_val=max_val)
 
@@ -149,7 +163,7 @@ class Test1DActivation(TestCase):
                          torch.sin, torch.cos,
                          torch.tanh, torch.sigmoid, torch.arctan,
                          torch.exp, pow_2, pow_3,
-                         torch.sign, GELU, gen_hardtanh(-1,1),gen_hardtanh(-0.25,0.25),gen_hardtanh(1,10),gen_hardtanh(-5,2),
+                         torch.sign, GELU, SiLU, gen_hardtanh(-1,1),gen_hardtanh(-0.25,0.25),gen_hardtanh(1,10),gen_hardtanh(-5,2),
                          tanhgrad, sigmoidgrad]:
             low, high = -10, 10
             if act_func == torch.reciprocal:

@@ -28,6 +28,7 @@ bound_op_map = {
     'grad::Tanh': BoundTanhGrad,
     'grad::Sigmoid': BoundSigmoidGrad,
     'custom::Gelu': BoundGelu,
+    'custom::SiLU': BoundSiLU,
     'onnx::Clip': BoundHardTanh
 }
 

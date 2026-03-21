@@ -45,4 +45,5 @@ from .reshape import *
 from .minmax import *
 from .convex_concave import *
 from .gelu import *
+from .silu import *
 from .tile import *
