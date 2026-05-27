@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -223,8 +223,8 @@ class BoundConv(Bound):
         out_lbs, out_ubs = None, None
         if self.is_lower_bound_current():
             # self.lower shape (1,8,16,16)
-            out_lbs = self.lower.detach().cpu().numpy()
-            out_ubs = self.upper.detach().cpu().numpy()
+            out_lbs = self.lower.min(dim=0, keepdim=True).values.detach().cpu().numpy()
+            out_ubs = self.upper.max(dim=0, keepdim=True).values.detach().cpu().numpy()
 
         # current layer weight (8,3,4,4)
         this_layer_weight = v[1].detach().cpu().numpy()

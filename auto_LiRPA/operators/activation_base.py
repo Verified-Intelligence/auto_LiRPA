@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -343,6 +343,16 @@ class BoundOptimizableActivation(BoundActivation):
         alpha = {spec_name: transfer(alpha_value, device=device, dtype=dtype, non_blocking=non_blocking).detach().requires_grad_(require_grad)
                     for spec_name, alpha_value in alpha.items()}
         return alpha
+
+    def pop_alpha(self):
+        """
+        Return and clear the alpha data.
+
+        This function aims to immediately make this object ready to bind other alpha data.
+        """
+        ret = self.alpha
+        self.alpha = OrderedDict()
+        return {"alpha": ret}
 
     def dump_alpha(self, device=None, dtype=None, non_blocking=False):
         """

@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -204,9 +204,9 @@ class Bound(nn.Module):
 
     @lower.setter
     def lower(self, value):
-        if not (value is None or isinstance(value, torch.Tensor)):
+        if not (value is None or isinstance(value, torch.Tensor) or isinstance(value, ValueError)):
             raise TypeError(f'lower must be a tensor or None, got {type(value)}')
-        if value is None:
+        if value is None or isinstance(value, ValueError):
             self._is_lower_bound_current = False
         else:
             self._is_lower_bound_current = True
@@ -218,9 +218,9 @@ class Bound(nn.Module):
 
     @upper.setter
     def upper(self, value):
-        if not (value is None or isinstance(value, torch.Tensor)):
+        if not (value is None or isinstance(value, torch.Tensor) or isinstance(value, ValueError)):
             raise TypeError(f'upper must be a tensor or None, got {type(value)}')
-        if value is None:
+        if value is None or isinstance(value, ValueError):
             self._is_upper_bound_current = False
         else:
             self._is_upper_bound_current = True

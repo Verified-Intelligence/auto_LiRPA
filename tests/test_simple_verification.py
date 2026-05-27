@@ -1,7 +1,8 @@
 """Test optimized bounds in simple_verification."""
+import os
+import numpy as np
 import torch
 import torch.nn as nn
-import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import Flatten
@@ -32,10 +33,13 @@ class TestSimpleVerification(TestCase):
         map_location=torch.device('cpu'))
       model.load_state_dict(checkpoint)
       model = model.to(device=self.default_device, dtype=self.default_dtype)
-      test_data = torchvision.datasets.MNIST(
-        './data', train=False, download=True, transform=torchvision.transforms.ToTensor())
+      # Original: downloads full MNIST dataset (not xdist-safe)
+      # test_data = torchvision.datasets.MNIST(
+      #     './data', train=False, download=True, transform=torchvision.transforms.ToTensor())
+      # image = test_data.data[:N].view(N,1,28,28)
+      mnist_data = np.load(os.path.join(os.path.dirname(__file__), 'data', 'test_samples', 'mnist_test_2.npy'))
       N = 2
-      image = test_data.data[:N].view(N,1,28,28)
+      image = torch.from_numpy(mnist_data[:N]).view(N,1,28,28)
       image = image.to(device=self.default_device,
                        dtype=self.default_dtype) / 255.0
 

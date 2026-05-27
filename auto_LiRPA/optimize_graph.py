@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -181,6 +181,58 @@ def minmax_to_relu(model: 'BoundedModule'):
                     model.replace_node(node, node_sub_2)
                     break
 
+def _check_merge(W_merge, skip, pairs, bias=None):
+    """
+    Check that the merge layer C has the exact structure required by the current fusion logic.
+
+    W_merge: Tensor of shape (n_out, n_mid)
+             or (n_out, n_mid, 1, 1)        
+    skip: set[int] of skipped src indices
+    pairs: dict[int,int] mapping src=j -> merge row r (from _pair_row), for adj pair (j,j+1)
+    bias: optional Tensor of shape (n_out,) for merge bias. If provided, we enforce bias ~ 0
+          for one-hot rows (since ReLU(h + b) == h only if b == 0 in general).
+
+    Returns: (ok: bool)
+    """
+    if W_merge.dim() == 4:
+        W = W_merge[..., 0, 0].detach()
+    elif W_merge.dim() == 2:
+        W = W_merge.detach()
+    else:
+        return False
+
+    n_out, n_mid = W.shape
+    dst2src = [s for s in range(n_mid) if s not in skip]
+    if len(dst2src) != n_out:
+        return False
+
+    b = bias.detach() if bias is not None else None
+
+    for r, src in enumerate(dst2src):
+        nz = torch.nonzero(W[r].abs() > 1e-8, as_tuple=False).flatten()
+        nnz = len(nz)
+
+        # In this case, the rows should contain a +1 at the correct location.
+        # And the same position in b should be 0.
+        if nnz == 1:
+            c = int(nz[0].item())
+            if (c != src) or ((W[r, c] - 1.0).abs().item() > 1e-8) or \
+               (b is not None and b[r].abs().item() > 1e-8):
+                return False
+
+        # In this case, the row should contain a pair of +1, -1 at the correct location.
+        elif nnz == 2:
+            c0 = int(nz[0].item())
+            c1 = int(nz[1].item())
+            if not (c0 == src and c1 == src + 1) or ((W[r, c0] - 1.0).abs().item() > 1e-8) \
+                or ((W[r, c1] + 1.0).abs().item() > 1e-8):
+                return False
+            # Must correspond to a detected pair, and the mapping must hit this row.
+            if pairs.get(src, None) != r:
+                return False
+
+    return True
+
 def _pair_row(Ws, bs, Wm, j, atol=1e-8):
     """
     Checks the relation ReLU(x) - ReLU(-x) = x. Return
@@ -256,6 +308,11 @@ def optimize_relu_relation(model: 'BoundedModule'):
                 if r is not None:
                     pairs[j] = r
                     skip.add(j + 1)
+
+            ok = _check_merge(Ws, skip, pairs, bias=bs)
+            if not ok:
+                i += 1
+                continue
             
             if pairs:
                 Cout, Cin, kH, kW = Ws.size(0), Wc.size(1), *Wc.shape[2:]
@@ -317,6 +374,11 @@ def optimize_relu_relation(model: 'BoundedModule'):
                 if r is not None:
                     pairs[j] = r
                     skip.add(j + 1)
+
+            ok = _check_merge(Wm, skip, pairs, bias=bm)
+            if not ok:
+                i += 1
+                continue
                  
             if pairs:
                 n_out = Wm.shape[0]

@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
+import os
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 import sys
@@ -52,18 +52,17 @@ class TestDistinctPatches(TestCase):
 
         self.cases = [(2,1,2,1), (0,0,0,0), (1,3,3,1), (2,2,3,1)]
 
-        normalize = torchvision.transforms.Normalize(
-            mean = [0.4914, 0.4822, 0.4465],
-            std = [0.2023, 0.1994, 0.2010]
-        )
-        test_data = torchvision.datasets.CIFAR10(
-            "./data", train=False, download=True,
-            transform=torchvision.transforms.Compose([
-                torchvision.transforms.ToTensor(),
-                normalize
-            ])
-        )
-        imgs = torch.from_numpy(test_data.data[:1]).reshape(1,3,32,32).float() / 255.0
+        # Original: downloads full CIFAR10 dataset (not xdist-safe)
+        # test_data = torchvision.datasets.CIFAR10(
+        #     "./data", train=False, download=True,
+        #     transform=torchvision.transforms.Compose([
+        #         torchvision.transforms.ToTensor(),
+        #         torchvision.transforms.Normalize(
+        #             mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
+        #     ]))
+        # imgs = torch.from_numpy(test_data.data[:1]).reshape(1,3,32,32).float() / 255.0
+        cifar_data = np.load(os.path.join(os.path.dirname(__file__), 'data', 'test_samples', 'cifar10_test_1.npy'))
+        imgs = torch.from_numpy(cifar_data[:1]).reshape(1,3,32,32).float() / 255.0
         self.single_img = imgs.to(dtype=self.default_dtype, device=self.default_device)
 
     def run_conv_mode(self, model, img, conv_mode):

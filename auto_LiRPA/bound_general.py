@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -154,9 +154,6 @@ class BoundedModule(nn.Module):
         self._check_patches_mode()
 
         self.next_split_hint = []  # Split hints, used in beta optimization.
-        # Beta values for all intermediate bounds.
-        # Set to None (not used) by default.
-        self.best_intermediate_betas = None
         # Initialization value for intermediate betas.
         self.init_intermediate_betas = None
         # whether using cut
@@ -1578,8 +1575,15 @@ class BoundedModule(nn.Module):
     from .optimized_bounds import (
         _get_optimized_bounds, init_alpha, update_best_beta,
         opt_reuse, opt_no_reuse, _to_float64, _to_default_dtype)
-    from .beta_crown import (beta_crown_backward_bound, reset_beta, set_beta,
-                             set_beta_cuts, get_split_nodes)
+    from .beta_crown import (
+        beta_crown_backward_bound,
+        reset_beta,
+        build_beta,
+        accept_beta,
+        set_beta,
+        set_beta_cuts,
+        get_split_nodes,
+    )
     from .jacobian import (compute_jacobian_bounds, _expand_jacobian)
     from .optimize_graph import _optimize_graph
     from .edit_graph import add_nodes, add_input_node, delete_node, replace_node
@@ -1591,3 +1595,5 @@ class BoundedModule(nn.Module):
     from .solver_module import (
         build_solver_module, _build_solver_input, _build_solver_general,
         _reset_solver_vars, _reset_solver_model)
+
+

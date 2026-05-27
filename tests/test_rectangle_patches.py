@@ -1,9 +1,9 @@
+import os
 import sys
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 sys.path.append('../examples/vision')
@@ -48,13 +48,15 @@ class TestResnetPatches(TestCase):
         for model_ori in model_oris:
             conv_mode = 'patches' # conv_mode can be set as 'matrix' or 'patches'        
                 
-            normalize = torchvision.transforms.Normalize(mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
-            test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True, 
-                            transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
+            # Original: downloads full CIFAR10 dataset (not xdist-safe)
+            # normalize = torchvision.transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
+            # test_data = torchvision.datasets.CIFAR10("./data", train=False, download=True,
+            #                 transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize]))
+            # image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
+            cifar_data = np.load(os.path.join(os.path.dirname(__file__), 'data', 'test_samples', 'cifar10_test_1.npy'))
             N = 1
-            n_classes = 10
 
-            image = torch.Tensor(test_data.data[:N]).reshape(N,3,32,32)
+            image = torch.Tensor(cifar_data[:N]).reshape(N,3,32,32)
             image = image[:, :, :28, :]
             image = image.to(device=self.default_device,
                              dtype=self.default_dtype) / 255.0

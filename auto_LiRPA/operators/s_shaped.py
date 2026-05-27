@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -654,11 +654,22 @@ class BoundPow(BoundSShaped):
                        start_shape=None, **kwargs):
         assert not self.is_input_perturbed(1)
         self._start = start_node.name if start_node is not None else None
-        y = y.value
-        if y == int(y):
+        self._noninteger_exponent = False  # Reset flag
+        y_val = y.value
+
+        # Only positive exponents are supported
+        assert y_val > 0, f"Exponent must be positive. Got y={y_val}"
+
+        if y_val == 1:
+            # Identity: pow(x, 1) = x, bounds pass through directly.
+            # Set exponent to 1 so that subsequent constraint logic (e.g., clamping)
+            # sees the correct exponent instead of a stale default.
+            self.exponent = 1
+            return [(last_lA, last_uA), (None, None)], 0, 0
+        elif y_val == int(y_val) and int(y_val) >= 2:
+            # Integer exponent >= 2: use existing S-shaped logic
             x.upper = torch.max(x.upper, x.lower + 1e-8)
-            self.exponent = int(y)
-            assert self.exponent >= 2
+            self.exponent = int(y_val)
             if self.exponent % 2:
                 self.precompute_relaxation(self.act_func, self.d_act_func)
 
@@ -666,18 +677,71 @@ class BoundPow(BoundSShaped):
                 last_lA, last_uA, x, start_node, start_shape, **kwargs)
             return [As[0], (None, None)], lbias, ubias
         else:
-            raise NotImplementedError('Exponent is not supported yet')
+            # Non-integer exponent: use simple convex/concave bounding
+            # Requires x >= 0 for non-integer powers
+            assert x.lower.min() >= 0, (
+                f"x must be non-negative for non-integer exponent y={y_val}. "
+                f"Got x.lower.min() = {x.lower.min()}"
+            )
+            x.upper = torch.max(x.upper, x.lower + 1e-8)
+            self.exponent = y_val
+            self._noninteger_exponent = True
+
+            # Use BoundOptimizableActivation's bound_backward which properly handles
+            # optimization mode and passes dim_opt to bound_relax
+            As, lbias, ubias = BoundOptimizableActivation.bound_backward(
+                self, last_lA, last_uA, x, start_node=start_node,
+                start_shape=start_shape, **kwargs)
+            return [As[0], (None, None)], lbias, ubias
 
     def bound_forward(self, dim_in, x, y):
-        assert y.lower == y.upper == int(y.lower)
-        y = y.lower
-        x.upper = torch.max(x.upper, x.lower + 1e-8)
-        self.exponent = int(y)
+        assert y.lower == y.upper  # exponent must be constant
+        y_val = y.lower
 
-        assert self.exponent >= 2
-        if self.exponent % 2:
-            self.precompute_relaxation(self.act_func, self.d_act_func)
-        return super().bound_forward(dim_in, x)
+        # Only positive exponents are supported
+        assert y_val > 0, f"Exponent must be positive. Got y={y_val}"
+
+        if y_val == 1:
+            # Identity: pow(x, 1) = x, bounds pass through directly
+            self.exponent = 1
+            return x
+
+        x.upper = torch.max(x.upper, x.lower + 1e-8)
+        self.exponent = y_val
+
+        if y_val == int(y_val) and int(y_val) >= 2:
+            # Integer exponent >= 2: use existing logic
+            self.exponent = int(y_val)
+            if self.exponent % 2:
+                self.precompute_relaxation(self.act_func, self.d_act_func)
+            return super().bound_forward(dim_in, x)
+        else:
+            # Non-integer exponent: requires x >= 0
+            assert x.lower.min() >= 0, (
+                f"x must be non-negative for non-integer exponent y={y_val}. "
+                f"Got x.lower.min() = {x.lower.min()}"
+            )
+            self._noninteger_exponent = True
+            return self.bound_forward_noninteger(dim_in, x)
+
+    def _init_opt_parameters_impl(self, size_spec, name_start, **kwargs):
+        """Initialize alpha parameters for optimization.
+
+        For non-integer exponents: 2 parameters (tangent point), like BoundSqrt.
+        For integer exponents: 10 parameters (S-shaped), defer to parent.
+        """
+        if hasattr(self, '_noninteger_exponent') and self._noninteger_exponent:
+            # Non-integer: 2 alpha parameters for tangent point
+            # alpha[0] for lA backprop, alpha[1] for uA backprop
+            l, u = self.inputs[0].lower, self.inputs[0].upper
+            if 0 < self.exponent < 1:
+                l = torch.clamp(l, min=1e-9)
+            alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
+            alpha.data[:] = (l + u) / 2
+            return alpha
+        else:
+            # Integer: use S-shaped parent implementation
+            return super()._init_opt_parameters_impl(size_spec, name_start, **kwargs)
 
     def bound_relax_branch(self, lb, ub):
         if self.opt_stage in ['opt', 'reuse']:
@@ -700,6 +764,11 @@ class BoundPow(BoundSShaped):
         return lower_slope, lower_bias, upper_slope, upper_bias
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        # Check if we're in non-integer mode
+        if hasattr(self, '_noninteger_exponent') and self._noninteger_exponent:
+            self.bound_relax_noninteger(x, init, dim_opt)
+            return
+
         # For powers with odd exponents, such as x^3, the overall shape is inverse S-like.
         self.inverse_s_shape = self.exponent % 2 == 1
         if self.exponent % 2:
@@ -708,18 +777,131 @@ class BoundPow(BoundSShaped):
             self.extremes = [0.]
         super().bound_relax(x, init, dim_opt)
 
+    def bound_relax_noninteger(self, x, init=False, dim_opt=None):
+        """
+        Linear relaxation for non-integer exponents with x >= 0.
+        Uses simple convex/concave bounding (no S-shaped complexity needed).
+
+        For 0 < y < 1: concave -> lower=secant, upper=tangent
+        For y > 1: convex -> lower=tangent, upper=secant
+        """
+        if init:
+            self.init_linear_relaxation(x, dim_opt)
+
+        y = self.exponent
+        l, u = x.lower, x.upper
+
+        # For 0 < y < 1, clamp lower bound for derivative/tangent computations
+        # to avoid infinite derivative at x=0. Secant uses original l (f(0)=0 is fine).
+        if 0 < y < 1:
+            l_tang = torch.clamp(l, min=1e-9)
+        else:
+            l_tang = l
+
+        f_l, f_u = self.act_func(l), self.act_func(u)
+
+        # Secant slope: uses original l (well-defined even at 0)
+        k_secant = (f_u - f_l) / (u - l).clamp(min=1e-8)
+
+        # Tangent point: alpha[0] is optimized for lA backprop, alpha[1] for uA.
+        # Both entries are used as independent tangent points (like BoundSqrt).
+        if self.opt_stage in ['opt', 'reuse'] and hasattr(self, 'alpha') and self._start in self.alpha:
+            self.alpha[self._start].data[:2] = torch.min(torch.max(
+                self.alpha[self._start].data[:2], l_tang), u)
+            m = self.alpha[self._start]
+        else:
+            m = (l_tang + u) / 2
+
+        k_tangent = self.d_act_func(m)
+        f_m = self.act_func(m)
+
+        if 0 < y < 1:
+            # Concave: lower=secant, upper=tangent
+            self.add_linear_relaxation(mask=None, type='lower', k=k_secant, x0=l, y0=f_l)
+            self.add_linear_relaxation(mask=None, type='upper', k=k_tangent, x0=m, y0=f_m)
+        else:
+            # Convex (y > 1): lower=tangent, upper=secant
+            self.add_linear_relaxation(mask=None, type='lower', k=k_tangent, x0=m, y0=f_m)
+            self.add_linear_relaxation(mask=None, type='upper', k=k_secant, x0=l, y0=f_l)
+
+    def bound_forward_noninteger(self, dim_in, x):
+        """
+        Forward-mode bound propagation for non-integer exponents with x >= 0.
+
+        For 0 < y < 1: concave -> lower=secant, upper=tangent
+        For y > 1: convex -> lower=tangent, upper=secant
+        """
+        y = self.exponent
+        l, u = x.lower, x.upper
+
+        # For 0 < y < 1, clamp lower for tangent/derivative computations only
+        if 0 < y < 1:
+            l_tang = torch.clamp(l, min=1e-9)
+        else:
+            l_tang = l
+
+        f_l, f_u = self.act_func(l), self.act_func(u)
+
+        # Secant slope: uses original l (well-defined even at 0)
+        k_secant = (f_u - f_l) / (u - l).clamp(min=1e-8)
+
+        # Tangent at midpoint (using clamped lower for derivative safety)
+        m = (l_tang + u) / 2
+        k_tangent = self.d_act_func(m)
+        f_m = self.act_func(m)
+        b_tangent = f_m - k_tangent * m
+
+        # Secant bias
+        b_secant = f_l - k_secant * l
+
+        if 0 < y < 1:
+            # Concave: lower=secant, upper=tangent
+            kl, bl = k_secant, b_secant
+            ku, bu = k_tangent, b_tangent
+        else:
+            # Convex (y > 1): lower=tangent, upper=secant
+            kl, bl = k_tangent, b_tangent
+            ku, bu = k_secant, b_secant
+
+        # Propagate linear bounds
+        lw = x.lw * kl.unsqueeze(1)
+        lb = x.lb * kl + bl
+        uw = x.uw * ku.unsqueeze(1)
+        ub = x.ub * ku + bu
+
+        return LinearBound(lw, lb, uw, ub)
+
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
         exp = v[1][0]
-        assert exp == int(exp)
-        exp = int(exp)
-        pl, pu = torch.pow(v[0][0], exp), torch.pow(v[0][1], exp)
-        if exp % 2 == 1:
-            return pl, pu
+        h_L, h_U = v[0][0], v[0][1]
+
+        # Only positive exponents are supported
+        assert exp > 0, f"Exponent must be positive. Got y={exp}"
+
+        if exp == 1:
+            # Identity: pow(x, 1) = x, valid for any x including negative.
+            return h_L, h_U
+
+        if exp == int(exp) and int(exp) >= 2:
+            # Integer exponent >= 2: existing logic
+            exp = int(exp)
+            pl, pu = torch.pow(h_L, exp), torch.pow(h_U, exp)
+            if exp % 2 == 1:
+                return pl, pu
+            else:
+                pl, pu = torch.min(pl, pu), torch.max(pl, pu)
+                mask = 1 - ((h_L < 0) * (h_U > 0)).to(pl.dtype)
+                return pl * mask, pu
         else:
-            pl, pu = torch.min(pl, pu), torch.max(pl, pu)
-            mask = 1 - ((v[0][0] < 0) * (v[0][1] > 0)).to(pl.dtype)
-            return pl * mask, pu
+            # Non-integer exponent: requires x > 0
+            assert h_L.min() >= 0, (
+                f"x must be non-negative for non-integer exponent y={exp}. "
+                f"Got h_L.min() = {h_L.min()}"
+            )
+            self.exponent = exp
+            # For y > 0, function is always increasing: f(l) <= f(x) <= f(u)
+            return torch.pow(h_L, exp), torch.pow(h_U, exp)
 
     def clamp_interim_bounds(self):
         if self.exponent % 2 == 0:

@@ -6,7 +6,7 @@ sys.path.insert(0, '../complete_verifier')
 
 import arguments
 from beta_CROWN_solver import LiRPANet
-from bab import general_bab
+from activation_split.bab_bootstrap import general_bab
 
 from auto_LiRPA import BoundedTensor
 from auto_LiRPA.perturbations import *

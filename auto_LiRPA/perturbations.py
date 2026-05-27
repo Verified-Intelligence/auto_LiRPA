@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -147,7 +147,7 @@ class PerturbationL0Norm(Perturbation):
 
 class PerturbationLpNorm(Perturbation):
     """Perturbation constrained by the L_p norm."""
-    def __init__(self, eps=0, norm=np.inf, x_L=None, x_U=None, eps_min=0, 
+    def __init__(self, eps=0, norm=np.inf, x_L=None, x_U=None, eps_min=0,
                  constraints=None, rearrange_constraints=False, no_return_inf=False, timer=None):
         r"""
         Initialize a p-norm perturbation instance.
@@ -215,7 +215,7 @@ class PerturbationLpNorm(Perturbation):
         # also see in `constraints_solving` in constraints_solver.py
 
         # Pre-process the constraints.
-        self.constraints, self.sorted_out_batches = sort_out_constr_batches(x_L, x_U, constraints, 
+        self.constraints, self.sorted_out_batches = sort_out_constr_batches(x_L, x_U, constraints,
                                                                             rearrange_constraints=rearrange_constraints,
                                                                             no_return_inf=no_return_inf)
         # The indices of hidden neurons to apply constraints.
@@ -806,4 +806,3 @@ class PerturbationSynonym(Perturbation):
                         _cand = [tokens[i]] + _cand
                     candidates.append(_cand)
                 example['candidates'] = candidates
-

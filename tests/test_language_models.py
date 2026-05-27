@@ -46,12 +46,16 @@ def train():
     logger.info("\nTraining a Transformer")
     print(cmd_transformer_train)
     print()
-    os.system(cmd_transformer_train)
+    exit_code = os.system(cmd_transformer_train)
+    if exit_code != 0:
+        raise RuntimeError("Failed to train the Transformer model.")
     os.system("cp ../examples/language/model_transformer_test/ckpt_2 data/ckpt_transformer")
     logger.info("\nTraining an LSTM")
     print(cmd_lstm_train)
     print()
-    os.system(cmd_lstm_train)
+    exit_code = os.system(cmd_lstm_train)
+    if exit_code != 0:
+        raise RuntimeError("Failed to train the LSTM model.")
     os.system("cp ../examples/language/model_lstm_test/ckpt_2 data/ckpt_lstm")
 
 def read_res():

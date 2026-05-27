@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -215,7 +215,7 @@ class BoundMaxPool(BoundOptimizableActivation):
                 d_neg = F.pad(d_neg, padding)
 
                 pos_A = F.interpolate(
-                    pos_A.view(shape[0] * shape[1], *shape[2:]),
+                    pos_A.reshape(shape[0] * shape[1], *shape[2:]),
                     scale_factor=self.kernel_size)
                 if d_pos.shape[-2] > pos_A.shape[-2] or d_pos.shape[-1] > pos_A.shape[-1]:
                     if not (d_pos.shape[-2] > pos_A.shape[-2] and d_pos.shape[-1] > pos_A.shape[-1]):
@@ -226,9 +226,9 @@ class BoundMaxPool(BoundOptimizableActivation):
                 else:
                     d_pos = F.pad(d_pos, (0, pos_A.shape[-2] - d_pos.shape[-2],
                                           0, pos_A.shape[-1] - d_pos.shape[-1]))
-                pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
+                pos_A = pos_A.reshape(shape[0], shape[1], *pos_A.shape[1:])
 
-                neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]),
+                neg_A = F.interpolate(neg_A.reshape(shape[0] * shape[1], *shape[2:]),
                                       scale_factor=self.kernel_size)
                 if d_neg.shape[-2] > neg_A.shape[-2] or d_neg.shape[-1] > neg_A.shape[-1]:
                     if not (d_neg.shape[-2] > neg_A.shape[-2] and d_neg.shape[-1] > neg_A.shape[-1]):
@@ -238,7 +238,7 @@ class BoundMaxPool(BoundOptimizableActivation):
                 else:
                     d_neg = F.pad(d_neg, (0, neg_A.shape[-2] - d_neg.shape[-2],
                                           0, neg_A.shape[-1] - d_neg.shape[-1]))
-                neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
+                neg_A = neg_A.reshape(shape[0], shape[1], *neg_A.shape[1:])
 
                 next_A = self.jit_mutiply(pos_A, neg_A, d_pos, d_neg)
                 if self.padding[0] > 0 or self.padding[1] > 0:
@@ -413,6 +413,17 @@ class BoundMaxPool(BoundOptimizableActivation):
 
         return lower_d, lower_b, upper_d, upper_b
 
+    def pop_alpha(self):
+        """
+        Return and clear the alpha data.
+
+        This function aims to immediately make this object ready to bind other alpha data.
+        """
+        ret = {"alpha": self.alpha, "init": self.init}
+        self.alpha = {}
+        self.init = {}
+        return ret
+
     def dump_alpha(self, device=None, dtype=None, non_blocking=False):
         ret = {'alpha': self._transfer_alpha(self.alpha, device=device, dtype=dtype, non_blocking=non_blocking, require_grad=False)}
         ret['init'] = self.init
@@ -475,7 +486,6 @@ class BoundMaxPool(BoundOptimizableActivation):
         model.update()
 
 
-
 class BoundGlobalAveragePool(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
@@ -532,9 +542,12 @@ class BoundAveragePool(Bound):
                 return None, 0
             equal_kernel_stride = (self.kernel_size[0] == self.stride[0]
                                    and self.kernel_size[1] == self.stride[1])
+            pad_h = self.padding[0] if isinstance(self.padding, (list, tuple)) else self.padding
+            pad_w = self.padding[1] if isinstance(self.padding, (list, tuple)) else self.padding
             if isinstance(last_A, torch.Tensor):
                 shape = last_A.size()
-                if equal_kernel_stride:
+                # Only use interpolate when there is *no* padding.
+                if equal_kernel_stride and pad_h == 0 and pad_w == 0:
                     # propagate A to the next layer, with batch concatenated together
                     next_A = F.interpolate(
                         last_A.reshape(shape[0] * shape[1], *shape[2:]),

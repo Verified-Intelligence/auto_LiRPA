@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -19,6 +19,36 @@ from .base import *
 from ..patches import Patches, patches_to_matrix
 from .linear import BoundLinear
 from .constant import BoundConstant
+
+
+def _preprocess_patch_for_reshape(A, output_shape):
+    """
+    Preprocess the patch matrix A for Reshape/Transpose operators.
+    The output shape is the shape after Reshape/Transpose.
+    Returns the matrix A with shape [spec, *output_shape].
+    """
+    if not type(A) == Patches:
+        return A
+    # output shape should be [batch, in_c, in_H, in_W] since it's followed by Conv2d
+    assert len(output_shape) == 4
+    if A.unstable_idx is None:
+        patches = A.patches
+        # non-sparse: [batch, out_dim, out_c, out_H, out_W, out_dim, in_c, H, W]
+        # [out_dim*out_c, batch, out_H, out_W, out_dim*in_c, H, W]
+        # expected next_A shape [batch, spec, in_c, in_H , in_W].
+        next_A = patches_to_matrix(
+            pieces=patches, input_shape=output_shape,
+            stride=A.stride, padding=A.padding)
+    else:
+        # sparse: [spec, batch, in_c, patch_H, patch_W] (specs depends on the number of unstable neurons).
+        patches = A.patches
+        # expected next_A shape [batch, spec, input_c, in_H, in_W].
+        next_A = patches_to_matrix(
+            pieces=patches, input_shape=output_shape,
+            stride=A.stride, padding=A.padding,
+            output_shape=A.output_shape, unstable_idx=A.unstable_idx)
+    # Reshape it to [spec, *output_shape]
+    return next_A.transpose(0, 1)
 
 
 class BoundReshape(Bound):
@@ -43,31 +73,11 @@ class BoundReshape(Bound):
             if A is None:
                 return None
             if type(A) == Patches:
-                # output shape should be [batch, in_c, in_H, in_W] since it's followed by Conv2d
-                assert len(self.output_shape) == 4
                 if type(self.inputs[0]) == BoundLinear:
                     # Save the shape and it will be converted to matrix in Linear layer.
                     return A.create_similar(input_shape=self.output_shape)
-                if A.unstable_idx is None:
-                    patches = A.patches
-                    # non-sparse: [batch, out_dim, out_c, out_H, out_W, out_dim, in_c, H, W]
-                    # [out_dim*out_c, batch, out_H, out_W, out_dim*in_c, H, W]
-                    # expected next_A shape [batch, spec, in_c, in_H , in_W].
-                    next_A = patches_to_matrix(
-                        pieces=patches, input_shape=self.output_shape,
-                        stride=A.stride, padding=A.padding)
-                else:
-                    # sparse: [spec, batch, in_c, patch_H, patch_W] (specs depends on the number of unstable neurons).
-                    patches = A.patches
-                    # expected next_A shape [batch, spec, input_c, in_H, in_W].
-                    next_A = patches_to_matrix(
-                        pieces=patches, input_shape=self.output_shape,
-                        stride=A.stride, padding=A.padding, 
-                        output_shape=A.output_shape, unstable_idx=A.unstable_idx)
-                # Reshape it to [spec, batch, *input_shape]  (input_shape is the shape before Reshape operation).
-                return next_A.transpose(0, 1).reshape(-1, A.shape[1], *self.input_shape[1:])
-            else:
-                return A.reshape(A.shape[0], A.shape[1], *self.input_shape[1:])
+                A = _preprocess_patch_for_reshape(A, self.output_shape)
+            return A.reshape(-1, A.shape[1], *self.input_shape[1:])
         #FIXME check reshape or view
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
@@ -389,6 +399,8 @@ class BoundTranspose(Bound):
         def _bound_oneside(last_A):
             if last_A is None:
                 return None
+            if type(last_A) == Patches:
+                last_A = _preprocess_patch_for_reshape(last_A, self.output_shape)
             return last_A.permute(self.perm_inv_inc_one)
 
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0

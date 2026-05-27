@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -21,4 +21,4 @@ from .perturbations import PerturbationLpNorm, PerturbationSynonym, Perturbation
 from .wrapper import CrossEntropyWrapper, CrossEntropyWrapperMultiInput
 from .bound_op_map import register_custom_op, unregister_custom_op
 
-__version__ = '0.7.0'
+__version__ = '0.7.1'

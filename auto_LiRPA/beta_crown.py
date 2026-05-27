@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -39,6 +39,10 @@ class SparseBeta:
         self.val = self.val.detach().to(
             device, non_blocking=True).requires_grad_()
 
+    @staticmethod
+    def new_empty():
+        return SparseBeta((0, 0))
+
     def apply_splits(self, history, key):
         loc_numpy = np.zeros(self.loc.shape, dtype=np.int32)
         sign_numpy = np.zeros(self.sign.shape)
@@ -58,6 +62,41 @@ class SparseBeta:
         self.sign.copy_(torch.from_numpy(sign_numpy), non_blocking=True)
         if self.bias is not None:
             self.bias.copy_(torch.from_numpy(bias_numpy), non_blocking=True)
+
+    def to(self, *, device=None, dtype=None, non_blocking=False):
+        new_sparse_beta = SparseBeta.new_empty()
+
+        new_sparse_beta.device = device if device is not None else self.device
+        new_sparse_beta.val = self.val.to(
+            device=new_sparse_beta.device,
+            dtype=dtype if dtype is not None else self.val.dtype,
+            non_blocking=non_blocking,
+        )
+        new_sparse_beta.loc = self.loc.to(
+            device=new_sparse_beta.device,
+            dtype=self.loc.dtype,
+            non_blocking=non_blocking,
+        )
+        new_sparse_beta.sign = self.sign.to(
+            device=new_sparse_beta.device,
+            dtype=self.sign.dtype,
+            non_blocking=non_blocking,
+        )
+        if self.bias is not None:
+            new_sparse_beta.bias = self.bias.to(
+                device=new_sparse_beta.device,
+                dtype=dtype if dtype is not None else self.bias.dtype,
+                non_blocking=non_blocking,
+            )
+
+        return new_sparse_beta
+
+    def mask_batch_dim_inplace(self, mask: torch.Tensor):
+        self.val = self.val[mask, :]
+        self.loc = self.loc[mask, :]
+        self.sign = self.sign[mask, :]
+        if self.bias is not None:
+            self.bias = self.bias[mask, :]
 
 def get_split_nodes(self: 'BoundedModule'):
     self.split_nodes = []
@@ -145,6 +184,43 @@ def reset_beta(self: 'BoundedModule', node, shape, betas, bias=False,
     else:
         node.sparse_betas = [SparseBeta(
             shape, betas=betas, device=self.device, bias=bias)]
+
+
+def build_beta(
+    self: "BoundedModule",
+    shape,
+    betas,
+    device,
+    bias=False,
+    start_nodes=None,
+):
+    """
+    Build SparseBeta object from betas info from Domain, without assigning it to any node.
+
+    A.K.A. Do everything in reset_beta but do not assign the built SparseBeta to node.
+    """
+    if self.bound_opts.get("enable_opt_interm_bounds", False):
+        assert start_nodes is not None
+        sparse_betas = {
+            key: SparseBeta(
+                shape,
+                betas=[
+                    (betas[j][i] if betas[j] is not None else None)
+                    for j in range(len(betas))
+                ],
+                device=device,
+                bias=bias,
+            )
+            for i, key in enumerate(start_nodes)
+        }
+    else:
+        sparse_betas = [SparseBeta(shape, betas=betas, device=device, bias=bias)]
+    return sparse_betas
+
+
+def accept_beta(self: "BoundedModule", sparse_beta_by_layer):
+    for layer_name, sparse_betas in sparse_beta_by_layer.items():
+        self[layer_name].sparse_betas = sparse_betas
 
 
 def beta_crown_backward_bound(self: 'BoundedModule', node, lA, uA, start_node=None):

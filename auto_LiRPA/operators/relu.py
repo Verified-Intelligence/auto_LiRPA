@@ -3,7 +3,7 @@
 ##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
 ##   by the α,β-CROWN Team                                             ##
 ##                                                                     ##
-##   Copyright (C) 2020-2025 The α,β-CROWN Team                        ##
+##   Copyright (C) 2020-2026 The α,β-CROWN Team                        ##
 ##   Team leaders:                                                     ##
 ##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
 ##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
@@ -371,6 +371,22 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         alpha_indices = [transfer(indices, device=device, dtype=dtype, non_blocking=non_blocking) for indices in alpha_indices]
         return alpha_indices
 
+    def pop_alpha(self):
+        """
+        Return and clear the alpha data.
+
+        This function aims to immediately make this object ready to bind other alpha data.
+        """
+        ret = {"alpha": self.alpha}
+        self.alpha = OrderedDict()
+        if self.use_sparse_spec_alpha:
+            ret["alpha_lookup_idx"] = self.alpha_lookup_idx
+            self.alpha_lookup_idx = None
+        if self.use_sparse_features_alpha:
+            ret["alpha_indices"] = self.alpha_indices
+            self.alpha_indices = None
+        return ret
+
     def dump_alpha(self, device=None, dtype=None, non_blocking=False):
         ret = {'alpha': self._transfer_alpha(self.alpha, device=device, dtype=dtype, non_blocking=non_blocking, require_grad=False)}
         if self.use_sparse_spec_alpha:
@@ -718,8 +734,8 @@ class BoundRelu(BoundTwoPieceLinear):
         this_layer_shape = gvars_array.shape
         assert gvars_array.shape == self.output_shape[1:]
 
-        pre_lbs = self.inputs[0].lower.cpu().detach().numpy().reshape(-1)
-        pre_ubs = self.inputs[0].upper.cpu().detach().numpy().reshape(-1)
+        pre_lbs = self.inputs[0].lower.min(dim=0).values.cpu().detach().numpy().reshape(-1)
+        pre_ubs = self.inputs[0].upper.max(dim=0).values.cpu().detach().numpy().reshape(-1)
 
         new_layer_gurobi_vars = []
         relu_integer_vars = []
@@ -993,8 +1009,8 @@ class BoundSignMerge(BoundTwoPieceLinear):
         this_layer_shape = gvars_array.shape
         assert gvars_array.shape == self.output_shape[1:]
 
-        pre_lbs = self.inputs[0].lower.cpu().detach().numpy().reshape(-1)
-        pre_ubs = self.inputs[0].upper.cpu().detach().numpy().reshape(-1)
+        pre_lbs = self.inputs[0].lower.min(dim=0).values.cpu().detach().numpy().reshape(-1)
+        pre_ubs = self.inputs[0].upper.max(dim=0).values.cpu().detach().numpy().reshape(-1)
 
         new_layer_gurobi_vars = []
         integer_vars = []
