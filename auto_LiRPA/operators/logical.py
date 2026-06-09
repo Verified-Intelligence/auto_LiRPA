@@ -23,11 +23,28 @@ class BoundWhere(Bound):
         return torch.where(condition.to(torch.bool), x, y)
 
     def interval_propagate(self, *v):
-        assert not self.is_input_perturbed(0)
-        condition = v[0][0]
-        return tuple([torch.where(condition, v[1][j], v[2][j]) for j in range(2)])
+        (cond_l, cond_u), (xl, xu), (yl, yu) = v[0], v[1], v[2]
+        if not self.is_input_perturbed(0):
+            # Fixed condition: select the corresponding branch bounds elementwise.
+            c = cond_l.to(torch.bool)
+            return torch.where(c, xl, yl), torch.where(c, xu, yu)
+        # Perturbed condition: ``where`` treats any non-zero as true (numpy/minijax
+        # semantics). Sound interval rule: where the condition interval excludes 0
+        # the branch is determined; where it contains 0 either branch is possible,
+        # so take the elementwise union of the two branch intervals.
+        cl, cu = cond_l, cond_u
+        true_mask = (cl > 0) | (cu < 0)          # interval excludes 0 -> definitely x
+        false_mask = (cl == 0) & (cu == 0)       # exactly zero -> definitely y
+        out_l = torch.where(true_mask, xl, torch.where(false_mask, yl, torch.minimum(xl, yl)))
+        out_u = torch.where(true_mask, xu, torch.where(false_mask, yu, torch.maximum(xu, yu)))
+        return out_l, out_u
 
     def bound_backward(self, last_lA, last_uA, condition, x, y, **kwargs):
+        # NOTE: CROWN (linear relaxation) still only supports a fixed condition.
+        # interval_propagate (IBP) above handles a perturbed condition via the
+        # branch union; milestone2 only uses where through IBP-mode bounds, so
+        # this path is not hit. Bounding a perturbed-condition where with CROWN
+        # would need a linear relaxation of the selection and is not implemented.
         assert torch.allclose(condition.lower.float(), condition.upper.float())
         assert self.from_input
         mask = condition.lower.float()

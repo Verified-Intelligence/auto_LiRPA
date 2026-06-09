@@ -35,6 +35,12 @@ def dsigmoid(x):
 def darctan(x):
     return (x.square() + 1.).reciprocal()
 
+# 2/sqrt(pi), the constant factor of the error-function derivative.
+_ERF_DERIV_CONST = 1.1283791670955126
+
+def derf(x):
+    return _ERF_DERIV_CONST * torch.exp(-x.square())
+
 
 # TODO refactor BoundTanh into a general op class for convex/concave like nonlinear functions.
 class BoundTanh(BoundOptimizableActivation):
@@ -443,6 +449,20 @@ class BoundAtan(BoundTanh):
         super().__init__(attr, inputs, output_index, options,
                          activation=('arctan', torch.arctan, darctan))
         self.split_range = (-torch.inf, torch.inf)
+
+
+class BoundErf(BoundTanh):
+    """Bounds for the error function ``erf``.
+
+    ``erf`` is S-shaped exactly like ``tanh``/``sigmoid``: monotone increasing,
+    odd, with a single inflection at 0 (convex on x<0, concave on x>0) and range
+    (-1, 1). It therefore reuses the generic S-shaped tangent-line relaxation of
+    ``BoundTanh`` unchanged. Registering this op is enough to bound the exact
+    (erf-based) GELU, which torch lowers to ``0.5 * x * (1 + erf(x / sqrt(2)))``.
+    """
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options,
+                         activation=('erf', torch.erf, derf))
 
 
 class BoundTan(BoundAtan):

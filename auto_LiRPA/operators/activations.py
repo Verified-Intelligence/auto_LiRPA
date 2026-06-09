@@ -196,6 +196,61 @@ class BoundSqr(BoundOptimizableActivation):
         return lower, upper
 
 
+class BoundElu(BoundActivation):
+    r"""Sound linear bounds for ``ELU(x) = x if x >= 0 else alpha*(exp(x) - 1)``.
+
+    ELU is monotone increasing, and **convex iff ``alpha <= 1``**: its derivative
+    is ``alpha*exp(x)`` for ``x < 0`` (rising to ``alpha`` at ``0^-``) and ``1``
+    for ``x >= 0``, so the derivative is non-decreasing across 0 only when
+    ``alpha <= 1`` (for ``alpha > 1`` it jumps down from ``alpha`` to ``1`` and
+    ELU is *not* convex). The default ``alpha = 1`` is convex.
+
+    For a convex function the chord through the endpoints is a sound linear
+    *upper* bound and any tangent line a sound linear *lower* bound, so we use the
+    endpoint chord (upper) and the midpoint tangent (lower). Loose (no
+    alpha-optimization) but valid. ``alpha > 1`` is rejected rather than bounded
+    unsoundly.
+    """
+
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.elu_alpha = float((attr or {}).get('alpha', 1.0))
+        if self.elu_alpha > 1.0:
+            raise NotImplementedError(
+                f'BoundElu only supports alpha <= 1 (ELU is non-convex for '
+                f'alpha > 1); got alpha={self.elu_alpha}')
+        self.splittable = False
+
+    def _elu(self, x):
+        return F.elu(x, self.elu_alpha)
+
+    def _d_elu(self, x):
+        # f'(x) = 1 for x >= 0, alpha*exp(x) for x < 0.
+        return torch.where(x >= 0, torch.ones_like(x), self.elu_alpha * torch.exp(x))
+
+    def forward(self, x):
+        return self._elu(x)
+
+    def interval_propagate(self, *v):
+        h_L, h_U = v[0][0], v[0][1]
+        return self._elu(h_L), self._elu(h_U)  # monotone increasing
+
+    def bound_relax(self, x, init=False, dim_opt=None):
+        if init:
+            self.init_linear_relaxation(x)
+        l, u = x.lower, x.upper
+        # Upper bound: chord through (l, elu(l)) and (u, elu(u)); convex => f <= chord.
+        # Where the interval is degenerate, anchor at l with slope f'(u): still a
+        # sound upper bound (f'(t) <= f'(u) for t <= u by convexity).
+        diff = u - l
+        chord_k = (self._elu(u) - self._elu(l)) / diff.clamp(min=1e-7)
+        k_up = torch.where(diff > 1e-7, chord_k, self._d_elu(u))
+        self.add_linear_relaxation(mask=None, type='upper', k=k_up, x0=l)
+        # Lower bound: tangent at the midpoint; convex => f >= tangent everywhere.
+        mid = 0.5 * (l + u)
+        self.add_linear_relaxation(mask=None, type='lower', k=self._d_elu(mid), x0=mid)
+
+
 class BoundHardTanh(BoundActivation):
 
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
