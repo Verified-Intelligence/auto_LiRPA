@@ -107,7 +107,8 @@ def convert_sqr(model: 'BoundedModule'):
             replace = True
         elif type(node) == BoundPow:
             if ((isinstance(node.inputs[1], BoundBuffers) and node.inputs[1].buffer == 2) or
-                (isinstance(node.inputs[1], BoundConstant) and node.inputs[1].value == 2)):
+                (isinstance(node.inputs[1], BoundConstant) and node.inputs[1].value == 2) or 
+                (isinstance(node.inputs[1], BoundCast) and node.inputs[1].value == 2)):
                 replace = True
         if replace:
             node_new = BoundSqr(inputs=[node.inputs[0]])

@@ -40,6 +40,58 @@ def get_node_attribute(node, attribute_name):
         # Pytorch <= 1.12. This will call _node_getitem in torch.onnx.utils.
         return node[attribute_name]
 
+
+# Some ONNX operators moved attributes to optional inputs in newer opsets.
+# Entries map an operator to its number of ordinary inputs and the ordered
+# attributes that should be converted into constant inputs.
+_ONNX_ATTRIBUTE_INPUTS = {
+    # PyTorch 2.11+ exports HardTanh as an onnx::Clip in the Clip-6 form:
+    # one data input plus the min and max attributes. BoundHardTanh expects
+    # the Clip-11 form, which has three inputs (data, min, max) and no min
+    # or max attributes. Convert the attributes into constant input nodes.
+    # See https://onnx.ai/onnx/operators/onnx__Clip.html.
+    'onnx::Clip': (1, ('min', 'max')),
+}
+
+
+def canonicalize_onnx_nodes(nodes):
+    """Convert legacy ONNX attributes to their equivalent constant inputs."""
+    canonical_nodes = []
+    for node in nodes:
+        schema = _ONNX_ATTRIBUTE_INPUTS.get(node.op)
+        if schema is None:
+            canonical_nodes.append(node)
+            continue
+
+        ordinary_inputs, attribute_inputs = schema
+        if len(node.inputs) < ordinary_inputs:
+            raise ValueError(f'{node.op} has too few inputs')
+
+        first_missing = len(node.inputs) - ordinary_inputs
+        missing = attribute_inputs[first_missing:]
+        if not missing or not all(name in node.attr for name in missing):
+            canonical_nodes.append(node)
+            continue
+
+        inputs = list(node.inputs)
+        attr = dict(node.attr)
+        op_name = node.op.removeprefix('onnx::').lower()
+        for name in missing:
+            constant_name = f'/aux_{op_name}_{name}/{node.name}'
+            canonical_nodes.append(Node(
+                name=constant_name,
+                op='onnx::Constant',
+                inputs=[],
+                attr={'value': torch.tensor(attr.pop(name))},
+                output_index=0,
+            ))
+            inputs.append(constant_name)
+
+        canonical_nodes.append(node._replace(inputs=inputs, attr=attr))
+
+    return canonical_nodes
+
+
 def parse_graph(graph, inputs, params):
     input_all = []
     input_used = []
@@ -135,7 +187,7 @@ def parse_graph(graph, inputs, params):
             'perturbation': perturbation,
         })
 
-    return nodesOP, nodesIn, nodesOut
+    return canonicalize_onnx_nodes(nodesOP), nodesIn, nodesOut
 
 def _get_jit_params(module, param_exclude, param_include):
     state_dict = torch.jit._unique_state_dict(module, keep_vars=True)
@@ -220,6 +272,11 @@ def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=No
         else:
             from torch.onnx._internal.torchscript_exporter._globals import GLOBALS
         GLOBALS.autograd_inlining = False
+        if version.parse(torch.__version__) >= version.parse("2.11.0"):
+            # fix onnx opset to avoid translating to premature and unsupported
+            # ops. (eg. unsafe_chunk arisen from lstm.py example)
+            GLOBALS.export_onnx_opset_version = 17
+            
 
     logger.debug("Graph before ONNX convertion:")
     logger.debug(trace)

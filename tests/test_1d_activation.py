@@ -145,12 +145,12 @@ class Test1DActivation(TestCase):
                 high=0.5*torch.pi + i*torch.pi - 1e-20, method='CROWN')
 
     def test_acts(self):
-        for act_func in [torch.nn.functional.relu,
+        for i, act_func in enumerate([torch.nn.functional.relu,
                          torch.sin, torch.cos,
                          torch.tanh, torch.sigmoid, torch.arctan,
                          torch.exp, pow_2, pow_3,
                          torch.sign, GELU, gen_hardtanh(-1,1),gen_hardtanh(-0.25,0.25),gen_hardtanh(1,10),gen_hardtanh(-5,2),
-                         tanhgrad, sigmoidgrad]:
+                         tanhgrad, sigmoidgrad]):
             low, high = -10, 10
             if act_func == torch.reciprocal:
                 # So far only positive values are supported.

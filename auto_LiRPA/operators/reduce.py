@@ -241,7 +241,14 @@ class BoundReduceSum(BoundReduce):
     def build_gradient_node(self, grad_upstream):
         node_grad = ReduceSumGrad(self.axis, self.keepdim, self.input_shape)
         return [(node_grad, (grad_upstream,), [])]
-        
+
+class BoundATenSum(BoundReduceSum):
+    """
+        Alias for BoundReduceSum, see BoundReduceSum. 
+        Both aten::sum and onnx:reducesum operators point to
+        onnx2pytorch/operations/reducesum.py:28:0
+    """
+    pass
 
 class ReduceSumGrad(Module):
     def __init__(self, axis, keepdim, input_shape):

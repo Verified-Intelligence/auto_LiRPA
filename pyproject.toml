@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-lirpa"
+description = "A library for Automatic Linear Relaxation based Perturbation Analysis (LiRPA) on general computational graphs, with a focus on adversarial robustness verification and certification of deep neural networks."
+readme = "README.md"
+license = { text = "BSD-3-Clause" }
+requires-python = "~=3.11.0" 
+authors = [
+    { name = "α,β-CROWN Team", email = "huan@huan-zhang.com" },
+    { name = "α,β-CROWN Team", email = "xiangru4@illinois.edu" },
+]
+dynamic = ["version"]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch>=2.0.0,<2.12.0",
+    "numpy>=2.0.0",
+    "packaging>=20.0",
+    "tqdm>=4.67.3",
+    "graphviz>=0.21",
+    "appdirs>=1.4.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/Verified-Intelligence/auto_LiRPA"
+
+[tool.setuptools.dynamic]
+version = { attr = "auto_LiRPA.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["auto_LiRPA*"]

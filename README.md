@@ -99,11 +99,22 @@ user-defined ranges.  We get guaranteed output ranges (bounds):
 
 ## Installation
 
-Python 3.11+ and PyTorch 2.0+ are required.
+Python 3.11+ and PyTorch (`>=2.0`, `<2.12`) are required
+(`torchvision >=0.21`).
 It is highly recommended to have a pre-installed PyTorch
 that matches your system and our version requirement
 (see [PyTorch Get Started](https://pytorch.org/get-started)).
-Then you can install `auto_LiRPA` via:
+
+Install with [`uv`](https://docs.astral.sh/uv/) (recommended):
+
+```bash
+git clone https://github.com/Verified-Intelligence/auto_LiRPA
+cd auto_LiRPA
+uv sync
+source .venv/bin/activate
+```
+
+Or install with `pip`:
 
 ```bash
 git clone https://github.com/Verified-Intelligence/auto_LiRPA

@@ -44,7 +44,8 @@ class BoundDropout(Bound):
             self.ratio = inputs[1]
         if self.ratio >= 1:
             raise ValueError('Ratio in dropout should be less than 1')
-        self.mask = torch.rand(x.shape, device=self.ratio.device) > self.ratio
+        # self.ratio is a static float attribute (torch >= 2.9 ONNX export)
+        self.mask = torch.rand(x.shape, device=x.device) > self.ratio
         return x * self.mask / (1 - self.ratio)
 
     def _check_forward(self):

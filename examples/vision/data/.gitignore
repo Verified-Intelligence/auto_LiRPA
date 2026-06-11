@@ -1,2 +1,5 @@
+# README: .github/workflows/CI.yml replaces the MNIST/ and
+# cifar-10-batches-py/ folders here with symlinks into a persistent cache volume. 
+# So if you need to track cifar-10-batches-py or MNIST/, take care of the CI.yml file as well. 
 MNIST
 cifar*

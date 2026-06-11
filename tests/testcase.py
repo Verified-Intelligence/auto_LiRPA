@@ -20,6 +20,7 @@ class TestCase(unittest.TestCase):
         self.atol = 1e-6
         self.default_dtype = dtype
         self.default_device = device
+        self.seed = seed
         set_default_dtype_device(dtype, device)
         self.set_seed(seed)
         data_path = 'data_64/' if dtype == torch.float64 else 'data/'
@@ -35,6 +36,7 @@ class TestCase(unittest.TestCase):
 
     def setUp(self):
         """Load the reference result if it exists."""
+        self.set_seed(self.seed)
         if self.generate:
             self.reference = None
         else:
