@@ -5,6 +5,7 @@ import itertools
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.operators.softmax import BoundSoftmax
+from auto_LiRPA.operators.base import Interval
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE
 
 
@@ -98,7 +99,8 @@ class TestSoftmaxBackward(TestCase):
 
             # 1. Evaluate Analytical Jacobians
             (D_L, u_L, v_L), b_L = node._softmax_lse_lower(lb, ub, x0)
-            (D_U, u_U, v_U), b_U = node._softmax_lse_upper(lb, ub, x0, sm_x0, mx0, se0, eps)
+            (D_U, u_U, v_U), b_U = node._softmax_lse_upper(
+                lb, ub, x0, sm_x0, mx0, se0)
 
             J_L = torch.diag_embed(D_L) - u_L.unsqueeze(-1) * v_L.unsqueeze(-2)
             J_U = torch.diag_embed(D_U) - u_U.unsqueeze(-1) * v_U.unsqueeze(-2)
@@ -113,12 +115,13 @@ class TestSoftmaxBackward(TestCase):
             # 3. Finite Difference Check
             def _eval(x, mode='lower'):
                 if mode == 'lower':
-                    (D, u, v), b = node._softmax_lse_lower(lb, ub, x, eps)
+                    (D, u, v), b = node._softmax_lse_lower(lb, ub, x)
                 else:
                     sm = torch.softmax(x, dim=-1)
                     mx = x.max(dim=-1, keepdim=True)[0]
                     se = torch.exp(x - mx).sum(dim=-1, keepdim=True)
-                    (D, u, v), b = node._softmax_lse_upper(lb, ub, x, sm, mx, se, eps)
+                    (D, u, v), b = node._softmax_lse_upper(
+                        lb, ub, x, sm, mx, se)
 
                     J = torch.diag_embed(D) - u.unsqueeze(-1) * v.unsqueeze(-2)
                     return (J * x.unsqueeze(-2)).sum(dim=-1) + b
@@ -138,6 +141,74 @@ class TestSoftmaxBackward(TestCase):
             # Guarantees the precision is reset even if assertions fail
             torch.set_default_dtype(prev_dtype)
 
+    @staticmethod
+    def _get_affine_bounds(lb, ub):
+        node = BoundSoftmax.__new__(BoundSoftmax)
+        x0 = (lb + ub) / 2
+        sm_x0 = torch.softmax(x0, dim=-1)
+        max_x0 = x0.max(dim=-1, keepdim=True).values
+        sum_exp_x0 = torch.exp(x0 - max_x0).sum(dim=-1, keepdim=True)
+
+        (d_l, u_l, v_l), b_l = node._softmax_lse_lower(lb, ub, x0)
+        (d_u, u_u, v_u), b_u = node._softmax_lse_upper(
+            lb, ub, x0, sm_x0, max_x0, sum_exp_x0)
+        j_l = torch.diag_embed(d_l) - u_l.unsqueeze(-1) * v_l.unsqueeze(-2)
+        j_u = torch.diag_embed(d_u) - u_u.unsqueeze(-1) * v_u.unsqueeze(-2)
+        return j_l, b_l, j_u, b_u
+
+    def _check_narrow_interval_soundness(self):
+        """Check affine bounds when direct exponential secants lose precision."""
+        torch.manual_seed(1)
+        batch_size, features, samples = 4, 32, 2000
+
+        for width in (2e-5, 1e-3):
+            # Exercise both the narrow expm1 secant path and a wider interval
+            # where the ordinary secant formula remains numerically stable.
+            lb = torch.randn(batch_size, features) * 3
+            ub = lb + torch.rand_like(lb) * width
+            j_l, b_l, j_u, b_u = self._get_affine_bounds(lb, ub)
+
+            x = lb.unsqueeze(0) + torch.rand(
+                samples, batch_size, features) * (ub - lb).unsqueeze(0)
+            actual = torch.softmax(x, dim=-1)
+            lower = torch.einsum("bkj,nbj->nbk", j_l, x) + b_l
+            upper = torch.einsum("bkj,nbj->nbk", j_u, x) + b_u
+
+            # Sample the input box and ensure the generated affine lower and
+            # upper bounds enclose the actual Softmax outputs.
+            assert (lower - actual).max().item() <= 2e-6
+            assert (actual - upper).max().item() <= 2e-6
+            self.result.append((j_l, b_l, j_u, b_u))
+
+    def _check_interval_bounds(self):
+        """Check finite and non-finite branches of Softmax IBP."""
+        node = BoundSoftmax.__new__(BoundSoftmax)
+        node.option = "lse"
+        node.perturbed = True
+        node.axis = -1
+
+        # For finite bounds, compare against the analytical interval upper
+        # bound. This detects any epsilon that incorrectly lowers the result.
+        lb = torch.tensor([[-2.0, -1.0, 0.0]], dtype=torch.float64)
+        ub = torch.tensor([[-1.5, -0.5, 0.5]], dtype=torch.float64)
+        upper = node.interval_propagate(Interval(lb, ub)).upper
+        shift = ub.max(dim=-1, keepdim=True).values
+        exp_lb, exp_ub = torch.exp(lb - shift), torch.exp(ub - shift)
+        exact_upper = exp_ub / (
+            exp_lb.sum(dim=-1, keepdim=True) - exp_lb + exp_ub)
+        assert torch.equal(upper, exact_upper)
+        self.result.append(upper)
+
+        # Infinite intermediate bounds can be produced by IBP.
+        # Softmax must return its known [0, 1] range instead of propagating NaN.
+        lb = torch.tensor([[-torch.inf, -1.0, 0.0]])
+        ub = torch.tensor([[torch.inf, 1.0, 2.0]])
+        output = node.interval_propagate(Interval(lb, ub))
+        lower, upper = output.lower, output.upper
+        assert torch.equal(lower, torch.zeros_like(lower))
+        assert torch.equal(upper, torch.ones_like(upper))
+        self.result.append((lower, upper))
+
     def test(self):
         self.result = []
         batch_size = 2
@@ -156,6 +227,8 @@ class TestSoftmaxBackward(TestCase):
         # ----- 2. Mathematical Validity & Jacobian Finite Differences -----
         self._check_jacobian_and_fd(K=4, bound_width=2.0, batch_size=batch_size)
         self._check_jacobian_and_fd(K=3, bound_width=1.0, batch_size=batch_size)
+        self._check_narrow_interval_soundness()
+        self._check_interval_bounds()
 
         # ----- 3. Soundness Across Configurations -----
         torch.manual_seed(123)

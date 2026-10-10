@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from collections import OrderedDict
@@ -26,22 +26,26 @@ if TYPE_CHECKING:
 
 
 class SparseBeta:
-    def __init__(self, shape, bias=False, betas=None, device='cpu'):
+    def __init__(self, shape, bias=False, betas=None, device='cpu', dtype=None):
+        # Keep the historical constructor behavior for external callers. Graph-owned
+        # creation paths pass the node computation dtype explicitly.
+        if dtype is None:
+            dtype = torch.get_default_dtype()
         self.device = device
-        self.val = torch.zeros(shape)
+        self.val = torch.zeros(shape, dtype=dtype, device=device)
         self.loc = torch.zeros(shape, dtype=torch.long, device=device)
-        self.sign = torch.zeros(shape, device=device)
-        self.bias = torch.zeros(shape, device=device) if bias else None
+        self.sign = torch.zeros(shape, dtype=dtype, device=device)
+        self.bias = (torch.zeros(shape, dtype=dtype, device=device)
+                     if bias else None)
         if betas:
             for bi in range(len(betas)):
                 if betas[bi] is not None:
                     self.val[bi, :len(betas[bi])] = betas[bi]
-        self.val = self.val.detach().to(
-            device, non_blocking=True).requires_grad_()
+        self.val = self.val.detach().requires_grad_()
 
     @staticmethod
-    def new_empty():
-        return SparseBeta((0, 0))
+    def new_empty(*, device, dtype):
+        return SparseBeta((0, 0), device=device, dtype=dtype)
 
     def apply_splits(self, history, key):
         loc_numpy = np.zeros(self.loc.shape, dtype=np.int32)
@@ -64,14 +68,17 @@ class SparseBeta:
             self.bias.copy_(torch.from_numpy(bias_numpy), non_blocking=True)
 
     def to(self, *, device=None, dtype=None, non_blocking=False):
-        new_sparse_beta = SparseBeta.new_empty()
+        target_device = device if device is not None else self.device
+        target_dtype = dtype if dtype is not None else self.val.dtype
+        new_sparse_beta = SparseBeta.new_empty(
+            device=target_device, dtype=target_dtype)
 
-        new_sparse_beta.device = device if device is not None else self.device
+        new_sparse_beta.device = target_device
         new_sparse_beta.val = self.val.to(
             device=new_sparse_beta.device,
-            dtype=dtype if dtype is not None else self.val.dtype,
+            dtype=target_dtype,
             non_blocking=non_blocking,
-        )
+        ).detach().requires_grad_(self.val.requires_grad)
         new_sparse_beta.loc = self.loc.to(
             device=new_sparse_beta.device,
             dtype=self.loc.dtype,
@@ -79,20 +86,21 @@ class SparseBeta:
         )
         new_sparse_beta.sign = self.sign.to(
             device=new_sparse_beta.device,
-            dtype=self.sign.dtype,
+            dtype=target_dtype,
             non_blocking=non_blocking,
         )
         if self.bias is not None:
             new_sparse_beta.bias = self.bias.to(
                 device=new_sparse_beta.device,
-                dtype=dtype if dtype is not None else self.bias.dtype,
+                dtype=target_dtype,
                 non_blocking=non_blocking,
             )
 
         return new_sparse_beta
 
     def mask_batch_dim_inplace(self, mask: torch.Tensor):
-        self.val = self.val[mask, :]
+        self.val = self.val[mask, :].detach().requires_grad_(
+            self.val.requires_grad)
         self.loc = self.loc[mask, :]
         self.sign = self.sign[mask, :]
         if self.bias is not None:
@@ -101,20 +109,21 @@ class SparseBeta:
 def get_split_nodes(self: 'BoundedModule'):
     self.split_nodes = []
     self.split_activations = {}
+    self._update_bound_ancestors(self[self.final_name])
     splittable_activations = self.get_splittable_activations()
-    self._set_used_nodes(self[self.final_name])
-    for layer in self.layers_requiring_bounds:
-        split_activations_ = []
-        for activation_name in layer.output_name:
-            activation = self[activation_name]
-            if activation in splittable_activations:
-                split_activations_.append(
-                    (activation, activation.inputs.index(layer)))
-        if split_activations_:
-            if layer.lower is None and layer.upper is None:
+    split_activations_by_layer = {}
+    for activation in splittable_activations:
+        for input_index, layer in enumerate(activation.inputs):
+            if not layer.perturbed:
                 continue
+            split_activations_by_layer.setdefault(layer.name, []).append(
+                (activation, input_index))
+    for layer in self.layers_requiring_bounds:
+        if (layer.name in split_activations_by_layer
+                and not (layer.lower is None and layer.upper is None)):
             self.split_nodes.append(layer)
-            self.split_activations[layer.name] = split_activations_
+            self.split_activations[layer.name] = (
+                split_activations_by_layer[layer.name])
     return self.split_nodes, self.split_activations
 
 
@@ -171,7 +180,7 @@ def set_beta_cuts(self: 'BoundedModule', parameters, lr_cut_beta, betas,
 def reset_beta(self: 'BoundedModule', node, shape, betas, bias=False,
                start_nodes=None):
     # Create only the non-zero beta. For each layer, it is padded to maximal length.
-    # We create tensors on CPU first, and they will be transferred to GPU after initialized.
+    # Create sparse beta state directly with the requested dtype and device.
     if self.bound_opts.get('enable_opt_interm_bounds', False):
         node.sparse_betas = {
             key: SparseBeta(
@@ -179,11 +188,13 @@ def reset_beta(self: 'BoundedModule', node, shape, betas, bias=False,
                 betas=[(betas[j][i] if betas[j] is not None else None)
                         for j in range(len(betas))],
                 device=self.device, bias=bias,
+                dtype=self.get_output_dtype(node),
             ) for i, key in enumerate(start_nodes)
         }
     else:
         node.sparse_betas = [SparseBeta(
-            shape, betas=betas, device=self.device, bias=bias)]
+            shape, betas=betas, device=self.device, bias=bias,
+            dtype=self.get_output_dtype(node))]
 
 
 def build_beta(
@@ -191,6 +202,7 @@ def build_beta(
     shape,
     betas,
     device,
+    dtype=None,
     bias=False,
     start_nodes=None,
 ):
@@ -210,11 +222,15 @@ def build_beta(
                 ],
                 device=device,
                 bias=bias,
+                dtype=dtype,
             )
             for i, key in enumerate(start_nodes)
         }
     else:
-        sparse_betas = [SparseBeta(shape, betas=betas, device=device, bias=bias)]
+        sparse_betas = [
+            SparseBeta(
+                shape, betas=betas, device=device, bias=bias, dtype=dtype)
+        ]
     return sparse_betas
 
 
@@ -245,7 +261,9 @@ def beta_crown_backward_bound(self: 'BoundedModule', node, lA, uA, start_node=No
         beta_values = (node.sparse_betas[start_node.name].val
                        * node.sparse_betas[start_node.name].sign)
         beta_indices = node.sparse_betas[start_node.name].loc
-        node.masked_beta = torch.zeros(2, *node.shape).reshape(2, -1).to(A.patches.dtype)
+        node.masked_beta = torch.zeros(
+            2, *node.shape, dtype=A.patches.dtype,
+            device=A.patches.device).reshape(2, -1)
         node.non_deter_scatter_add(
             node.masked_beta, dim=1, index=beta_indices,
             src=beta_values.to(node.masked_beta.dtype))

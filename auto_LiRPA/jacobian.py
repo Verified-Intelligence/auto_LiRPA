@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Handle Jacobian bounds."""
@@ -67,8 +67,13 @@ def expand_jacobian_node(self, jacobian_node):
     # not the accurate values.
     grad = {}
     # Dummy values in grad_start
-    grad_start = torch.ones(batch_size, output_dim,
-                            *output_node.output_shape[1:], device=self.device)
+    grad_start = torch.ones(
+        batch_size,
+        output_dim,
+        *output_node.output_shape[1:],
+        dtype=self.get_output_dtype(output_node),
+        device=self.device,
+    )
     grad[output_node.name] = grad_start
     input_node_found = False
 
@@ -87,7 +92,7 @@ def expand_jacobian_node(self, jacobian_node):
         if node == input_node:
             input_node_found = True
             continue
-        elif node.no_jacobian or not node.from_input:
+        elif node.blocks_jacobian or not node.input_dependent:
             continue
         else:
             node_grad_ori[node.name] = node.build_gradient_node(grad[node.name])
@@ -122,7 +127,7 @@ def expand_jacobian_node(self, jacobian_node):
         if node == input_node:
             self.replace_node(jacobian_node, grad_node[node.name])
             continue
-        if node.no_jacobian or not node.from_input:
+        if node.blocks_jacobian or not node.input_dependent:
             continue
 
         logger.debug(f'Converting gradient node for {node}')

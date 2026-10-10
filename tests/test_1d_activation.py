@@ -1,7 +1,6 @@
 """Test one dimensional activation functions (e.g., ReLU, tanh, exp, sin, etc)"""
 import functools
 
-import pytest
 import torch
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor
@@ -130,19 +129,6 @@ class Test1DActivation(TestCase):
                 logger.warning(f'input_lb={input_lb[0,i]:8.3f}, input_ub={input_ub[0,i]:8.3f}, lb={output_lb[0,i]:8.3f}, ref_lb={ref_output_lb[0,i]:8.3f}, ub={output_ub[0,i]:8.3f}, ref_ub={ref_output_ub[0,i]:8.3f}')
         assert torch.all(output_ub + 1e-5 >= ref_output_ub)
         assert torch.all(output_lb - 1e-5 <= ref_output_lb)
-
-    @pytest.mark.skip(reason="Known issue: https://github.com/Verified-Intelligence/Verifier_Development/issues/164")
-    def test_tan(self):
-        # Test tan(x) in different periods.
-        for i in range(-5, 5):
-            self.create_test(
-                act_func=torch.tan,
-                low=-0.5*torch.pi + i*torch.pi + 1e-20,
-                high=0.5*torch.pi + i*torch.pi - 1e-20, method='IBP')
-            self.create_test(
-                act_func=torch.tan,
-                low=-0.5*torch.pi + i*torch.pi + 1e-20,
-                high=0.5*torch.pi + i*torch.pi - 1e-20, method='CROWN')
 
     def test_acts(self):
         for i, act_func in enumerate([torch.nn.functional.relu,

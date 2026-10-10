@@ -1,12 +1,39 @@
 import copy
 import subprocess
 import numpy as np
+import pytest
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE 
 import sys
 sys.path.append('../examples/vision')
 import models
-from auto_LiRPA import BoundedModule
+from auto_LiRPA import BoundedModule, BoundedParameter
 from auto_LiRPA.perturbations import *
+
+
+@pytest.mark.parametrize('method', ['IBP', 'CROWN'])
+def test_parameter_only_branch_preserves_perturbation(method):
+    """A parameter-derived activation retains the parameter's interval."""
+    class BiasBranch(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bias = BoundedParameter(
+                torch.tensor([0.25]),
+                PerturbationLpNorm(norm=np.inf, eps=0.5))
+
+        def forward(self, x):
+            return x + torch.relu(-self.bias)
+
+    x = torch.tensor([[2.0], [4.0]])
+    model = BoundedModule(
+        BiasBranch(), x, device='cpu',
+        bound_opts={'forward_before_compute_bounds': True})
+    # -bias spans [-0.75, 0.25], so ReLU contributes [0, 0.25]. Its
+    # concrete value is zero; cached evaluations must retain this uncertainty.
+    # Exercise both fresh bounds and reuse of the previous model input.
+    for inputs in ((x,), None):
+        lower, upper = model.compute_bounds(x=inputs, method=method)
+        torch.testing.assert_close(lower, x)
+        torch.testing.assert_close(upper, x + 0.25)
 
 
 class TestWeightPerturbation(TestCase):

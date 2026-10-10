@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from .bound_ops import *
@@ -126,8 +126,9 @@ def _build_solver_input(self: 'BoundedModule', node):
     one_var = self.solver_model.addVar(lb=1, ub=1, obj=0, vtype=grb.GRB.CONTINUOUS, name='one')
     neg_one_var = self.solver_model.addVar(lb=-1, ub=-1, obj=0, vtype=grb.GRB.CONTINUOUS, name='neg_one')
 
-    x_L = node.value - node.perturbation.eps if node.perturbation.x_L is None else node.perturbation.x_L
-    x_U = node.value + node.perturbation.eps if node.perturbation.x_U is None else node.perturbation.x_U
+    value = self.get_forward_value(node)
+    x_L = value - node.perturbation.eps if node.perturbation.x_L is None else node.perturbation.x_L
+    x_U = value + node.perturbation.eps if node.perturbation.x_U is None else node.perturbation.x_U
     x_L = x_L.min(dim=0).values
     x_U = x_U.max(dim=0).values
 
@@ -157,10 +158,10 @@ def _build_solver_input(self: 'BoundedModule', node):
             flat_inp_gurobi_vars = flatten(inp_gurobi_vars)
         else:
             flat_inp_gurobi_vars = inp_gurobi_vars
-        if hasattr(node.value[0], "flatten"):
-            flat_node_value = node.value.flatten().tolist()
+        if hasattr(value[0], "flatten"):
+            flat_node_value = value.flatten().tolist()
         else:
-            flat_node_value = node.value
+            flat_node_value = value
         assert len(flat_inp_gurobi_vars) == len(flat_node_value), "The input doesn't match the variables"
 
         if node.perturbation.norm == 2:
@@ -217,4 +218,3 @@ def _build_solver_input(self: 'BoundedModule', node):
     self.input_vars = inp_gurobi_vars
     self.solver_model.update()
     return inp_gurobi_vars
-

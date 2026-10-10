@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from types import SimpleNamespace
@@ -20,21 +20,18 @@ import torch
 from torch.autograd import Function
 
 from .activation_base import BoundActivation
+from .base import Interval, OperatorCapabilityError, OperatorDomainError
 from .s_shaped import BoundSShaped
 
 
 class BoundSin(BoundSShaped):
-    # Lookup tables shared by all BoundSin classes.
-    xl_lower_tb = None
-    xl_upper_tb = None
-    xu_lower_tb = None
-    xu_upper_tb = None
     func, d_func = torch.sin, torch.cos
     n_table_entries = 1001
 
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.ibp_intermediate = True
+        self.activation_name = 'sin'
         self.act_func = torch.sin
         self.d_act_func = torch.cos
 
@@ -42,15 +39,43 @@ class BoundSin(BoundSShaped):
         self.ibp_max_point = torch.pi / 2
         self.ibp_min_point = torch.pi * 3 / 2
 
+        self._precomputed_table_key = None
+        self.all_table_x = None
+        self.xl_lower_tb = None
+        self.xl_upper_tb = None
+        self.xu_lower_tb = None
+        self.xu_upper_tb = None
+
+    def _ensure_precomputed(self, reference):
+        """Create periodic relaxation tables for this node's graph state."""
+        key = (reference.dtype, reference.device)
+        tables = (
+            self.d_lower, self.d_upper, self.all_table_x,
+            self.xl_lower_tb, self.xl_upper_tb,
+            self.xu_lower_tb, self.xu_upper_tb,
+        )
+        if key == self._precomputed_table_key and all(
+                table is not None for table in tables):
+            return
         self.all_table_x = torch.linspace(
-            0, 2 * torch.pi, BoundSin.n_table_entries, device=self.device)
-        self.precompute_relaxation(self.act_func, self.d_act_func, x_limit = torch.pi / 2)
-        if BoundSin.xl_lower_tb is None:
-            # Generate look-up tables.
-            BoundSin.xl_lower_tb = BoundSin.get_lower_left_bound(self.all_table_x)
-            BoundSin.xl_upper_tb = BoundSin.get_upper_left_bound(self.all_table_x)
-            BoundSin.xu_lower_tb = BoundSin.get_lower_right_bound(self.all_table_x)
-            BoundSin.xu_upper_tb = BoundSin.get_upper_right_bound(self.all_table_x)
+            0, 2 * torch.pi, BoundSin.n_table_entries,
+            dtype=reference.dtype, device=reference.device)
+        self.precompute_relaxation(
+            self.act_func, self.d_act_func, x_limit=torch.pi / 2,
+            reference=reference)
+        self.xl_lower_tb = self.get_lower_left_bound(self.all_table_x)
+        self.xl_upper_tb = self.get_upper_left_bound(self.all_table_x)
+        self.xu_lower_tb = self.get_lower_right_bound(self.all_table_x)
+        self.xu_upper_tb = self.get_upper_right_bound(self.all_table_x)
+        self._precomputed_table_key = key
+
+    def bound_relax(self, x, init=False, dim_opt=None):
+        if self.activation_bound_option == 'same-slope':
+            raise OperatorCapabilityError(
+                self.activation_name,
+                'same-slope relaxation is not supported for periodic operators',
+            )
+        return super().bound_relax(x, init=init, dim_opt=dim_opt)
 
     def d2_act_func(self, x):
         return -torch.sin(x)
@@ -59,7 +84,8 @@ class BoundSin(BoundSShaped):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
         shape = [size_spec] + list(l.shape)
-        alpha = torch.empty(12, *shape, device=l.device)
+        alpha = torch.empty(
+            12, *shape, dtype=l.dtype, device=l.device)
         alpha.data[:4] = ((l + u) / 2).unsqueeze(0).expand(4, *shape)
         alpha.data[4:6] = self.tp_both_lower_init[name_start].expand(2, *shape)
         alpha.data[6:8] = self.tp_both_upper_init[name_start].expand(2, *shape)
@@ -299,10 +325,10 @@ class BoundSin(BoundSShaped):
         # Find the indice within the lookup table from 0 - 2pi.
         indices_lb = lb.div(step).long()
         indices_ub = ub.div(step).long()
-        tangent_left_lower = BoundSin.xl_lower_tb[0][indices_lb]
-        tangent_left_upper = BoundSin.xl_upper_tb[0][indices_lb]
-        tangent_right_lower = BoundSin.xu_lower_tb[0][indices_ub]
-        tangent_right_upper = BoundSin.xu_upper_tb[0][indices_ub]
+        tangent_left_lower = self.xl_lower_tb[0][indices_lb]
+        tangent_left_upper = self.xl_upper_tb[0][indices_lb]
+        tangent_right_lower = self.xu_lower_tb[0][indices_ub]
+        tangent_right_upper = self.xu_upper_tb[0][indices_ub]
         if self.opt_stage in ['opt', 'reuse']:
             if not hasattr(self, 'alpha'):
                 # Raise an error if alpha is not created.
@@ -318,11 +344,11 @@ class BoundSin(BoundSShaped):
         else:
             # add cycles to optimizable tangent region
             unfolded_left_lower = (tangent_left_lower +
-                BoundSin.xl_lower_tb[1][indices_lb] + lb_cycles)
-            left_lower_ends = 1.5*torch.pi + BoundSin.xl_lower_tb[1][indices_lb] + lb_cycles
+                self.xl_lower_tb[1][indices_lb] + lb_cycles)
+            left_lower_ends = 1.5*torch.pi + self.xl_lower_tb[1][indices_lb] + lb_cycles
             unfolded_right_lower = (tangent_right_lower +
-                BoundSin.xu_lower_tb[1][indices_ub] + ub_cycles)
-            right_lower_ends = 1.5*torch.pi + BoundSin.xu_lower_tb[1][indices_ub] + ub_cycles
+                self.xu_lower_tb[1][indices_ub] + ub_cycles)
+            right_lower_ends = 1.5*torch.pi + self.xu_lower_tb[1][indices_ub] + ub_cycles
             mid = (lower + upper) / 2
 
             leftmost_mask = torch.logical_and(mid < unfolded_left_lower,
@@ -336,17 +362,21 @@ class BoundSin(BoundSShaped):
             right_range_mask = torch.logical_and(~left_range_mask, torch.logical_and(mid >= right_lower_ends,
                 mid < unfolded_right_lower))
 
-            tangent_lower = (leftmost_mask * tangent_left_lower +
-                left_range_mask * (mid - BoundSin.xl_lower_tb[1][indices_lb] - lb_cycles) +
-                inbetween_mask * 1.5*torch.pi + rightmost_mask * tangent_right_lower +
-                right_range_mask * (mid - BoundSin.xu_lower_tb[1][indices_ub] - ub_cycles))
+            tangent_lower = (
+                leftmost_mask * tangent_left_lower
+                + left_range_mask * (
+                    mid - self.xl_lower_tb[1][indices_lb] - lb_cycles)
+                + inbetween_mask.to(mid.dtype) * (1.5 * torch.pi)
+                + rightmost_mask * tangent_right_lower
+                + right_range_mask * (
+                    mid - self.xu_lower_tb[1][indices_ub] - ub_cycles))
 
             unfolded_left_upper = (tangent_left_upper +
-                BoundSin.xl_upper_tb[1][indices_lb] + lb_cycles)
-            left_upper_ends = 2.5*torch.pi + BoundSin.xl_upper_tb[1][indices_lb] + lb_cycles
+                self.xl_upper_tb[1][indices_lb] + lb_cycles)
+            left_upper_ends = 2.5*torch.pi + self.xl_upper_tb[1][indices_lb] + lb_cycles
             unfolded_right_upper = (tangent_right_upper +
-                BoundSin.xu_upper_tb[1][indices_ub] + ub_cycles)
-            right_upper_ends = 2.5*torch.pi + BoundSin.xu_upper_tb[1][indices_ub] + ub_cycles
+                self.xu_upper_tb[1][indices_ub] + ub_cycles)
+            right_upper_ends = 2.5*torch.pi + self.xu_upper_tb[1][indices_ub] + ub_cycles
             mid = (lower + upper) / 2
 
             leftmost_mask = torch.logical_and(mid < unfolded_left_upper,
@@ -360,10 +390,14 @@ class BoundSin(BoundSShaped):
             right_range_mask = torch.logical_and(~left_range_mask, torch.logical_and(mid >= right_upper_ends,
                 mid < unfolded_right_upper))
 
-            tangent_upper = (leftmost_mask * tangent_left_upper +
-                left_range_mask * (mid - BoundSin.xl_upper_tb[1][indices_lb] - lb_cycles) +
-                inbetween_mask * 2.5*torch.pi + rightmost_mask * tangent_right_upper +
-                right_range_mask * (mid - BoundSin.xu_upper_tb[1][indices_ub] - ub_cycles))
+            tangent_upper = (
+                leftmost_mask * tangent_left_upper
+                + left_range_mask * (
+                    mid - self.xl_upper_tb[1][indices_lb] - lb_cycles)
+                + inbetween_mask.to(mid.dtype) * (2.5 * torch.pi)
+                + rightmost_mask * tangent_right_upper
+                + right_range_mask * (
+                    mid - self.xu_upper_tb[1][indices_ub] - ub_cycles))
 
             if self.opt_stage == 'init':
                 ns = self._start
@@ -373,13 +407,13 @@ class BoundSin(BoundSShaped):
         d_lower = BoundSin.d_func(tangent_lower)
         b_lower = BoundSin.func(tangent_lower) - d_lower * (tangent_lower +
                     torch.where(tangent_lower <= 1.5*torch.pi,
-                        BoundSin.xl_lower_tb[1][indices_lb] + lb_cycles,
-                        BoundSin.xu_lower_tb[1][indices_ub] + ub_cycles))
+                        self.xl_lower_tb[1][indices_lb] + lb_cycles,
+                        self.xu_lower_tb[1][indices_ub] + ub_cycles))
         d_upper = BoundSin.d_func(tangent_upper)
         b_upper = BoundSin.func(tangent_upper) - d_upper * (tangent_upper +
                     torch.where(tangent_upper <= 2.5*torch.pi,
-                        BoundSin.xl_upper_tb[1][indices_lb] + lb_cycles,
-                        BoundSin.xu_upper_tb[1][indices_ub] + ub_cycles))
+                        self.xl_upper_tb[1][indices_lb] + lb_cycles,
+                        self.xu_upper_tb[1][indices_ub] + ub_cycles))
         return d_lower, b_lower, d_upper, b_upper
 
     def forward(self, x):
@@ -390,7 +424,7 @@ class BoundSin(BoundSShaped):
         def check_crossing(ll, uu, point):
             return ((((uu - point) / (2 * torch.pi)).floor()
                      - ((ll - point) / (2 * torch.pi)).floor()) > 0).to(h_Ls.dtype)
-        h_L, h_U = v[0][0], v[0][1]
+        h_L, h_U = v[0].lower, v[0].upper
         h_Ls, h_Us = self.forward(h_L), self.forward(h_U)
         # If crossing pi/2, then max is fixed 1.0
         max_mask = check_crossing(h_L, h_U, self.ibp_max_point)
@@ -400,7 +434,7 @@ class BoundSin(BoundSShaped):
         ub = max_mask + (1 - max_mask) * ub
         lb = torch.min(h_Ls, h_Us)
         lb = - min_mask + (1 - min_mask) * lb
-        return lb, ub
+        return Interval(lb, ub)
 
     def bound_relax_branch(self, lb, ub):
         dtype = lb.dtype
@@ -445,6 +479,7 @@ class BoundSin(BoundSShaped):
 class BoundCos(BoundSin):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
+        self.activation_name = 'cos'
         self.ibp_max_point = 0.0
         self.ibp_min_point = torch.pi
 
@@ -470,9 +505,22 @@ class BoundSec(BoundActivation):
     def forward(self, x):
         return 1. / torch.cos(x)
 
+    @staticmethod
+    def _check_supported_domain(lower, upper):
+        first_pole_index = torch.ceil(
+            (lower - 0.5 * torch.pi) / torch.pi)
+        first_pole = 0.5 * torch.pi + first_pole_index * torch.pi
+        if (first_pole <= upper).any():
+            raise OperatorDomainError(
+                'sec',
+                'pre-activation bounds cross a pole; split the input interval')
+        if (lower <= -torch.pi / 2).any() or (upper >= torch.pi / 2).any():
+            raise OperatorCapabilityError(
+                'sec',
+                'bound propagation is implemented only within (-pi/2, pi/2)')
+
     def bound_relax(self, x, init=False):
-        assert x.lower.min() > -torch.pi / 2
-        assert x.upper.max() < torch.pi / 2
+        self._check_supported_domain(x.lower, x.upper)
 
         x_L = x.lower
         x_U = x.upper
@@ -494,14 +542,13 @@ class BoundSec(BoundActivation):
         self.lb = -lower_k * mid + y_mid
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
-        assert h_L.min() > -torch.pi / 2
-        assert h_U.max() < torch.pi / 2
+        h_L, h_U = v[0].lower, v[0].upper
+        self._check_supported_domain(h_L, h_U)
         y_L = self.forward(h_L)
         y_U = self.forward(h_U)
         lower = (h_U < 0) * (y_U - 1) + (h_L > 0) * (y_L - 1) + 1
         upper = torch.max(y_L, y_U)
-        return lower, upper
+        return Interval(lower, upper)
 
 
 class SinGradOp(Function):

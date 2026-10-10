@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from torch.nn import Module
@@ -19,6 +19,18 @@ from .base import *
 from ..patches import Patches, patches_to_matrix
 from .linear import BoundLinear
 from .constant import BoundConstant
+
+
+def _preserve_input_perturbation_through_shape(node, intervals, state):
+    """Apply a batch-preserving shape operation to the input center."""
+    if state is None:
+        return None
+    input_center, perturbation = state
+    other_inputs = [item.lower for item in intervals[1:]]
+    center = node.forward(input_center, *other_inputs)
+    if center.ndim == 0 or center.shape[0] != input_center.shape[0]:
+        return None
+    return center, perturbation
 
 
 def _preprocess_patch_for_reshape(A, output_shape):
@@ -57,6 +69,10 @@ class BoundReshape(Bound):
         # It can be set to `view`, so that `view` instead of `reshape` will be used.
         self.option = options.get('reshape', 'reshape')
 
+    def _propagate_input_perturbation_state(self, v, states):
+        return _preserve_input_perturbation_through_shape(
+            self, v, states[0])
+
     def forward(self, x, shape):
         shape = list(shape)
         for i in range(len(shape)):
@@ -92,12 +108,15 @@ class BoundReshape(Bound):
     def bound_dynamic_forward(self, x, shape, max_dim=None, offset=0):
         w = x.lw.reshape(x.lw.shape[0], x.lw.shape[1], *self.shape[1:])
         b = x.lb.reshape(x.lb.shape[0], *self.shape[1:])
-        return LinearBound(w, b, w, b, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
+        return LinearBound(w, b, w, b, tot_dim=x.tot_dim)
 
     def interval_propagate(self, *v):
-        return Interval.make_interval(
-            self.forward(v[0][0], v[1][0]),
-            self.forward(v[0][1], v[1][0]), v[0])
+        if self.is_input_perturbed(1):
+            raise OperatorCapabilityError(
+                self, 'IBP requires a fixed output shape')
+        lower = self.forward(v[0].lower, v[1].lower)
+        return Interval(
+            lower, self.forward(v[0].upper, v[1].lower))
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         if isinstance(v[0], Tensor):
@@ -124,6 +143,14 @@ class BoundUnsqueeze(Bound):
         else:
             self.axes = None
 
+    def _propagate_input_perturbation_state(self, v, states):
+        axis = self.axes if self.axes is not None else v[1].lower.item()
+        axis = self.make_axis_non_negative(axis, 'output')
+        if axis == 0:
+            return None
+        return _preserve_input_perturbation_through_shape(
+            self, v, states[0])
+
     def forward(self, *x):
         data = x[0]
         if self.axes is not None:
@@ -137,7 +164,8 @@ class BoundUnsqueeze(Bound):
         if self.axes is not None:
             axes = self.make_axis_non_negative(self.axes, 'output')
         else:
-            axes = self.make_axis_non_negative(x[1].value.item(), 'output')
+            axes = self.make_axis_non_negative(
+                x[1].forward_value.item(), 'output')
         if axes == 0:
             raise ValueError("Unsqueezing with axes == 0 is not allowed")
         else:
@@ -146,7 +174,8 @@ class BoundUnsqueeze(Bound):
                     return Patches(
                         last_A.patches.squeeze(axes - 5),
                         last_A.stride, last_A.padding, last_A.shape,
-                        last_A.identity, last_A.unstable_idx, last_A.output_shape)
+                        last_A.identity, last_A.unstable_idx, last_A.output_shape,
+                        padding_pos_masked=last_A.padding_pos_masked)
                 elif last_A is not None:
                     return last_A.squeeze(axes + 1)
                 else:
@@ -262,6 +291,14 @@ class BoundSqueeze(Bound):
         else:
             self.axes = None
 
+    def _propagate_input_perturbation_state(self, v, states):
+        axis = self.axes if self.axes is not None else v[1].lower.item()
+        axis = self.make_axis_non_negative(axis, 'input')
+        if axis == 0:
+            return None
+        return _preserve_input_perturbation_through_shape(
+            self, v, states[0])
+
     def forward(self, *x):
         data = x[0]
         if self.axes is not None:
@@ -274,7 +311,8 @@ class BoundSqueeze(Bound):
         if self.axes is not None:
             axes = self.axes
         else:
-            axes = self.make_axis_non_negative(x[1].value.item(), 'input')
+            axes = self.make_axis_non_negative(
+                x[1].forward_value.item(), 'input')
         if axes == 0:
             raise ValueError("Squeezing with axes == 0 is not allowed")
         return [(last_lA.unsqueeze(axes + 1) if last_lA is not None else None,
@@ -304,6 +342,12 @@ class BoundFlatten(Bound):
         self.use_default_ibp = True
         self.axis = attr['axis']
 
+    def _propagate_input_perturbation_state(self, v, states):
+        if self.make_axis_non_negative(self.axis, 'input') == 0:
+            return None
+        return _preserve_input_perturbation_through_shape(
+            self, v, states[0])
+
     def forward(self, x):
         return torch.flatten(x, self.axis)
 
@@ -317,7 +361,7 @@ class BoundFlatten(Bound):
     def bound_dynamic_forward(self, x, max_dim=None, offset=0):
         w = torch.flatten(x.lw, self.axis + 1)
         b = torch.flatten(x.lb, self.axis)
-        return LinearBound(w, b, w, b, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
+        return LinearBound(w, b, w, b, tot_dim=x.tot_dim)
 
     def bound_forward(self, dim_in, x):
         self.axis = self.make_axis_non_negative(self.axis)
@@ -364,9 +408,12 @@ class BoundATenUnflatten(BoundReshape):
         return super().bound_dynamic_forward(x=x[0], shape=None, max_dim=max_dim, offset=offset)
 
     def interval_propagate(self, x, dim, sizes):
-        return Interval.make_interval(
-            self.forward(x[0], dim[0], sizes[0]),
-            self.forward(x[1], dim[0], sizes[0]), x)
+        if self.is_input_perturbed(1) or self.is_input_perturbed(2):
+            raise OperatorCapabilityError(
+                self, 'IBP requires fixed unflatten dimensions and sizes')
+        lower = self.forward(x.lower, dim.lower, sizes.lower)
+        return Interval(
+            lower, self.forward(x.upper, dim.lower, sizes.lower))
     
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         shape = torch.tensor(v[0].shape[0], *self.shape[1:])
@@ -391,6 +438,12 @@ class BoundTranspose(Bound):
             self.perm_inv_inc_one[self.perm[i] + 1] = i + 1
         self.use_default_ibp = True
         self.ibp_intermediate = True
+
+    def _propagate_input_perturbation_state(self, v, states):
+        if self.perm[0] != 0:
+            return None
+        return _preserve_input_perturbation_through_shape(
+            self, v, states[0])
 
     def forward(self, x):
         return x.permute(*self.perm)

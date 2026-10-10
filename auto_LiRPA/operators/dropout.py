@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from .base import *
@@ -81,7 +81,10 @@ class BoundDropout(Bound):
         if not self.training:
             return v[0]
         self._check_forward()
-        h_L, h_U = v[0]
+        h_L, h_U = v[0].lower, v[0].upper
         lower = h_L * self.mask / (1 - self.ratio)
         upper = h_U * self.mask / (1 - self.ratio)
-        return lower, upper
+        return Interval(lower, upper)
+
+    def _propagate_input_perturbation_state(self, v, states):
+        return states[0] if not self.training else None

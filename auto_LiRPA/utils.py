@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import logging
@@ -366,7 +366,11 @@ class AutoBatchSize:
             return None
         # Only try to update the batch size if the current batch size has
         # been actually used, as indicated by `max_actual_batch_size`
-        if self.device == 'cpu' or self.max_actual_batch_size < self.batch_size:
+        device_type = (
+            torch.device(self.device).type if self.device is not None else None
+        )
+        if (device_type != 'cuda'
+                or self.max_actual_batch_size < self.batch_size):
             return None
         total_vram = torch.cuda.get_device_properties(self.device).total_memory
         current_vram = torch.cuda.memory_reserved(self.device)

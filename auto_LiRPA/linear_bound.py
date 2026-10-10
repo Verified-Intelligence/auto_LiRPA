@@ -11,25 +11,25 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 class LinearBound:
     def __init__(
             self, lw=None, lb=None, uw=None, ub=None, lower=None, upper=None,
-            from_input=None, x_L=None, x_U=None, offset=0, tot_dim=None):
+            x_L=None, x_U=None, tot_dim=None):
         self.lw = lw
         self.lb = lb
         self.uw = uw
         self.ub = ub
         self.lower = lower
         self.upper = upper
-        self.from_input = from_input
         self.x_L = x_L
         self.x_U = x_U
-        # Offset for input variables. Used for batched forward bound
-        # propagation.
-        self.offset = offset
+        # Dynamic forward only: the propagation's shared coefficient-column
+        # layout, mapping a node name to the (start, count) range of columns
+        # it owns. See BoundRelu.bound_dynamic_forward.
+        self.dynamic_variable_ranges = None
         if tot_dim is not None:
             self.tot_dim = tot_dim
         elif lw is not None:

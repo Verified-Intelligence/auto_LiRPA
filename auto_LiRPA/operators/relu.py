@@ -11,11 +11,12 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """BoundRelu."""
 from typing import Optional, Tuple
+from contextlib import contextmanager
 import torch
 from torch import Tensor
 from torch.nn import Module
@@ -29,6 +30,8 @@ from ..utils import unravel_index, prod
 
 
 class BoundTwoPieceLinear(BoundOptimizableActivation):
+    SHARED_ALPHA_KEY = '_shared'
+
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         if options is None:
@@ -56,6 +59,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         self.alpha_lookup_idx = OrderedDict()  # For alpha with sparse spec dimention.
         self.alpha_indices = None  # indices of non-zero alphas.
         verbosity = self.options.get('verbosity', 0)
+        network_shared = self.options['optimize_bound_args']['use_shared_alpha'] == 'network'
+        alpha_size = 1 if network_shared else self.alpha_size
 
         # Alpha can be sparse in both spec dimension, and the C*H*W dimension.
         # We first deal with the sparse-feature alpha, which is sparse in the
@@ -121,8 +126,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                 # For fully connected layer, or conv layer with shared alpha per channel.
                 # shape is (2, sparse_spec, batch, this_layer_shape)
                 # We create sparse specification dimension, where the spec dimension of alpha only includes slopes for unstable neurons in start_node.
-                self.alpha[ns] = torch.empty([self.alpha_size, sparsity + 1, batch_size, *alpha_shape],
-                                             dtype=torch.float, device=ref.device, requires_grad=True)
+                self.alpha[ns] = torch.empty([alpha_size, sparsity + 1, batch_size, *alpha_shape],
+                                             dtype=ref.dtype, device=ref.device, requires_grad=True)
                 self.alpha[ns].data.copy_(alpha_init.data)  # This will broadcast to (2, sparse_spec) dimensions.
                 if verbosity > 0:
                     print(f'layer {self.name} start_node {ns} using sparse-spec alpha {list(self.alpha[ns].size())}'
@@ -152,8 +157,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                     self.alpha_lookup_idx[ns].data[unstable_idx_3d[0], unstable_idx_3d[1], unstable_idx_3d[2]] = indices
             else:
                 # alpha shape is (2, spec, batch, this_layer_shape). "this_layer_shape" may still be sparse.
-                self.alpha[ns] = torch.empty([self.alpha_size, size_s, batch_size, *alpha_shape],
-                                             dtype=torch.float, device=ref.device, requires_grad=True)
+                self.alpha[ns] = torch.empty([alpha_size, size_s, batch_size, *alpha_shape],
+                                             dtype=ref.dtype, device=ref.device, requires_grad=True)
                 self.alpha[ns].data.copy_(alpha_init.data)  # This will broadcast to (2, spec) dimensions
                 if verbosity > 0:
                     print(f'layer {self.name} start_node {ns} using full alpha {list(self.alpha[ns].size())} with unstable '
@@ -162,6 +167,10 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                 self.alpha_lookup_idx[ns] = None
 
     def select_alpha_by_idx(self, last_lA, last_uA, unstable_idx, start_node):
+        if self.options['optimize_bound_args']['use_shared_alpha'] == 'network':
+            # One slope per neuron, across start nodes, specifications and sides.
+            alpha = self.alpha[self.SHARED_ALPHA_KEY]
+            return alpha.expand(self.alpha_size, *alpha.shape[1:]), None
         # Each alpha has shape (2, output_shape, batch_size, *relu_node_shape].
         # If slope is shared, output_shape will be 1.
         # The *relu_node_shape might be sparse (sparse-feature alpha), where the non-zero values are indicated by self.alpha_indices.
@@ -229,6 +238,52 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
             alpha_lookup_idx = None
         return selected_alpha, alpha_lookup_idx
 
+    def shared_alpha(self):
+        """The network-wide alpha, expanded to every neuron, or None.
+
+        Its shape is ``[batch, *neuron_shape]``, including stable neurons.
+        The parameters remain readable after optimization ends.
+        """
+        if self.SHARED_ALPHA_KEY not in self.alpha:
+            return None
+        alpha = self.alpha[self.SHARED_ALPHA_KEY]
+        if self.alpha_indices is not None:
+            alpha = self.reconstruct_full_alpha(
+                alpha[0], (*alpha.shape[1:3], *self.shape), self.alpha_indices)[None]
+        return alpha[0, 0]
+
+    def dynamic_forward_slope(self):
+        """Use shared alpha in optimization/reuse stages, otherwise the default line."""
+        return self.shared_alpha() if self.opt_stage in ('opt', 'reuse') else None
+
+    @contextmanager
+    def temporary_shared_alpha(self, slope=None):
+        """Use a separate same-slope alpha bank and restore the previous bank.
+
+        ``slope`` installs dense parameters shaped ``[batch, *neuron_shape]``;
+        None leaves an empty bank for native alpha initialization. Lookup and
+        patch metadata belong to the bank and are restored with it.
+        Input bounds and propagation caches follow the module's call lifecycle.
+        """
+        saved = (self.alpha, self.alpha_lookup_idx, self.alpha_indices,
+                 self.opt_stage, self.patch_size, self.relu_options, self.cut_used)
+        try:
+            self.alpha = OrderedDict()
+            self.alpha_lookup_idx = OrderedDict()
+            self.alpha_indices = None
+            self.opt_stage = None
+            self.patch_size = {}
+            self.relu_options = 'same-slope'
+            self.cut_used = False
+            if slope is not None:
+                self.alpha[self.SHARED_ALPHA_KEY] = slope[None, None]
+                self.alpha_lookup_idx[self.SHARED_ALPHA_KEY] = None
+                self.opt_reuse()
+            yield
+        finally:
+            (self.alpha, self.alpha_lookup_idx, self.alpha_indices,
+             self.opt_stage, self.patch_size, self.relu_options, self.cut_used) = saved
+
     def reconstruct_full_alpha(self, sparse_alpha, full_alpha_shape, alpha_indices):
         full_alpha = torch.zeros(full_alpha_shape, dtype=sparse_alpha.dtype, device=sparse_alpha.device)
         if len(alpha_indices) == 1:
@@ -271,7 +326,10 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
             # Obtain the new linear relaxation coefficients based on the signs in last_A.
             same_slope = True if self.relu_options == "same-slope" else False
             _A, _bias = multiply_by_A_signs(
-                last_A, d_pos, d_neg, b_pos, b_neg, reduce_bias=reduce_bias, same_slope=same_slope)
+                last_A, d_pos, d_neg, b_pos, b_neg, reduce_bias=reduce_bias,
+                same_slope=same_slope,
+                patches_padding_pos_masked=self.get_bound_opt(
+                    'clampmult_patches_padding_pos_masked', False))
             if isinstance(last_A, Patches):
                 # Save the patch size, which will be used in init_alpha() to determine the number of optimizable parameters.
                 A_prod = _A.patches
@@ -304,7 +362,6 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
             last_lA, last_uA = self.cut_module.relu_cut(
                 start_node, self.name, last_lA, last_uA, current_layer_shape,
                 unstable_idx, batch_mask=self.inputs[0].alpha_beta_update_mask)
-
         # In patches mode we might need an unfold.
         # lower_d, upper_d, lower_b, upper_b: 1, batch, current_c, current_w, current_h or None
         upper_d = maybe_unfold_patches(upper_d, last_lA if last_lA is not None else last_uA)
@@ -505,8 +562,8 @@ class BoundRelu(BoundTwoPieceLinear):
 
         return lb_upper_d, lb_upper_b, ub_upper_d, ub_upper_b
 
-
     def _forward_relaxation(self, x):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='relu')
         self._init_masks(x)
         self.mask_pos = self.mask_pos.to(x.lower)
         self.mask_both = self.mask_both.to(x.lower)
@@ -533,56 +590,86 @@ class BoundRelu(BoundTwoPieceLinear):
 
         self.lw = self.mask_both * lower_k + self.mask_pos
 
+    @staticmethod
+    def dynamic_forward_relaxation(lower, upper, slope=None):
+        """The slope `s` and half-width `h` of each neuron's relaxation, given
+        the bounds `[lower, upper]` on its input: for every input `z` in them,
+        `relu(z) = s * z + h * (1 + e)` for some `e` in [-1, 1].
+
+        For an unstable neuron (`lower < 0 < upper`) every `s` in [0, 1] is
+        sound, since `relu(z) - s * z` then runs from 0 to
+        `max(-s * lower, (1 - s) * upper)`, which is `2 h`. `slope` chooses
+        `s` for the unstable neurons, projected onto [0, 1]; by default
+        `s = upper / (upper - lower)`, the slope that makes `h` smallest. A
+        stable neuron is exact: `s` is 1 (always active) or 0 (never active),
+        and `h = 0`. All tensors are shaped `[batch, *shape]`.
+        """
+        s, _ = BoundRelu._relu_upper_bound(lower, upper, 0.)
+        if slope is not None:
+            s = torch.where(torch.logical_and(lower < 0, upper > 0),
+                            slope.to(lower).clamp(0., 1.), s)
+        return s, torch.maximum(-s * lower, (1 - s) * upper) / 2
+
     def bound_dynamic_forward(self, x, max_dim=None, offset=0):
         if self.leaky_alpha > 0:
             raise NotImplementedError
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='relu')
 
-        if not hasattr(self, 'upper_k'):
-            # x.lower and x.upper remain same all the time,
-            # so the following only need to do once
-            self.upper_k, self.upper_b = self._relu_upper_bound(
-                x.lower, x.upper, self.leaky_alpha)
-            self.upper_b /= 2
+        # Both propagation directions use the ReLU's native alpha bank.
+        slope, half = self.dynamic_forward_relaxation(
+            x.lower, x.upper, self.dynamic_forward_slope())
+        # centre: s * c + h, the relaxation at e = 0
+        b_new = slope * x.lb + half
+        batch_size = x.lower.shape[0]
+        unstable = torch.logical_and(
+            x.lower < 0, x.upper > 0).view(batch_size, -1).to(torch.int)
+        # The first time a pass reaches this ReLU, it takes the next free
+        # columns, one per unstable neuron.
+        variable_ranges = x.dynamic_variable_ranges
+        if self.name not in variable_ranges:
+            variable_ranges[self.name] = (
+                max(start + count
+                    for start, count in variable_ranges.values()),
+                int(unstable.sum(dim=-1).max()))
+        variable_start, num_variables = variable_ranges[self.name]
+        tot_dim = variable_start + num_variables
+        # Inputs are laid out before this node, so they never reach a column
+        # this node owns. Traversal order is what guarantees it.
+        assert x.tot_dim <= variable_start, (
+            f'{self}: input reaches {x.tot_dim} coefficient columns but this '
+            f'node was laid out at {variable_start}')
 
-            self.device = x.lw.device
-            self.batch_size = x.lower.shape[0]
-            self.unstable = torch.logical_and(x.lower < 0, x.upper > 0).view(self.batch_size, -1).to(torch.int)
-            self.tot_dim = x.tot_dim + int(self.unstable.sum(dim=-1).max())
-
-            self.b_new = self.upper_k * x.lb + self.upper_b
-
-        b_new = self.b_new
-        batch_size = self.batch_size
-        device = self.device
-        unstable = self.unstable
         if x.lw.shape[1]:
             # Compute only when x.lw is not empty
-            w_new = self.upper_k.unsqueeze(1) * x.lw
+            w_new = slope.unsqueeze(1) * x.lw
         else:
             w_new = torch.empty_like(x.lw)
 
-        if offset + w_new.shape[1] < x.tot_dim:
-            return LinearBound(
-                w_new, b_new, w_new, b_new, x_L=x.x_L, x_U=x.x_U, tot_dim=self.tot_dim)
+        num_padding_columns = (min(offset + max_dim, variable_start)
+                               - (offset + w_new.shape[1]))
+        if num_padding_columns > 0:
+            # Pad variables laid out on other branches with zero coefficients.
+            w_new = torch.cat([w_new, w_new.new_zeros(
+                (batch_size, num_padding_columns, *w_new.shape[2:]))], dim=1)
+
+        if offset + w_new.shape[1] < variable_start:
+            return LinearBound(w_new, b_new, w_new, b_new, tot_dim=tot_dim)
 
         # Create new variables for unstable ReLU
         index = torch.cumsum(unstable, dim=-1).to(torch.int64)
-        index = (index - (offset + w_new.shape[1] - x.tot_dim)).clamp(min=0)
+        index = (index - (offset + w_new.shape[1] - variable_start)).clamp(min=0)
         num_new_dim = int(index.max())
         num_new_dim_actual = min(num_new_dim, max_dim - w_new.shape[1])
         index = index.clamp(max=num_new_dim_actual+1)
-        w_unstable = torch.zeros(batch_size, num_new_dim_actual + 2, unstable.size(-1), device=device)
-        x_L_unstable = -torch.ones(batch_size, num_new_dim_actual, device=device)
-        x_U_unstable = torch.ones(batch_size, num_new_dim_actual, device=device)
-        w_unstable.scatter_(dim=1, index=index.unsqueeze(1), src=self.upper_b.view(batch_size, 1, -1), reduce='add')
+        w_unstable = w_new.new_zeros(
+            batch_size, num_new_dim_actual + 2, unstable.size(-1))
+        w_unstable = w_unstable.scatter_add(
+            dim=1, index=index.unsqueeze(1),
+            src=half.reshape(batch_size, 1, -1))
         w_unstable = w_unstable[:, 1:-1].view(batch_size, num_new_dim_actual, *w_new.shape[2:])
 
         w_new = torch.cat([w_new, w_unstable], dim=1)
-        x_L_new = torch.cat([x.x_L, x_L_unstable], dim=-1)
-        x_U_new = torch.cat([x.x_U, x_U_unstable], dim=-1)
-
-        return LinearBound(
-            w_new, b_new, w_new, b_new, x_L=x_L_new, x_U=x_U_new, tot_dim=self.tot_dim)
+        return LinearBound(w_new, b_new, w_new, b_new, tot_dim=tot_dim)
 
     def bound_forward(self, dim_in, x):
         self._forward_relaxation(x)
@@ -644,6 +731,7 @@ class BoundRelu(BoundTwoPieceLinear):
         else:
             lower = self.lower
             upper = self.upper
+        self.require_finite_relaxation_bounds(lower, upper, operator='relu')
 
         # Upper bound slope and intercept according to CROWN relaxation.
         upper_d, upper_b = self._relu_upper_bound(lower, upper, self.leaky_alpha)
@@ -722,8 +810,8 @@ class BoundRelu(BoundTwoPieceLinear):
                 lb_upper_d, ub_upper_d, lb_upper_b, ub_upper_b, alpha_lookup_idx)
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
-        return self.forward(h_L), self.forward(h_U)
+        h_L, h_U = v[0].lower, v[0].upper
+        return Interval(self.forward(h_L), self.forward(h_U))
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         if self.leaky_alpha > 0:
@@ -838,6 +926,7 @@ class BoundSign(BoundActivation):
         return torch.sign(x)
 
     def bound_relax(self, x, init=False):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='sign')
         if init:
             self.init_linear_relaxation(x)
         mask_0 = torch.logical_and(x.lower == 0, x.upper == 0)
@@ -943,6 +1032,7 @@ class BoundSignMerge(BoundTwoPieceLinear):
             lower, upper = x.lower, x.upper
         else:
             lower, upper = self.lower, self.upper
+        self.require_finite_relaxation_bounds(lower, upper, operator='sign_merge')
 
         flag_expand = False
         ub_lower_d = lb_lower_d = lb_upper_d = ub_upper_d = None
@@ -1056,7 +1146,7 @@ class BoundSignMerge(BoundTwoPieceLinear):
 
 
 def relu_grad(preact):
-    return (preact > 0).float()
+    return (preact > 0).to(dtype=preact.dtype)
 
 
 class ReLUGradOp(Function):
@@ -1122,7 +1212,7 @@ class BoundReluGrad(BoundActivation):
 
     @staticmethod
     def relu_grad(preact):
-        return (preact > 0).float()
+        return (preact > 0).to(dtype=preact.dtype)
 
     def forward(self, g, g_relu, g_relu_rev, preact):
         if g.ndim == preact.ndim + 1:
@@ -1130,8 +1220,8 @@ class BoundReluGrad(BoundActivation):
         return g * relu_grad(preact)
 
     def interval_propagate(self, *v):
-        g_lower, g_upper = v[0]
-        preact_lower, preact_upper = v[3]
+        g_lower, g_upper = v[0].lower, v[0].upper
+        preact_lower, preact_upper = v[3].lower, v[3].upper
         relu_grad_lower = relu_grad(preact_lower)
         relu_grad_upper = relu_grad(preact_upper)
         if g_lower.ndim == relu_grad_lower.ndim + 1:
@@ -1139,12 +1229,12 @@ class BoundReluGrad(BoundActivation):
             relu_grad_upper = relu_grad_upper.unsqueeze(1)
         lower = torch.min(g_lower * relu_grad_lower, g_lower * relu_grad_upper)
         upper = torch.max(g_upper * relu_grad_lower, g_upper * relu_grad_upper)
-        return lower, upper
+        return Interval(lower, upper)
 
     def bound_backward(self, last_lA, last_uA, g, g_relu, g_relu_rev, preact,
                        **kwargs):
-        mask_active = (preact.lower > 0).float()
-        mask_inactive = (preact.upper < 0).float()
+        mask_active = (preact.lower > 0).to(dtype=preact.lower.dtype)
+        mask_inactive = (preact.upper < 0).to(dtype=preact.upper.dtype)
         mask_unstable = 1 - mask_active - mask_inactive
 
         if self.recurjac and self.inputs[0].perturbed:
@@ -1208,20 +1298,27 @@ class BoundReluGrad(BoundActivation):
                 mask_active_unfold = mask_active_unfold.expand(last_A.shape)
                 mask_unstable_unfold = mask_unstable_unfold.expand(last_A.shape)
 
+                # Here, mask_active_unfold comes from a unfolding operation,
+                # which has implicitly masked the padding postions.
                 A = Patches(
                     last_A_patches * mask_active_unfold,
                     last_A.stride, last_A.padding, last_A.shape,
-                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape,
+                    padding_pos_masked=True)
 
                 A_pos_patches = last_A_patches.clamp(min=0) * mask_unstable_unfold
                 A_neg_patches = last_A_patches.clamp(max=0) * mask_unstable_unfold
 
+                # Similarly, mask_unstable_unfold comes from a unfolding operation,
+                # which has implicitly masked the padding postions.
                 A_pos = Patches(
                     A_pos_patches, last_A.stride, last_A.padding, last_A.shape,
-                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape,
+                    padding_pos_masked=True)
                 A_neg = Patches(
                     A_neg_patches, last_A.stride, last_A.padding, last_A.shape,
-                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape,
+                    padding_pos_masked=True)
 
                 return A, A_pos, A_neg, bias
 

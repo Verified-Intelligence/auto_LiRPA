@@ -11,10 +11,11 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
+from torch import Tensor
 
 from math import floor, ceil
 from .utils import eyeC
@@ -46,6 +47,7 @@ from .utils import eyeC
 # N_constr       : The number of constraints. For constraints_A matrix:
 #                       -- In `sort_out_constr_batches` function, its shape is (B, N_constr, X)
 #                       -- In `constraints_solving` function, its shape is (B_act, N_constt, X)
+
 
 def construct_constraints(constr_A: torch.Tensor, constr_b: torch.Tensor, constr_rhs: torch.Tensor,
                             batchsize, x_dim, sign=1):
@@ -260,11 +262,21 @@ def sort_out_constr_batches(x_L, x_U, constraints, rearrange_constraints=False, 
     if constraints is None or constraints[0] is None or constraints[0].numel() == 0:
         return None, sorted_out_batches
 
-    # Read argument and some necessary reshape
+    # Input bounds and constraints may come from different calculation stages.
+    # Promote them once before the first matrix multiplication.
     assert x_L is not None and x_U is not None, "If constrained concretize is enabled, x_L and x_U cannot be None!"
+    constraints_A, constraints_b = constraints
+    calculation_dtype = torch.promote_types(x_L.dtype, x_U.dtype)
+    calculation_dtype = torch.promote_types(
+        calculation_dtype, constraints_A.dtype)
+    calculation_dtype = torch.promote_types(
+        calculation_dtype, constraints_b.dtype)
+    x_L = x_L.to(dtype=calculation_dtype)
+    x_U = x_U.to(dtype=calculation_dtype)
+    constraints_A = constraints_A.to(dtype=calculation_dtype)
+    constraints_b = constraints_b.to(dtype=calculation_dtype)
     x0 = (x_L + x_U) / 2
     epsilon = (x_U - x_L) / 2
-    constraints_A, constraints_b = constraints
     batch_size = x0.shape[0]
     x_dim = x0[0].numel()
     x0 = x0.view((batch_size, x_dim, 1))                        # shape: (B, X, 1)
@@ -384,12 +396,39 @@ def constraints_solving(
     device = x_L.device
     N_batch = x_L.size(0)
 
-    epsilon = (x_U - x_L) / 2.0 if epsilon is None else epsilon
-    x0 = (x_U + x_L) / 2.0 if x0 is None else x0
+    calculation_dtype = torch.promote_types(x_L.dtype, x_U.dtype)
+    if isinstance(objective, Tensor):
+        calculation_dtype = torch.promote_types(
+            calculation_dtype, objective.dtype)
+    if constraints is not None:
+        calculation_dtype = torch.promote_types(
+            calculation_dtype, constraints[0].dtype)
+
+    x_L = x_L.to(dtype=calculation_dtype)
+    x_U = x_U.to(dtype=calculation_dtype)
+    epsilon = ((x_U - x_L) / 2.0
+               if epsilon is None else epsilon.to(dtype=calculation_dtype))
+    x0 = ((x_U + x_L) / 2.0
+          if x0 is None else x0.to(dtype=calculation_dtype))
     epsilon = epsilon.reshape((N_batch, -1, 1))
     x0 = x0.reshape((N_batch, -1, 1))
 
     is_eyeC = isinstance(objective, eyeC)
+
+    assert (act_x0 is None) == (act_eps is None), (
+        'act_x0 and act_eps must be provided together')
+    if act_x0 is not None:
+        act_x0 = act_x0.to(dtype=calculation_dtype)
+        act_eps = act_eps.to(dtype=calculation_dtype)
+    if aux_bounds is not None:
+        aux_bounds = aux_bounds.to(dtype=calculation_dtype)
+    if isinstance(objective, Tensor):
+        objective = objective.to(dtype=calculation_dtype)
+    if constraints is not None:
+        constraints = (
+            constraints[0].to(dtype=calculation_dtype),
+            constraints[1].to(dtype=calculation_dtype),
+        )
 
     # --- Naive Case (No Constraints) ---
     no_constraints_condition = (constraints is None) or (constraints[0].numel() == 0)
@@ -416,7 +455,8 @@ def constraints_solving(
             is_broadcastable = True
             H = X
             # Internally represent eyeC as identity matrix for broadcastable path.
-            objective_tensor = torch.eye(X, device=device).unsqueeze(0) # Shape (1, X, X)
+            objective_tensor = torch.eye(
+                X, device=device, dtype=x0.dtype).unsqueeze(0) # Shape (1, X, X)
         else:
             if objective.shape[0] != N_batch:
                 # objective comes in shape of (H, X) or (1, H, X).
@@ -433,7 +473,7 @@ def constraints_solving(
 
         # --- Constrained Case ---
         # --- Calculate Naive Bounds (used as default/fallback) ---
-        naive_bounds = torch.zeros(N_batch, H, 1, device=device)
+        naive_bounds = torch.zeros(N_batch, H, 1, device=device, dtype=x0.dtype)
         if aux_bounds is not None:
             naive_bounds_all = aux_bounds.flatten(1).unsqueeze(-1)
         elif is_eyeC:
@@ -488,13 +528,19 @@ def constraints_solving(
             # If objective is batch-specific, we do not chunk it.
             num_chunks = 1
             final_chunk_size = B_act
+        elif torch.device(device).type != 'cuda':
+            # GPU memory probing is unavailable on CPU and other devices.
+            final_chunk_size = B_act
+            if max_chunk_size is not None and max_chunk_size > 0:
+                final_chunk_size = min(final_chunk_size, max_chunk_size)
+            num_chunks = ceil(B_act / final_chunk_size)
         else:
             # This block dynamically estimates the optimal chunk size to maximize GPU
             # utilization while preventing out-of-memory (OOM) errors.
             calculated_chunk_size = B_act
             free_mem, total_mem = torch.cuda.mem_get_info()
             usable_mem = free_mem * safety_factor
-            obj_dtype = objective.dtype
+            obj_dtype = calculation_dtype
             dtype_size = torch.finfo(obj_dtype).bits // 8
             mem_constraints_per_item = (n_constraints * X + n_constraints) * dtype_size
             mem_x0eps_per_item = 2 * X * dtype_size
@@ -629,4 +675,3 @@ def constraints_solving(
         else:
             if timer: timer.add("concretize")
             return final_bounds
-

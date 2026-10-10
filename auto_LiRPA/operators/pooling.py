@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Pooling operators."""
@@ -49,7 +49,7 @@ class BoundMaxPool(BoundOptimizableActivation):
         rho_sum = torch.cumsum(sorted, -1)
         rho_value = 1 - rho_sum
         rho_value = (sorted + rho_value/torch.tensor(
-            range(1, sorted.size(-1)+1), dtype=torch.float,
+            range(1, sorted.size(-1)+1), dtype=sorted.dtype,
             device=sorted.device)) > 0
         _, rho_index = torch.max(torch.cumsum(rho_value, -1), -1)
         rho_sum = torch.gather(rho_sum, -1, rho_index.unsqueeze(-1)).squeeze(-1)
@@ -66,7 +66,7 @@ class BoundMaxPool(BoundOptimizableActivation):
             [1, size_spec, self.input_shape[0], self.input_shape[1],
             self.output_shape[-2], self.output_shape[-1],
             self.kernel_size[0], self.kernel_size[1]],
-            dtype=torch.float, device=ref.device, requires_grad=True)
+            dtype=ref.dtype, device=ref.device, requires_grad=True)
         self.init[name_start] = False
         return alpha
 
@@ -77,6 +77,7 @@ class BoundMaxPool(BoundOptimizableActivation):
 
     def bound_backward(self, last_lA, last_uA, x, start_node=None,
                        unstable_idx=None, **kwargs):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='max_pool')
         # self.padding is a tuple of two elements: (height dimension padding, width dimension padding).
         paddings = tuple((self.padding[0], self.padding[0], self.padding[1], self.padding[1]))
 
@@ -88,12 +89,16 @@ class BoundMaxPool(BoundOptimizableActivation):
         shape = list(shape[:-2]) + [a + 2*b for a, b in zip(self.input_shape[-2:], self.padding)]
         shape[0] = batch_size
         # Lower and upper D matrices. They have size (batch_size, input_c, x, y) which will be multiplied on enlarges the A matrices via F.interpolate.
-        upper_d = torch.zeros(shape, device=x.device)
+        upper_d = torch.zeros(shape, dtype=x.lower.dtype, device=x.device)
         lower_d = None
 
         # Size of upper_b and lower_b: (batch_size, output_c, h, w).
-        upper_b = torch.zeros(batch_size, *self.output_shape[1:], device=x.device)
-        lower_b = torch.zeros(batch_size, *self.output_shape[1:], device=x.device)
+        upper_b = torch.zeros(
+            batch_size, *self.output_shape[1:], dtype=x.lower.dtype,
+            device=x.device)
+        lower_b = torch.zeros(
+            batch_size, *self.output_shape[1:], dtype=x.lower.dtype,
+            device=x.device)
 
         # Find the maxpool neuron whose input bounds satisfy l_i > max_j u_j for all j != i. In this case, the maxpool neuron is linear, and we can set upper_d = lower_d = 1.
         # We first find which indices has the largest lower bound.
@@ -142,7 +147,8 @@ class BoundMaxPool(BoundOptimizableActivation):
                 alpha = self.alpha[start_node.name]
 
             if not self.init[start_node.name]:
-                lower_d = torch.zeros((shape), device=x.device)
+                lower_d = torch.zeros(
+                    (shape), dtype=x.lower.dtype, device=x.device)
                 # [batch, C, H, W]
                 lower_d = torch.scatter(
                     torch.flatten(lower_d, -2), -1,
@@ -176,7 +182,8 @@ class BoundMaxPool(BoundOptimizableActivation):
                                    alpha_shape[2], *lower_d.shape[1:])
             lower_d = lower_d.squeeze(0)
         else:
-            lower_d = torch.zeros((shape), device=x.device)
+            lower_d = torch.zeros(
+                (shape), dtype=x.lower.dtype, device=x.device)
             # Not optimizable bounds. We simply set \hat{z} >= z_i where i is the input element with largest lower bound.
             lower_d = torch.scatter(torch.flatten(lower_d, -2), -1,
                                     torch.flatten(max_lower_index, -2),
@@ -245,7 +252,7 @@ class BoundMaxPool(BoundOptimizableActivation):
                     next_A = next_A[...,self.padding[0]:-self.padding[0],
                                     self.padding[1]:-self.padding[1]]
             elif isinstance(last_A, Patches):
-                # The last_A.patches was not padded, so we need to pad them here.
+                # The last_A.patches was not boundary-masked, so we need to mask them here.
                 # If this Conv layer is followed by a ReLU layer, then the padding was already handled there and there is no need to pad again.
                 one_d = torch.ones(tuple(1 for i in self.output_shape[1:]),
                                    device=last_A.patches.device, dtype=last_A.patches.dtype).expand(self.output_shape[1:])
@@ -267,18 +274,18 @@ class BoundMaxPool(BoundOptimizableActivation):
                     # Append the spec dimension.
                     one_d_unfolded_r = one_d_unfolded.unsqueeze(0)
                 patches = last_A.patches * one_d_unfolded_r
-
+                # Patch is multiplied with an unfolded 1-matrix, so it's safe to set padding_pos_masked = true
                 if b_pos is not None:
                     patch_pos = Patches(
                         patches.clamp(min=0), last_A.stride, last_A.padding,
                         last_A.shape, unstable_idx=last_A.unstable_idx,
-                        output_shape=last_A.output_shape)
+                        output_shape=last_A.output_shape, padding_pos_masked=True)
                     bias = bias + self.get_bias(patch_pos, b_pos)
                 if b_neg is not None:
                     patch_neg = Patches(
                         patches.clamp(max=0), last_A.stride, last_A.padding,
                         last_A.shape, unstable_idx=last_A.unstable_idx,
-                        output_shape=last_A.output_shape)
+                        output_shape=last_A.output_shape, padding_pos_masked=True)
                     bias = bias + self.get_bias(patch_neg, b_neg)
 
                 # bias = bias.transpose(0,1)
@@ -298,7 +305,7 @@ class BoundMaxPool(BoundOptimizableActivation):
                     return Patches(
                         patches, stride=last_A.stride, padding=last_A.padding,
                         shape=patches.shape, unstable_idx=last_A.unstable_idx,
-                        output_shape=last_A.output_shape)
+                        output_shape=last_A.output_shape, padding_pos_masked=last_A.padding_pos_masked)
 
                 pos_A = upsample(pos_A, last_A)
                 neg_A = upsample(neg_A, last_A)
@@ -309,6 +316,11 @@ class BoundMaxPool(BoundOptimizableActivation):
 
                 pos_A.padding, pos_A.stride, pos_A.output_padding = padding, stride, output_padding
                 neg_A.padding, neg_A.stride, neg_A.output_padding = padding, stride, output_padding
+
+                # maybe_unfold_patches uses inplace_unfold (zero padding), so padding
+                # positions are masked in d_pos/d_neg. This is the key reason setting
+                # padding_pos_masked=True for next_A is correct; if unfold is
+                # monkeypatched to all ones, the mask disappears and the flag becomes incorrect.
 
                 # unsqueeze for the spec dimension
                 d_pos = maybe_unfold_patches(d_pos.unsqueeze(0), pos_A)
@@ -323,7 +335,8 @@ class BoundMaxPool(BoundOptimizableActivation):
                 next_A = Patches(
                     next_A_patches, stride, padding, next_A_patches.shape,
                     unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape,
-                    inserted_zeros=last_A.inserted_zeros, output_padding=output_padding)
+                    inserted_zeros=last_A.inserted_zeros, output_padding=output_padding,
+                    padding_pos_masked=True)
 
             return next_A, bias
 
@@ -363,6 +376,7 @@ class BoundMaxPool(BoundOptimizableActivation):
         return LinearBound(lw, lb, uw, ub)
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='max_pool')
         if init:
             self.init_linear_relaxation(x, dim_opt)
 
@@ -503,10 +517,10 @@ class BoundGlobalAveragePool(Bound):
         return [(lA, uA)], 0, 0
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0]
+        h_L, h_U = v[0].lower, v[0].upper
         h_L = F.adaptive_avg_pool2d(h_L, (1, 1))
         h_U = F.adaptive_avg_pool2d(h_U, (1, 1))
-        return h_L, h_U
+        return Interval(h_L, h_U)
 
 
 class BoundAveragePool(Bound):
@@ -530,7 +544,6 @@ class BoundAveragePool(Bound):
         self.ceil_mode = False
         self.count_include_pad = True
         self.use_default_ibp = True
-        self.relu_followed = False
 
     def forward(self, x):
         return F.avg_pool2d(x, self.kernel_size, self.stride,
@@ -643,7 +656,9 @@ class BoundAveragePool(Bound):
                     weight = torch.full(size=(self.input_shape[1], 1, *self.kernel_size),
                                         fill_value=value, dtype=patches.dtype,
                                         device=patches.device)
-                    if not self.relu_followed:
+                    if last_A.padding_pos_masked:
+                        patches = last_A.patches
+                    else:
                         patches = last_A.create_padding(self.output_shape)
                     weight = insert_zeros(weight, last_A.inserted_zeros)
                     if last_A.unstable_idx is None:
@@ -664,7 +679,7 @@ class BoundAveragePool(Bound):
                 next_A = last_A.create_similar(
                     up_sampled_patches, stride=stride, padding=padding,
                     output_padding=output_padding,
-                    inserted_zeros=inserted_zeros)
+                    inserted_zeros=inserted_zeros, padding_pos_masked=False)
             else:
                 raise ValueError(f'last_A has unexpected type {type(last_A)}')
             return next_A, 0.

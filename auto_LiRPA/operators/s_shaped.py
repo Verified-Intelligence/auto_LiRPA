@@ -11,10 +11,12 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """S-shaped base class, activation functions, and relevant ops."""
+import math
+
 import torch
 from torch.nn import Module
 from torch.autograd import Function
@@ -27,7 +29,8 @@ class BoundSShaped(BoundOptimizableActivation):
     Base class for computing output bounds of globally and partially s-shaped nonlinear functions
     (e.g., sigmoid, tanh, sin, cos) over given input intervals.
     """
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None, activation=(None, None, None), precompute=False):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None,
+                 activation=(None, None, None)):
         super().__init__(attr, inputs, output_index, options)
         if options is None:
             options = {}
@@ -42,9 +45,10 @@ class BoundSShaped(BoundOptimizableActivation):
         self.d_act_func = activation[2]
 
         self.step_pre = 0.01
-        if precompute:
-            self.precompute_relaxation(self.act_func, self.d_act_func)
-            self.precompute_dfunc_values(self.act_func, self.d_act_func)
+        # The graph dtype is not known until forward values have been built.
+        # Globally S-shaped activations create these tables on first bound use.
+        self.d_lower = None
+        self.d_upper = None
         # TODO make them configurable when implementing a general nonlinear activation.
         # Neurons whose gap between pre-activation bounds is smaller than this
         # threshold will be masked and don't need branching.
@@ -60,7 +64,6 @@ class BoundSShaped(BoundOptimizableActivation):
         self.activation_bound_option = options.get('activation_bound_option', 'adaptive')
 
         self.inflections = [0.]
-        self.extremes = []
         self.sigmoid_like_mask = None
 
         # FIXME: Smoothness enhancement for s-shaped functions should be enabled by default.
@@ -68,6 +71,25 @@ class BoundSShaped(BoundOptimizableActivation):
         # We provide this option only to reproduce results from previous papers.
         self.disable_smoothness_enhancement = options.get(
             's_shaped_disable_smoothness_enhancement', False)
+
+    def _ensure_precomputed(self, reference):
+        """Ensure tables match the input-bound tensor's dtype and device.
+
+        Subclasses override this hook for different tables or cache dependencies.
+
+        Args:
+            reference (Tensor): Usually x.lower from bound_relax(). Only its
+                dtype and device are used for cache validation and allocation.
+        """
+        tables = (self.d_lower, self.d_upper)
+        if all(
+                table is not None
+                and table.dtype == reference.dtype
+                and table.device == reference.device
+                for table in tables):
+            return
+        self.precompute_relaxation(
+            self.act_func, self.d_act_func, reference=reference)
 
     def opt_init(self):
         super().opt_init()
@@ -87,7 +109,8 @@ class BoundSShaped(BoundOptimizableActivation):
         l, u = self.inputs[0].lower, self.inputs[0].upper
         shape = l.shape
         # Alpha dimension is (num_params, output_shape, batch, *shape) for the s-shaped activation function.
-        alpha = torch.empty(num_params, size_spec, *shape, device=l.device)
+        alpha = torch.empty(
+            num_params, size_spec, *shape, dtype=l.dtype, device=l.device)
         alpha.data[:4] = (l + u) / 2
         alpha.data[4:6] = self.tp_both_lower_init[name_start]
         alpha.data[6:8] = self.tp_both_upper_init[name_start]
@@ -96,10 +119,17 @@ class BoundSShaped(BoundOptimizableActivation):
         return alpha
 
     @torch.no_grad()
-    def precompute_relaxation(self, func, dfunc, x_limit=500):
+    def precompute_relaxation(
+            self, func, dfunc, x_limit=500, *, reference):
         """
-        This function precomputes the tangent lines that will be used as
-        lower/upper bounds for S-shaped functions centered at 0 along the x-axis.
+        Populate d_lower and d_upper with tangent points.
+
+        Args:
+            func: S-shaped activation centered at zero.
+            dfunc: Derivative of func.
+            x_limit: Lookup range magnitude, sampled at self.step_pre with
+                extra boundary entries.
+            reference (Tensor): Supplies only dtype and device, not values or shape.
         """
         self.x_limit = x_limit
         self.num_points_pre = int(self.x_limit / self.step_pre)
@@ -123,7 +153,9 @@ class BoundSShaped(BoundOptimizableActivation):
             return k * (lower - d) + func(d) >= func(lower)
 
         # Given an upper bound point (>=0), find a line that is guaranteed to be a lower bound of this function.
-        upper = self.step_pre * torch.arange(0, self.num_points_pre + 5, device=self.device)
+        upper = self.step_pre * torch.arange(
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device)
         r = torch.zeros_like(upper)
         # Initial guess, the tangent line is at -1.
         l = -torch.ones_like(upper)
@@ -147,7 +179,9 @@ class BoundSShaped(BoundOptimizableActivation):
 
         # Do the same again:
         # Given an lower bound point (<=0), find a line that is guaranteed to be an upper bound of this function.
-        lower = -self.step_pre * torch.arange(0, self.num_points_pre + 5, device=self.device)
+        lower = -self.step_pre * torch.arange(
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device)
         l = torch.zeros_like(upper)
         r = torch.ones_like(upper)
         while True:
@@ -163,13 +197,6 @@ class BoundSShaped(BoundOptimizableActivation):
         self.d_upper = r.clone()
 
         logger.debug('Done')
-
-    def precompute_dfunc_values(self, func, dfunc, x_limit=500):
-        """
-        This function precomputes a list of values for dfunc.
-        """
-        upper = self.step_pre * torch.arange(0, self.num_points_pre + 5, device=self.device)
-        self.dfunc_values = dfunc(upper)
 
     def forward(self, x):
         return self.act_func(x)
@@ -213,68 +240,88 @@ class BoundSShaped(BoundOptimizableActivation):
         d_upper = self.retrieve_from_precompute(self.d_upper, -lower, upper)
         return d_lower, d_upper
 
-    def retrieve_d_from_k(self, k, func):
-        d_indices = torch.searchsorted(torch.flip(self.dfunc_values, [0]), k, right=False)
-        d_indices = self.num_points_pre - d_indices + 4
-        d_left = d_indices * self.step_pre
-        d_right = d_left + self.step_pre
-        y_left = func(d_left)
-        y_right = func(d_right)
-        k_left = self.dfunc_values[d_indices]
-        k_right = self.dfunc_values[torch.clamp(d_indices+1, max=self.dfunc_values.shape[0]-1)]
-        # We choose the intersection of two tangent lines
-        d_return = (k_left * d_left - k_right * d_right - y_left + y_right) / (k_left - k_right).clamp(min=1e-8)
-        mask_almost_the_same = abs(k_left - k_right) < 1e-5
-        d_return[mask_almost_the_same] = d_left[mask_almost_the_same]
-        y_d = k_left * (d_return - d_left) + y_left
-        return d_return, y_d
+    def _same_slope_tangent_point(self, _k):
+        """Return a nonnegative point ``d`` satisfying ``f'(d) = k``."""
+        raise OperatorCapabilityError(
+            self.activation_name,
+            'same-slope relaxation requires an inverse derivative')
 
     def bound_relax_impl_same_slope(self, x, func, dfunc):
+        """Build the tight parallel enclosure for the chord slope.
+
+        For ``k = (f(upper) - f(lower)) / (upper - lower)``, the affine
+        biases are the extrema of ``f(t) - k*t`` on the input interval.
+        Endpoint values provide the extrema fixed by each convex or concave
+        half-axis. The remaining candidates occur at ``f'(t) = k`` and are
+        obtained from ``_same_slope_tangent_point()`` at ``t = +/-d``.
+        Tangent inequalities conservatively cover these extrema when the
+        candidate is clipped to the interval or affected by rounding.
+
+        Tangency candidates are held fixed during differentiation; gradients
+        flow through the chord slope, interval endpoints, and bias formulas.
+
+        This construction assumes one inflection at zero and stationary
+        candidates mirrored across zero. ``inverse_s_shape`` selects which
+        half-axis contributes the lower and upper residual extrema.
+        """
         lower, upper = x.lower, x.upper
         y_l, y_u = func(lower), func(upper)
-        # k_direct is the slope of the line directly connect (lower, func(lower)), (upper, func(upper)).
-        k_direct = k = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
-        mask_almost_the_same = abs(upper - lower) < 1e-4
-        k_direct[mask_almost_the_same] = dfunc(lower)[mask_almost_the_same]
+        width = upper - lower
+        safe_width = torch.where(width > 0, width, torch.ones_like(width))
+        k = torch.where(width > 0, (y_u - y_l) / safe_width, dfunc(lower))
 
-        mask_direct_lower = k_direct <= dfunc(lower)
-        mask_direct_upper = k_direct <= dfunc(upper)
+        # Biases are extrema of g(t) = f(t) - k*t. Endpoints cover one
+        # extremum on each convex or concave half-axis.
+        g_l = y_l - k * lower
+        g_u = y_u - k * upper
+        lower_bias = torch.minimum(g_l, g_u)
+        upper_bias = torch.maximum(g_l, g_u)
+        # Choose a fixed tangency candidate: the inverse derivative is singular
+        # at the inflection point, while its tangent still defines valid bounds.
+        d = self._same_slope_tangent_point(k.detach())
 
-        # We now find the tangent line with the same slope of k_direct
-        # In the case of "mask_direct_lower(or upper)", there should be only one possible tangent point
-        # at which we obtain the same slope within the interval [lower, upper]
-        d, y_d = self.retrieve_d_from_k(k_direct, func)
-        d[lower + upper < 0] *= -1  # This is the case "direct upper"
-        y_d[lower + upper < 0] = 2 * func(torch.tensor(0)) - y_d[lower + upper < 0]
-        d_clamped = torch.clamp(d, min=lower, max=upper)
-        y_d[d_clamped != d] = func(d_clamped[d_clamped != d])
+        left_end = upper.clamp(max=0.)
+        left_point = torch.clamp(-d, min=lower, max=left_end)
+        # The tangent inequality bounds the residual extrema even when the
+        # inverse-derivative point is clipped or affected by rounding.
+        left_residual = dfunc(left_point) - k
+        left_lower = (func(left_point) - k * left_point
+                      + torch.minimum(
+                          left_residual * (lower - left_point),
+                          left_residual * (left_end - left_point)))
+        left_upper = (func(left_point) - k * left_point
+                      + torch.maximum(
+                          left_residual * (lower - left_point),
+                          left_residual * (left_end - left_point)))
+
+        right_start = lower.clamp(min=0.)
+        right_point = torch.clamp(d, min=right_start, max=upper)
+        right_residual = dfunc(right_point) - k
+        right_lower = (func(right_point) - k * right_point
+                       + torch.minimum(
+                           right_residual * (right_start - right_point),
+                           right_residual * (upper - right_point)))
+        right_upper = (func(right_point) - k * right_point
+                       + torch.maximum(
+                           right_residual * (right_start - right_point),
+                           right_residual * (upper - right_point)))
+
+        if self.inverse_s_shape:
+            # Inverse-S functions are concave left of zero and convex right.
+            upper_bias = torch.where(
+                lower < 0, torch.maximum(upper_bias, left_upper), upper_bias)
+            lower_bias = torch.where(
+                upper > 0, torch.minimum(lower_bias, right_lower), lower_bias)
+        else:
+            lower_bias = torch.where(
+                lower < 0, torch.minimum(lower_bias, left_lower), lower_bias)
+            upper_bias = torch.where(
+                upper > 0, torch.maximum(upper_bias, right_upper), upper_bias)
+
         self.add_linear_relaxation(
-            mask=mask_direct_lower, type='lower', k=k_direct, x0=lower, y0=y_l
-        )
+            mask=None, type='lower', k=k, x0=0, y0=lower_bias)
         self.add_linear_relaxation(
-            mask=mask_direct_lower, type='upper', k=k_direct, x0=d_clamped, y0=y_d
-        )
-        self.add_linear_relaxation(
-            mask=mask_direct_upper, type='upper', k=k_direct, x0=upper, y0=y_u
-        )
-        self.add_linear_relaxation(
-            mask=mask_direct_upper, type='lower', k=k_direct, x0=d_clamped, y0=y_d
-        )
-        # Now we turn to the case where no direct line can be used
-        d_lower, d_upper = self.generate_d_lower_upper(lower, upper)
-        mask_both = torch.logical_not(mask_direct_upper + mask_direct_lower)
-        # To make sure upper and lower bounds have the same slope,
-        # we need the two tangents to be symmetrical
-        d_same_slope = torch.max(torch.abs(d_lower), torch.abs(d_upper))
-        k = dfunc(d_same_slope)
-        y_d_same_slope = func(d_same_slope)
-        y_d_same_slope_opposite = 2*func(torch.tensor(0)) - y_d_same_slope
-        self.add_linear_relaxation(
-            mask=mask_both, type='upper', k=k, x0=d_same_slope, y0=y_d_same_slope
-        )
-        self.add_linear_relaxation(
-            mask=mask_both, type='lower', k=k, x0=-d_same_slope, y0=y_d_same_slope_opposite
-        )
+            mask=None, type='upper', k=k, x0=0, y0=upper_bias)
 
     def bound_relax_impl(self, x, func, dfunc):
         lower, upper = x.lower, x.upper
@@ -492,6 +539,8 @@ class BoundSShaped(BoundOptimizableActivation):
         return 0., 0., 0., 0.
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(
+            x.lower, x.upper, operator=self.activation_name)
         if init:
             self.init_linear_relaxation(x, dim_opt)
         lb = x.lower
@@ -500,12 +549,13 @@ class BoundSShaped(BoundOptimizableActivation):
         if self.activation_bound_option == 'same-slope':
             self.bound_relax_impl_same_slope(x, self.act_func, self.d_act_func)
         else:
+            self._ensure_precomputed(x.lower)
             self.bound_relax_impl(x, self.act_func, self.d_act_func)
         lower_slope, lower_bias, upper_slope, upper_bias = self.bound_relax_branch(lb, ub)
-        self.lw = self.lw * self.sigmoid_like_mask + self.branch_mask * lower_slope
-        self.lb = self.lb * self.sigmoid_like_mask + self.branch_mask * lower_bias
-        self.uw = self.uw * self.sigmoid_like_mask + self.branch_mask * upper_slope
-        self.ub = self.ub * self.sigmoid_like_mask + self.branch_mask * upper_bias
+        self.lw = torch.where(self.sigmoid_like_mask, self.lw, lower_slope)
+        self.lb = torch.where(self.sigmoid_like_mask, self.lb, lower_bias)
+        self.uw = torch.where(self.sigmoid_like_mask, self.uw, upper_slope)
+        self.ub = torch.where(self.sigmoid_like_mask, self.ub, upper_bias)
 
     def get_split_mask(self, lower, upper, input_index):
         assert input_index == 0
@@ -518,7 +568,9 @@ class BoundSShaped(BoundOptimizableActivation):
 class BoundPow(BoundSShaped):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         self.exponent = 2
-        super().__init__(attr, inputs, output_index, options)
+        super().__init__(
+            attr, inputs, output_index, options,
+            activation=('pow', None, None))
         self.ibp_intermediate = False
         self.has_constraint = True
 
@@ -531,6 +583,50 @@ class BoundPow(BoundSShaped):
         def d2_act_func(x):
             return self.exponent * (self.exponent - 1) * torch.pow(x, self.exponent - 2)
         self.d2_act_func = d2_act_func
+        self._precomputed_table_key = None
+
+    def _ensure_precomputed(self, reference):
+        """Create tangent tables for the current exponent and graph state."""
+        key = (self.exponent, reference.dtype, reference.device)
+        tables = (self.d_lower, self.d_upper)
+        if (key == self._precomputed_table_key
+                and all(table is not None for table in tables)):
+            return
+        self.precompute_relaxation(
+            self.act_func, self.d_act_func, reference=reference)
+        self._precomputed_table_key = key
+
+    @staticmethod
+    def _check_exponent(exponent, *, method):
+        if isinstance(exponent, torch.Tensor):
+            if exponent.numel() != 1:
+                raise OperatorCapabilityError(
+                    'pow', f'{method} requires one constant scalar exponent')
+            exponent = exponent.item()
+        try:
+            exponent = float(exponent)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise OperatorCapabilityError(
+                'pow', f'{method} requires one real scalar exponent') from error
+        if math.isnan(exponent):
+            raise RuntimeError(
+                f'NaN detected in {method} pow exponent bound')
+        if math.isinf(exponent):
+            raise OperatorCapabilityError(
+                'pow', f'{method} requires a finite exponent')
+        if exponent <= 0:
+            raise OperatorCapabilityError(
+                'pow', f'{method} does not support exponent {exponent}')
+        return exponent
+
+    @staticmethod
+    def _check_noninteger_domain(lower, exponent, *, method):
+        if exponent != int(exponent) and (lower < 0).any():
+            raise OperatorDomainError(
+                'pow',
+                f'{method} with non-integer exponent {exponent} '
+                'requires a non-negative base',
+            )
 
     def generate_d_lower_upper(self, lower, upper):
         if self.exponent % 2:
@@ -546,6 +642,11 @@ class BoundPow(BoundSShaped):
         else:
             return torch.zeros_like(upper), torch.zeros_like(upper)
 
+    def _same_slope_tangent_point(self, k):
+        """Invert the derivative of an odd power on the positive half-axis."""
+        return (k.clamp(min=0.) / self.exponent).pow(
+            1. / (self.exponent - 1.))
+
     def branch_input_domain(self, lb, ub):
         lower = lb
         upper = ub
@@ -559,11 +660,7 @@ class BoundPow(BoundSShaped):
                 torch.tensor(inflection, device=lb.device), inflection_mat)
         inflection_mask = num_inflection <= 1.
 
-        extreme_mask = torch.ones_like(lower)
-        for extreme in self.extremes:
-            extreme_mask *= torch.logical_or(lower >= extreme, upper <= extreme)
-
-        self.sigmoid_like_mask = torch.logical_and(inflection_mask, extreme_mask)
+        self.sigmoid_like_mask = inflection_mask
         self.branch_mask = torch.logical_xor(torch.ones_like(lower), self.sigmoid_like_mask)
         self.inflection_mat = torch.where(self.sigmoid_like_mask, inflection_mat, lower)
 
@@ -578,10 +675,17 @@ class BoundPow(BoundSShaped):
         self.convex_concave = self.d2_act_func(lower) >= 0
 
     @torch.no_grad()
-    def precompute_relaxation(self, func, dfunc, x_limit = 500):
+    def precompute_relaxation(
+            self, func, dfunc, x_limit=500, *, reference):
         """
-        This function precomputes the tangent lines that will be used as
-        lower/upper bounds for S-shapes functions.
+        Populate d_lower and d_upper with power-function tangent points.
+
+        Args:
+            func: Power function for the current exponent.
+            dfunc: Derivative of func.
+            x_limit: Lookup range magnitude, sampled at self.step_pre with
+                extra boundary entries.
+            reference (Tensor): Supplies only dtype and device, not values or shape.
         """
         self.x_limit = x_limit
         self.num_points_pre = int(self.x_limit / self.step_pre)
@@ -605,7 +709,8 @@ class BoundPow(BoundSShaped):
         # Given an upper bound point (>=0), find a line that is guaranteed to
         # be a lower bound of this function.
         upper = self.step_pre * torch.arange(
-            0, self.num_points_pre + 5, device=self.device)
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device)
         r = torch.zeros_like(upper)
         # Initial guess, the tangent line is at -1.
         l = -torch.ones_like(upper)
@@ -632,7 +737,8 @@ class BoundPow(BoundSShaped):
         # Given an lower bound point (<=0), find a line that is guaranteed to
         # be an upper bound of this function.
         lower = -self.step_pre * torch.arange(
-            0, self.num_points_pre + 5, device=self.device)
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device)
         l = torch.zeros_like(upper)
         r = torch.ones_like(upper)
         while True:
@@ -652,13 +758,14 @@ class BoundPow(BoundSShaped):
 
     def bound_backward(self, last_lA, last_uA, x, y, start_node=None,
                        start_shape=None, **kwargs):
-        assert not self.is_input_perturbed(1)
+        if self.is_input_perturbed(1):
+            raise OperatorCapabilityError(
+                'pow', 'CROWN does not support a perturbed exponent')
         self._start = start_node.name if start_node is not None else None
         self._noninteger_exponent = False  # Reset flag
-        y_val = y.value
-
-        # Only positive exponents are supported
-        assert y_val > 0, f"Exponent must be positive. Got y={y_val}"
+        y_val = self._check_exponent(y.forward_value, method='CROWN')
+        self._check_noninteger_domain(
+            x.lower, y_val, method='CROWN')
 
         if y_val == 1:
             # Identity: pow(x, 1) = x, bounds pass through directly.
@@ -670,19 +777,12 @@ class BoundPow(BoundSShaped):
             # Integer exponent >= 2: use existing S-shaped logic
             x.upper = torch.max(x.upper, x.lower + 1e-8)
             self.exponent = int(y_val)
-            if self.exponent % 2:
-                self.precompute_relaxation(self.act_func, self.d_act_func)
 
             As, lbias, ubias = super().bound_backward(
                 last_lA, last_uA, x, start_node, start_shape, **kwargs)
             return [As[0], (None, None)], lbias, ubias
         else:
             # Non-integer exponent: use simple convex/concave bounding
-            # Requires x >= 0 for non-integer powers
-            assert x.lower.min() >= 0, (
-                f"x must be non-negative for non-integer exponent y={y_val}. "
-                f"Got x.lower.min() = {x.lower.min()}"
-            )
             x.upper = torch.max(x.upper, x.lower + 1e-8)
             self.exponent = y_val
             self._noninteger_exponent = True
@@ -695,11 +795,14 @@ class BoundPow(BoundSShaped):
             return [As[0], (None, None)], lbias, ubias
 
     def bound_forward(self, dim_in, x, y):
-        assert y.lower == y.upper  # exponent must be constant
-        y_val = y.lower
-
-        # Only positive exponents are supported
-        assert y_val > 0, f"Exponent must be positive. Got y={y_val}"
+        lower_exponent = self._check_exponent(y.lower, method='forward')
+        upper_exponent = self._check_exponent(y.upper, method='forward')
+        if lower_exponent != upper_exponent:
+            raise OperatorCapabilityError(
+                'pow', 'forward bounds require a constant exponent')
+        y_val = lower_exponent
+        self._check_noninteger_domain(
+            x.lower, y_val, method='forward')
 
         if y_val == 1:
             # Identity: pow(x, 1) = x, bounds pass through directly
@@ -712,35 +815,32 @@ class BoundPow(BoundSShaped):
         if y_val == int(y_val) and int(y_val) >= 2:
             # Integer exponent >= 2: use existing logic
             self.exponent = int(y_val)
-            if self.exponent % 2:
-                self.precompute_relaxation(self.act_func, self.d_act_func)
             return super().bound_forward(dim_in, x)
         else:
-            # Non-integer exponent: requires x >= 0
-            assert x.lower.min() >= 0, (
-                f"x must be non-negative for non-integer exponent y={y_val}. "
-                f"Got x.lower.min() = {x.lower.min()}"
-            )
             self._noninteger_exponent = True
             return self.bound_forward_noninteger(dim_in, x)
 
     def _init_opt_parameters_impl(self, size_spec, name_start, **kwargs):
         """Initialize alpha parameters for optimization.
 
-        For non-integer exponents: 2 parameters (tangent point), like BoundSqrt.
-        For integer exponents: 10 parameters (S-shaped), defer to parent.
+        For convex/concave powers: 2 parameters (tangent point), like BoundSqrt.
+        For odd integer powers: 10 parameters (S-shaped), defer to parent.
         """
-        if hasattr(self, '_noninteger_exponent') and self._noninteger_exponent:
-            # Non-integer: 2 alpha parameters for tangent point
-            # alpha[0] for lA backprop, alpha[1] for uA backprop
+        if ((hasattr(self, '_noninteger_exponent') and self._noninteger_exponent)
+                or self.exponent % 2 == 0):
+            # alpha[0] for lA backprop, alpha[1] for uA backprop.
             l, u = self.inputs[0].lower, self.inputs[0].upper
             if 0 < self.exponent < 1:
                 l = torch.clamp(l, min=1e-9)
-            alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
-            alpha.data[:] = (l + u) / 2
+            alpha = torch.empty(
+                2, size_spec, *l.shape, dtype=l.dtype, device=l.device)
+            if self.exponent % 2 == 0:
+                alpha.data[:] = torch.where(
+                    l >= 0, l, torch.where(u <= 0, u, torch.zeros_like(l)))
+            else:
+                alpha.data[:] = (l + u) / 2
             return alpha
         else:
-            # Integer: use S-shaped parent implementation
             return super()._init_opt_parameters_impl(size_spec, name_start, **kwargs)
 
     def bound_relax_branch(self, lb, ub):
@@ -764,18 +864,51 @@ class BoundPow(BoundSShaped):
         return lower_slope, lower_bias, upper_slope, upper_bias
 
     def bound_relax(self, x, init=False, dim_opt=None):
-        # Check if we're in non-integer mode
-        if hasattr(self, '_noninteger_exponent') and self._noninteger_exponent:
+        noninteger = getattr(self, '_noninteger_exponent', False)
+        if noninteger or self.exponent % 2 == 0:
+            self.require_finite_relaxation_bounds(
+                x.lower, x.upper, operator='pow')
+
+        if noninteger:
             self.bound_relax_noninteger(x, init, dim_opt)
             return
 
+        if self.exponent % 2 == 0:
+            self.bound_relax_even_power(x, init, dim_opt)
+            return
+
         # For powers with odd exponents, such as x^3, the overall shape is inverse S-like.
-        self.inverse_s_shape = self.exponent % 2 == 1
-        if self.exponent % 2:
-            self.inflections = [0.]
-        else:
-            self.extremes = [0.]
+        self.inverse_s_shape = True
+        self.inflections = [0.]
         super().bound_relax(x, init, dim_opt)
+
+    def bound_relax_even_power(self, x, init=False, dim_opt=None):
+        """Linear relaxation for even integer powers, which are convex."""
+        if init:
+            self.init_linear_relaxation(x, dim_opt)
+
+        l, u = x.lower, x.upper
+        y_l, y_u = self.act_func(l), self.act_func(u)
+        relax_eps = torch.max(y_l.abs(), y_u.abs()) * 1e-6 + 1e-12
+
+        upper_k = (y_u - y_l) / (u - l).clamp(min=1e-8)
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=upper_k, x0=l, y0=y_l + relax_eps)
+
+        if self.opt_stage in ['opt', 'reuse']:
+            if not hasattr(self, 'alpha'):
+                self._no_bound_parameters()
+            ns = self._start
+            self.alpha[ns].data[:2] = torch.max(
+                torch.min(self.alpha[ns][:2], u), l)
+            mid = self.alpha[ns][:2]
+        else:
+            mid = torch.where(
+                l >= 0, l, torch.where(u <= 0, u, torch.zeros_like(l)))
+
+        self.add_linear_relaxation(
+            mask=None, type='lower', k=self.d_act_func(mid),
+            x0=mid, y0=self.act_func(mid) - relax_eps)
 
     def bound_relax_noninteger(self, x, init=False, dim_opt=None):
         """
@@ -798,7 +931,14 @@ class BoundPow(BoundSShaped):
         else:
             l_tang = l
 
-        f_l, f_u = self.act_func(l), self.act_func(u)
+        if 0 < y < 1:
+            zero_lower = l == 0
+            safe_lower = torch.where(zero_lower, torch.ones_like(l), l)
+            f_l = self.act_func(safe_lower)
+            f_l = torch.where(zero_lower, torch.zeros_like(f_l), f_l)
+        else:
+            f_l = self.act_func(l)
+        f_u = self.act_func(u)
 
         # Secant slope: uses original l (well-defined even at 0)
         k_secant = (f_u - f_l) / (u - l).clamp(min=1e-8)
@@ -812,8 +952,19 @@ class BoundPow(BoundSShaped):
         else:
             m = (l_tang + u) / 2
 
-        k_tangent = self.d_act_func(m)
-        f_m = self.act_func(m)
+        if y > 1:
+            zero_tangent = m == 0
+            safe_tangent = torch.where(
+                zero_tangent, torch.ones_like(m), m)
+            k_tangent = self.d_act_func(safe_tangent)
+            f_m = self.act_func(safe_tangent)
+            k_tangent = torch.where(
+                zero_tangent, torch.zeros_like(k_tangent), k_tangent)
+            f_m = torch.where(
+                zero_tangent, torch.zeros_like(f_m), f_m)
+        else:
+            k_tangent = self.d_act_func(m)
+            f_m = self.act_func(m)
 
         if 0 < y < 1:
             # Concave: lower=secant, upper=tangent
@@ -833,6 +984,7 @@ class BoundPow(BoundSShaped):
         """
         y = self.exponent
         l, u = x.lower, x.upper
+        self.require_finite_relaxation_bounds(l, u, operator='pow')
 
         # For 0 < y < 1, clamp lower for tangent/derivative computations only
         if 0 < y < 1:
@@ -872,42 +1024,39 @@ class BoundPow(BoundSShaped):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
-        assert not self.is_input_perturbed(1)
-        exp = v[1][0]
-        h_L, h_U = v[0][0], v[0][1]
-
-        # Only positive exponents are supported
-        assert exp > 0, f"Exponent must be positive. Got y={exp}"
-
+        if self.is_input_perturbed(1):
+            raise OperatorCapabilityError(
+                'pow', 'IBP does not support a perturbed exponent')
+        exp = self._check_exponent(v[1].lower, method='IBP')
+        h_L, h_U = v[0].lower, v[0].upper
         if exp == 1:
             # Identity: pow(x, 1) = x, valid for any x including negative.
-            return h_L, h_U
+            return Interval(h_L, h_U)
 
         if exp == int(exp) and int(exp) >= 2:
             # Integer exponent >= 2: existing logic
             exp = int(exp)
             pl, pu = torch.pow(h_L, exp), torch.pow(h_U, exp)
             if exp % 2 == 1:
-                return pl, pu
+                return Interval(pl, pu)
             else:
                 pl, pu = torch.min(pl, pu), torch.max(pl, pu)
                 mask = 1 - ((h_L < 0) * (h_U > 0)).to(pl.dtype)
-                return pl * mask, pu
+                return Interval(pl * mask, pu)
         else:
-            # Non-integer exponent: requires x > 0
-            assert h_L.min() >= 0, (
-                f"x must be non-negative for non-integer exponent y={exp}. "
-                f"Got h_L.min() = {h_L.min()}"
-            )
+            # Non-integer exponent: requires x >= 0.
+            self._check_noninteger_domain(h_L, exp, method='IBP')
             self.exponent = exp
             # For y > 0, function is always increasing: f(l) <= f(x) <= f(u)
-            return torch.pow(h_L, exp), torch.pow(h_U, exp)
+            return Interval(
+                torch.pow(h_L, exp), torch.pow(h_U, exp))
 
     def clamp_interim_bounds(self):
         if self.exponent % 2 == 0:
             self.cstr_lower = self.lower.clamp(min=0)
             self.cstr_upper = self.upper.clamp(min=0)
-            self.cstr_interval = (self.cstr_lower, self.cstr_upper)
+            self.cstr_interval = Interval(
+                self.cstr_lower, self.cstr_upper)
 
 
 def dtanh(x):
@@ -932,13 +1081,18 @@ class BoundTanh(BoundSShaped):
     base class for other globally S-shaped functions such as Sigmoid and Atan.
     """
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
-                 activation=('tanh', torch.tanh, dtanh), precompute=True):
-        super().__init__(attr, inputs, output_index, options, activation, precompute)
-
+                 activation=('tanh', torch.tanh, dtanh)):
+        super().__init__(attr, inputs, output_index, options, activation)
 
     def _init_opt_parameters_impl(self, size_spec, name_start):
         """Implementation of init_opt_parameters for each start_node."""
         return super()._init_opt_parameters_impl(size_spec, name_start, num_params=8)
+
+    def _same_slope_tangent_point(self, k):
+        # Equivalent to atanh(sqrt(1 - k)), with stable behavior near k = 0.
+        k = k.clamp(min=torch.finfo(k.dtype).tiny, max=1.)
+        s = torch.sqrt(1. - k)
+        return torch.log1p(s) - 0.5 * torch.log(k)
 
     def build_gradient_node(self, grad_upstream):
         node_grad = TanhGrad()
@@ -964,35 +1118,56 @@ class TanhGrad(Module):
 
 class BoundTanhGrad(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
-                 activation=('tanh', dtanh, d2tanh), precompute=True):
+                 activation=('tanh', dtanh, d2tanh)):
         super().__init__(attr, inputs, output_index, options)
         self.requires_input_bounds = [0]
         # The inflection point is where d2f/dx2 = 0.
         self.inflection_point = 0.6585026
+        self.activation_name = activation[0]
         self.func = activation[1]
         self.dfunc = activation[2]
-        if precompute:
-            self.precompute_relaxation()
+        self._precomputed_table_key = None
+        self.precompute_x = None
+        self.d_lower = None
+        self.d_upper = None
+
+    def _ensure_precomputed(self, reference):
+        """Populate or reuse this node's bell-shaped tables.
+
+        Args:
+            reference (Tensor): Usually x.lower from bound_relax(). Only its
+                dtype and device are used for cache validation and allocation.
+        """
+        key = (reference.dtype, reference.device)
+        if key == self._precomputed_table_key and all(
+                table is not None for table in (
+                    self.precompute_x, self.d_lower, self.d_upper)):
+            return
+        self.precompute_relaxation(reference=reference)
+        self._precomputed_table_key = key
 
     def forward(self, x):
         return self.func(x)
 
     def interval_propagate(self, *v):
-        lower, upper = v[0]
+        lower, upper = v[0].lower, v[0].upper
         f_lower = self.func(lower)
         f_upper = self.func(upper)
         next_lower = torch.min(f_lower, f_upper)
         next_upper = torch.max(f_lower, f_upper)
         mask_both = torch.logical_and(lower < 0, upper > 0)
-        next_upper[mask_both] = self.func(torch.tensor(0))
-        return next_lower, next_upper
+        next_upper[mask_both] = self.func(lower.new_zeros(()))
+        return Interval(next_lower, next_upper)
     
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(
+            x.lower, x.upper, operator=f'{self.activation_name}_grad')
+        self._ensure_precomputed(x.lower)
         if init:
             self.init_linear_relaxation(x, dim_opt)
         return self.bound_relax_impl(x)
     
-    def precompute_relaxation(self, x_limit=500):
+    def precompute_relaxation(self, x_limit=500, *, reference):
         """
         This function precomputes the tangent lines that will be used as
         the lower/upper bounds for bell-shaped functions.
@@ -1000,6 +1175,10 @@ class BoundTanhGrad(BoundOptimizableActivation):
         - self.precompute_x: The x values of the upper preactivation bound.
         - self.d_lower: The tangent points of the lower bound.
         - self.d_upper: The tangent points of the upper bound.
+
+        Args:
+            x_limit: Lookup range magnitude, covering [-x_limit, x_limit].
+            reference (Tensor): Supplies only dtype and device, not values or shape.
         """
 
         self.x_limit = x_limit
@@ -1026,12 +1205,15 @@ class BoundTanhGrad(BoundOptimizableActivation):
             # Return True if the slope is a upper bound.
             return k * (lower - d) + func(d) >= func(lower)
 
-        self.precompute_x = torch.arange(-self.x_limit, self.x_limit + self.step_pre, self.step_pre, device=self.device)
+        self.precompute_x = torch.arange(
+            -self.x_limit, self.x_limit + self.step_pre, self.step_pre,
+            dtype=reference.dtype, device=reference.device)
         self.d_lower = torch.zeros_like(self.precompute_x)
         self.d_upper = torch.zeros_like(self.precompute_x)
 
-        # upper point that needs lower precomputed tangent line
-        mask_need_d_lower = self.precompute_x >= -self.inflection_point
+        # Lookup can select the grid cell immediately before each boundary.
+        mask_need_d_lower = self.precompute_x >= (
+            -self.inflection_point - self.step_pre)
         upper = self.precompute_x[mask_need_d_lower] 
         # 1. Initial guess, the tangent is at -2*inflection_point (should be between (-inf, -inflection_point))
         r = -self.inflection_point * torch.ones_like(upper)
@@ -1054,8 +1236,8 @@ class BoundTanhGrad(BoundOptimizableActivation):
         # At upper, a line with slope l is guaranteed to lower bound the function.
         self.d_lower[mask_need_d_lower] = l.clone()
 
-        # upper point that needs upper precomputed tangent line
-        mask_need_upper_d = self.precompute_x >= self.inflection_point
+        mask_need_upper_d = self.precompute_x >= (
+            self.inflection_point - self.step_pre)
         upper = self.precompute_x[mask_need_upper_d]
         # 1. Initial guess, the tangent is at inflection_point/2 (should be between (0, inflection_point))
         r = self.inflection_point * torch.ones_like(upper)
@@ -1079,19 +1261,48 @@ class BoundTanhGrad(BoundOptimizableActivation):
         self.d_upper[mask_need_upper_d] = l.clone()
 
     def retrieve_from_precompute(self, x, flip=False):
+        lookup = -x if flip else x
+        if torch.any((lookup < -self.x_limit) | (lookup > self.x_limit)):
+            raise OperatorCapabilityError(
+                f'{self.activation_name}_grad',
+                f'precomputed relaxation supports inputs in '
+                f'[-{self.x_limit}, {self.x_limit}]')
         if not flip:
-            if x.max() > self.x_limit:
-                warnings.warn(f'Pre-activation bounds are too loose for {self}')
             # Take the left endpoint of the interval
             x_indices = torch.searchsorted(self.precompute_x, x, right=True) - 1
             return self.d_lower[x_indices], self.d_upper[x_indices]
         else:
-            if x.min() < -self.x_limit:
-                warnings.warn(f'Pre-activation bounds are too loose for {self}')
             # Take the right endpoint of the interval
             x_indices = torch.searchsorted(self.precompute_x, -x, right=False)
             return -self.d_lower[x_indices], -self.d_upper[x_indices]
-            
+
+    def _relaxation_region_masks(self, lower, upper):
+        """Partition intervals into the bell-shaped relaxation regions.
+
+        Args:
+            lower (Tensor): Input lower bounds.
+            upper (Tensor): Input upper bounds.
+
+        Returns:
+            Four boolean masks in order: the central concave region, either
+            one-sided tail, crossings assigned to the right formula, and
+            crossings assigned to the left formula. Degenerate intervals at
+            either inflection point belong to the central region.
+        """
+        inflection = self.inflection_point
+        central = (lower >= -inflection) & (upper <= inflection)
+        remaining = ~central
+        right = lower + upper >= 0
+        one_sided = remaining & (
+            (right & (lower >= inflection))
+            | (~right & (upper <= -inflection)))
+        crossing_right = (
+            remaining & right
+            & (upper > inflection) & (lower < inflection))
+        crossing_left = (
+            remaining & ~right
+            & (lower < -inflection) & (upper > -inflection))
+        return central, one_sided, crossing_right, crossing_left
 
     def bound_relax_impl(self, x):
         lower, upper = x.lower, x.upper
@@ -1105,37 +1316,27 @@ class BoundTanhGrad(BoundOptimizableActivation):
         k_midpoint = dfunc(midpoint)
         y_midpoint = func(midpoint)
 
-        # If -inflection_point <= lower < upper <= inflection_point,
-        # we call it "completely concave" region.
-        mask_completely_concave = torch.logical_and(
-            lower >= -self.inflection_point,
-            upper <= self.inflection_point
-        )
+        # Each interval uses one geometric case to construct both affine bounds.
+        (
+            mask_completely_concave,
+            mask_case1,
+            mask_case2_right,
+            mask_case2_left,
+        ) = self._relaxation_region_masks(lower, upper)
+
         self.add_linear_relaxation(
             mask=mask_completely_concave, type='lower', k=k_direct, x0=lower, y0=y_l)
         self.add_linear_relaxation(
             mask=mask_completely_concave, type='upper', k=k_midpoint, x0=midpoint, y0=y_midpoint)
-        
-        # From now on, we assume at least one of the bounds is outside the completely concave region.
-        # Without loss of generality, we assume upper > inflection_point (indicated by mask_right).
-        mask_right = lower + upper >= 0
 
         dl, du = self.retrieve_from_precompute(upper, flip=False)
         dl_, du_ = self.retrieve_from_precompute(lower, flip=True)
 
-        # Case 1: Similar to a convex function
-        mask_case1 = torch.logical_or(
-            torch.logical_and(mask_right, lower >= self.inflection_point),
-            torch.logical_and(torch.logical_not(mask_right), upper <= -self.inflection_point)
-        )
         self.add_linear_relaxation(
             mask=mask_case1, type='upper', k=k_direct, x0=lower, y0=y_l)
         self.add_linear_relaxation(
             mask=mask_case1, type='lower', k=k_midpoint, x0=midpoint, y0=y_midpoint)
-        
-        # Case 2: Similar to a S-shaped function
-        mask_case2_right = torch.logical_and(mask_right, torch.logical_and(
-            upper > self.inflection_point, lower < self.inflection_point))
+
         # The upper tangent point is lineraly interpolated between 0 and du,
         # given lower ranging between -upper and du.
         d_mask_case2_right_upper = du * (lower + upper) / (du + upper)
@@ -1155,8 +1356,6 @@ class BoundTanhGrad(BoundOptimizableActivation):
             mask=torch.logical_and(mask_case2_right, dl_ >= upper), type='lower',
             k=k_direct, x0=lower, y0=y_l)
 
-        mask_case2_left = torch.logical_and(torch.logical_not(mask_right), torch.logical_and(
-            lower < -self.inflection_point, upper > -self.inflection_point))
         # The upper tangent point is lineraly interpolated between du_ and 0,
         # given upper ranging between du_ and -lower.
         d_mask_case2_left_upper = du_ * (upper + lower) / (du_ + lower)
@@ -1190,14 +1389,22 @@ class BoundTanhGrad(BoundOptimizableActivation):
             self.add_linear_relaxation(
                 mask=torch.logical_and(mask_very_close, self.mask_both), type='lower', k=0, x0=lower, y0=torch.min(y_l, y_u))
             self.add_linear_relaxation(
-                mask=torch.logical_and(mask_very_close, self.mask_both), type='upper', k=0, x0=upper, y0=torch.full_like(y_l, func(torch.tensor(0))))
+                mask=torch.logical_and(mask_very_close, self.mask_both),
+                type='upper', k=0, x0=upper,
+                y0=func(torch.zeros_like(y_l)))
 
 
 class BoundSigmoid(BoundTanh):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options,
                          activation=('sigmoid', torch.sigmoid, dsigmoid))
-    
+
+    def _same_slope_tangent_point(self, k):
+        # Stable form of logit((1 + sqrt(1 - 4k)) / 2).
+        k = k.clamp(min=torch.finfo(k.dtype).tiny, max=0.25)
+        r = torch.sqrt(1. - 4. * k)
+        return 2. * torch.log1p(r) - torch.log(4. * k)
+
     def build_gradient_node(self, grad_upstream):
         node_grad = SigmoidGrad()
         grad_input = (grad_upstream, self.inputs[0].forward_value)
@@ -1223,11 +1430,9 @@ class SigmoidGrad(Module):
 
 class BoundSigmoidGrad(BoundTanhGrad):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
-                 activation=('sigmoid', dsigmoid, d2sigmoid), precompute=True):
-        super().__init__(attr, inputs, output_index, options, activation, precompute=False)
+                 activation=('sigmoid', dsigmoid, d2sigmoid)):
+        super().__init__(attr, inputs, output_index, options, activation)
         self.inflection_point = 1.3169614
-        if precompute:
-            self.precompute_relaxation()
 
 
 class BoundAtan(BoundTanh):
@@ -1235,6 +1440,11 @@ class BoundAtan(BoundTanh):
         super().__init__(attr, inputs, output_index, options,
                          activation=('arctan', torch.arctan, darctan))
         self.split_range = (-torch.inf, torch.inf)
+
+    def _same_slope_tangent_point(self, k):
+        # Invert f'(d) = 1 / (1 + d^2) = k on d >= 0.
+        k = k.clamp(min=torch.finfo(k.dtype).tiny, max=1.)
+        return torch.sqrt((1. - k) / k)
 
     def build_gradient_node(self, grad_upstream):
         node_grad = AtanGrad()
@@ -1259,15 +1469,30 @@ class BoundTan(BoundAtan):
     def forward(self, x):
         return torch.tan(x)
 
-    def _check_bounds(self, lower, upper):
-        # Lower and upper bounds must be within the same [-½π, ½π] region.
+    @staticmethod
+    def _periods_for_bounds(lower, upper):
+        # A closed interval containing any π/2 + kπ pole is outside tan's
+        # real-valued domain, including a zero-width interval at the pole.
+        first_pole_index = torch.ceil(
+            (lower - 0.5 * torch.pi) / torch.pi)
+        first_pole = 0.5 * torch.pi + first_pole_index * torch.pi
+        if (first_pole <= upper).any():
+            raise OperatorDomainError(
+                'tan',
+                'pre-activation bounds cross a pole; '
+                'split the input interval',
+            )
+
+        # Lower and upper bounds must be within the same open interval between
+        # adjacent poles. Period IDs are used by the relaxation below.
         lower_periods = torch.floor((lower + 0.5 * torch.pi) / torch.pi)
         upper_periods = torch.floor((upper + 0.5 * torch.pi) / torch.pi)
         if not torch.allclose(lower_periods, upper_periods):
-            print('Tan preactivation lower bounds:\n', lower)
-            print('Tan preactivation upper bounds:\n', upper)
-            raise ValueError("BoundTan received pre-activation bounds that produce infinity. "
-                    "The preactivation bounds are too loose. Try to reduce perturbation region.")
+            raise OperatorDomainError(
+                'tan',
+                'pre-activation bounds cross a pole; '
+                'split the input interval',
+            )
         # Return the period number for each neuron.
         # Period is 0 => bounds are within [-½π, ½π],
         # Period is 1 => bounds are within [-½π + π, ½π + π]
@@ -1285,14 +1510,14 @@ class BoundTan(BoundAtan):
     def interval_propagate(self, *v):
         # We need to check if the input lower and upper bounds are within the same period.
         # Otherwise the bounds become infinity.
-        concrete_lower, concrete_upper = v[0][0], v[0][1]
-        self._check_bounds(concrete_lower, concrete_upper)
+        concrete_lower, concrete_upper = v[0].lower, v[0].upper
+        self._periods_for_bounds(concrete_lower, concrete_upper)
         return super().interval_propagate(*v)
 
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:
             self.init_linear_relaxation(x, dim_opt)
-        periods = self._check_bounds(x.lower, x.upper)
+        periods = self._periods_for_bounds(x.lower, x.upper)
         periods = torch.pi * periods
         # Create a fake x with inversed lower and upper.
         inverse_x = lambda: None

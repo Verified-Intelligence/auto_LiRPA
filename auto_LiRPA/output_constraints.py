@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -45,11 +45,15 @@ def invprop_check_infeasible_bounds(self: 'BoundedModule', lb, ub):
         if lb is not None:
             assert lb.size(0) == self.infeasible_bounds.size(0)
             lb = torch.where(self.infeasible_bounds.unsqueeze(1),
-                             torch.tensor(float('inf'), device=lb.device), lb)
+                             torch.tensor(
+                                 float('inf'), dtype=lb.dtype, device=lb.device),
+                             lb)
         if ub is not None:
             assert ub.size(0) == self.infeasible_bounds.size(0)
             ub = torch.where(self.infeasible_bounds.unsqueeze(1),
-                             torch.tensor(float('-inf'), device=ub.device), ub)
+                             torch.tensor(
+                                 float('-inf'), dtype=ub.dtype, device=ub.device),
+                             ub)
     return lb, ub
 
 
@@ -191,9 +195,13 @@ def backward_general_with_output_constraint(
         if hasattr(bound_node, 'opt_stage'):
             assert bound_node.opt_stage not in ['opt', 'reuse']
         if batch_size == 1:
-            gammas = torch.zeros((2, num_constraints, neurons_in_layer), device=device)
+            gammas = torch.zeros(
+                (2, num_constraints, neurons_in_layer),
+                dtype=H.dtype, device=device)
         else:
-            gammas = torch.zeros((2, batch_size, neurons_in_layer), device=device)
+            gammas = torch.zeros(
+                (2, batch_size, neurons_in_layer),
+                dtype=H.dtype, device=device)
 
     # H.shape = (batch_size, output_neurons, num_constraints==1)
     # We need used_weight.shape = (batch_size, this_layer_neurons, prev_layer_neurons)
@@ -210,9 +218,11 @@ def backward_general_with_output_constraint(
     linear_Hxd_layer_weight.upper = linear_Hxd_layer_weight_value
 
     if batch_size == 1:
-        linear_Hxd_layer_bias_value = nn.Parameter(d.float().to(device))
+        linear_Hxd_layer_bias_value = nn.Parameter(
+            d.to(device=device, dtype=gammas.dtype))
     else:
-        linear_Hxd_layer_bias_value = nn.Parameter(d.float().to(device).unsqueeze(1))
+        linear_Hxd_layer_bias_value = nn.Parameter(
+            d.to(device=device, dtype=gammas.dtype).unsqueeze(1))
     linear_Hxd_layer_bias = BoundParams(
         ori_name="/linear_Hxd_layer_bias",
         value=None,
@@ -343,9 +353,13 @@ def backward_general_with_output_constraint(
         assert len(C.shape) == 3
         # This is expensive, but Reshape doesn't support OneHotC objects
         if isinstance(C, OneHotC):
-            C = torch.eye(C.shape[2], device=C.device)[C.index].unsqueeze(1).expand(-1, batch_size, -1)
+            C = torch.eye(
+                C.shape[2], dtype=gammas.dtype, device=C.device
+            )[C.index].unsqueeze(1).expand(-1, batch_size, -1)
         else:
-            C = torch.eye(C.shape[2], device=C.device).unsqueeze(1).expand(-1, batch_size, -1)
+            C = torch.eye(
+                C.shape[2], dtype=gammas.dtype, device=C.device
+            ).unsqueeze(1).expand(-1, batch_size, -1)
 
     start_shape = None
     lA = C if bound_lower else None

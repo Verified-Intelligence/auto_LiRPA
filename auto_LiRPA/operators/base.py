@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Base class and functions for implementing bound operators"""
@@ -20,7 +20,6 @@ import warnings
 import torch
 import torch.nn as nn
 from torch import Tensor
-import numpy as np
 
 from ..perturbations import *
 from ..utils import *
@@ -32,6 +31,22 @@ torch._C._jit_set_profiling_mode(False)
 epsilon = 1e-12
 
 
+class OperatorDomainError(ValueError):
+    """Input bounds include values outside an operator's real domain."""
+
+    def __init__(self, operator, message):
+        self.operator = operator
+        super().__init__(f'{operator}: {message}')
+
+
+class OperatorCapabilityError(RuntimeError):
+    """A bound method does not implement a mathematically valid input case."""
+
+    def __init__(self, operator, message):
+        self.operator = operator
+        super().__init__(f'{operator}: {message}')
+
+
 def not_implemented_op(node, func):
     message = (
         f'Function `{func}` of `{node}` is not supported yet.'
@@ -41,66 +56,20 @@ def not_implemented_op(node, func):
     raise NotImplementedError(message)
 
 
-class Interval(tuple):
-    """Interval object for interval bound propagation."""
+class Interval:
+    """Elementwise bounds used by interval bound propagation."""
 
-    # Subclassing tuple object so that all previous code can be reused.
-    def __new__(self, lb=None, ub=None, ptb=None):
-        return tuple.__new__(Interval, (lb, ub))
+    __slots__ = ('lower', 'upper')
 
-    def __init__(self, lb, ub, ptb=None):
-        if ptb is None:
-            self.ptb = None
-            # `self.ptb == None` means that this interval
-            # is not perturbed and it shall be treated as a constant and lb = ub.
-            # To avoid mistakes, in this case the caller must make sure lb and ub are the same object.
-            assert lb is ub
-        else:
-            if not isinstance(ptb, Perturbation):
-                raise ValueError("ptb must be a Perturbation object or None. Got type {}".format(type(ptb)))
-            else:
-                self.ptb = ptb
+    def __init__(self, lower, upper):
+        self.lower = lower
+        self.upper = upper
 
     def __str__(self):
-        return "({}, {}) with ptb={}".format(self[0], self[1], self.ptb)
+        return f'({self.lower}, {self.upper})'
 
     def __repr__(self):
-        return "Interval(lb={}, ub={}, ptb={})".format(self[0], self[1], self.ptb)
-
-    @staticmethod
-    def make_interval(lb, ub, other=None):
-        """Checking if the other interval is tuple, keep the perturbation."""
-        if isinstance(other, Interval):
-            return Interval(lb, ub, ptb=other.ptb)
-        else:
-            return (lb, ub)
-
-    @staticmethod
-    def get_perturbation(interval):
-        """Given a tuple or Interval object, returns the norm and eps."""
-        if isinstance(interval, Interval) and interval.ptb is not None:
-            if isinstance(interval.ptb, PerturbationLpNorm):
-                return interval.ptb.norm, interval.ptb.eps
-            elif isinstance(interval.ptb, PerturbationSynonym):
-                return torch.inf, 1.0
-            elif isinstance(interval.ptb, PerturbationL0Norm):
-                return 0, interval.ptb.eps, interval.ptb.ratio
-            elif isinstance(interval.ptb, PerturbationLinear):
-                return torch.inf, 0.0
-            else:
-                raise RuntimeError("get_perturbation() does not know how to handle {}".format(type(interval.ptb)))
-        else:
-            # Tuple object. Assuming L infinity norm lower and upper bounds.
-            return torch.inf, np.nan
-
-
-    @staticmethod
-    def is_perturbed(interval):
-        """Checking if a Interval or tuple object has perturbation enabled."""
-        if isinstance(interval, Interval) and interval.ptb is None:
-            return False
-        else:
-            return True
+        return f'Interval({self.lower!r}, {self.upper!r})'
 
 
 class Bound(nn.Module):
@@ -132,28 +101,36 @@ class Bound(nn.Module):
         self.attr = attr
         self.inputs: List['Bound'] = inputs
         self.output_index = output_index
+        self.bound_opts = options
         self.options = options
-        # Mark if this node is used in the bound computation (from the output node).
-        self.used = False
+        # Concrete output cache managed by BoundedModule. Bound methods may
+        # read it after the propagation driver has prepared their inputs.
         self.forward_value = None
+        # Keep the output dtype after forward_value is cleared between bound calls.
+        self.output_dtype = None
         self.output_shape = None
-        self.from_input = False
-        self.bounded = False
+        # Sensitivity to runtime model input values at fixed input shapes.
+        # batch_dim records tensor layout separately.
+        self.input_dependent = False
+        # Shape-like operators produce structure-only outputs.
+        self.blocks_input_dependency = False
         self.IBP_rets = None
         self.requires_input_bounds = []
         self.from_complex_node = None
-        # If True, when building the Jacobian graph, this node should be treated
-        # as a constant and there is no need to further propagate Jacobian.
-        self.no_jacobian = False
+        # Jacobian graph construction treats fixed-output nodes as leaves.
+        self.blocks_jacobian = False
         # If True, when we are computing intermediate bounds for these ops,
         # we simply use IBP to propagate bounds from its input nodes
         # instead of CROWN. Currently only operators with a single input can be
         # supported.
         self.ibp_intermediate = False
-        self.splittable = self.force_not_splittable = False
-        # Determine if this node has a perturbed output or not. The function BoundedModule._mark_perturbed_nodes() will set this property.
+        # Operator support for splits over perturbed operands. Verifier policy
+        # is applied through disabled_split_nodes.
+        self.splittable = False
+        # Whether this node depends on an active perturbation. This is
+        # propagated by BoundedModule._mark_perturbed_nodes().
         self.perturbed = False
-        self.never_perturbed = False
+        self.blocks_perturbation = False
         if options is not None and 'loss_fusion' in options:
             self.loss_fusion = options['loss_fusion']
         else:
@@ -187,6 +164,57 @@ class Bound(nn.Module):
         # A list containing the output ACTIVATIONS node from this node.
         # Please check backward_bound.py, forward_bound.py, batch_branch_and_bound.py for more info.
         self.output_activations = None
+
+    def get_bound_opt(self, key, default=None):
+        """Read a global BoundedModule bound option."""
+        if isinstance(self.bound_opts, dict):
+            return self.bound_opts.get(key, default)
+        return default
+
+    def check_bound_invariants(self, lower, upper, *, context):
+        """Reject NaN bounds at framework propagation boundaries."""
+        # Exact IBP branches use the same tensor for both endpoints. For two
+        # endpoints on one device, combine flags before synchronizing the host.
+        bounds = [('lower', lower)]
+        if upper is not lower:
+            bounds.append(('upper', upper))
+        # Each (side, flag) identifies whether that endpoint contains any NaN.
+        flags = [(side, torch.isnan(bound).any()) for side, bound in bounds
+                 if isinstance(bound, Tensor)]
+        if (len(flags) == 2 and flags[0][1].device == flags[1][1].device
+                and not torch.logical_or(flags[0][1], flags[1][1])):
+            return
+        node_name = getattr(self, 'name', None) or self.__class__.__name__
+        for side, has_nan in flags:
+            if has_nan:
+                raise RuntimeError(
+                    f'NaN detected in {context} {side} bound of {node_name}')
+
+    def require_finite_relaxation_bounds(
+            self, lower, upper, *, operator):
+        """Reject concrete endpoints unsupported by an affine relaxation.
+
+        Call this where a bound method constructs affine slopes or biases from
+        pre-activation bounds. Relaxations with a sound unbounded-domain case
+        do not need this check.
+        """
+        # A finite sum proves both real endpoints finite, with one joint
+        # finiteness reduction. Overflow of finite endpoints merely takes the
+        # full check below; infeasible unbounded intervals still pass.
+        if (lower.is_floating_point() and upper.is_floating_point()
+                and ((lower + upper).abs() < float('inf')).all()):
+            return
+        finite = torch.isfinite(lower) & torch.isfinite(upper)
+        # An inverted interval represents an already infeasible domain, so no
+        # concrete value in that interval requires a linear relaxation.
+        if torch.all(finite | (lower > upper)):
+            return
+        self.check_bound_invariants(
+            lower, upper,
+            context='linear bound propagation pre-activation')
+        raise OperatorCapabilityError(
+            operator,
+            'affine bound propagation requires finite input bounds')
 
     def __repr__(self, attrs=None):
         inputs = ', '.join([node.name for node in self.inputs])
@@ -268,7 +296,7 @@ class Bound(nn.Module):
                     return True
         return False
 
-    def init_gammas(self, num_constraints):
+    def init_gammas(self, num_constraints, *, dtype, device):
         if not self.are_output_constraints_activated_for_layer(
             self.options.get('optimize_bound_args', {}).get('apply_output_constraints_to', [])
         ):
@@ -287,10 +315,14 @@ class Bound(nn.Module):
         # Note that _set_gammas in optimized_bounds.py needs to refer to the gammas_underlying_tensor,
         # because that's the leaf tensor for which we need to compute gradients.
         if self.options.get('optimize_bound_args', {}).get('share_gammas', False):
-            self.gammas_underlying_tensor = torch.full((2, num_constraints, 1), init_gamma_value, requires_grad=True, device=self.device)
+            self.gammas_underlying_tensor = torch.full(
+                (2, num_constraints, 1), init_gamma_value,
+                dtype=dtype, requires_grad=True, device=device)
             self.gammas = self.gammas_underlying_tensor.expand(-1, -1, neurons_in_this_layer)
         else:
-            self.gammas_underlying_tensor = torch.full((2, num_constraints, neurons_in_this_layer), init_gamma_value, requires_grad=True, device=self.device)
+            self.gammas_underlying_tensor = torch.full(
+                (2, num_constraints, neurons_in_this_layer), init_gamma_value,
+                dtype=dtype, requires_grad=True, device=device)
             self.gammas = self.gammas_underlying_tensor
 
     def clip_gammas(self):
@@ -339,14 +371,32 @@ class Bound(nn.Module):
         in the `__init__` function, and the implementation of this function can be skipped.
 
         Args:
-            v: A list of the interval bound of input nodes.
-            Generally, for each element `v[i]`, `v[i][0]` is the lower interval bound,
-            and `v[i][1]` is the upper interval bound.
+            v: One :class:`Interval` for each input node. ``v[i].lower`` and
+                ``v[i].upper`` are its endpoints.
 
         Returns:
-            bound: The interval bound of this node, in a same format as v[i].
+            Interval: The output interval.
+
+        The IBP driver may separately track a structured model-input state as
+        ``(center, perturbation)``. Operators normally ignore this state and
+        implement only ``interval_propagate()``. The following optional hooks
+        are available for operators that preserve or directly bound it:
+
+        ``_propagate_input_perturbation_state(v, states)``
+            ``v`` contains one :class:`Interval` per input, and ``states``
+            contains the corresponding ``(center, perturbation)`` value or
+            ``None``. Return the output state, or ``None`` when the structured
+            representation cannot be preserved.
+
+        ``_bound_from_input_perturbation_state(*v, state, **kwargs)``
+            Consume the state associated with the first input and return the
+            output :class:`Interval`. The driver uses this result instead of
+            calling ``interval_propagate()``.
+
+        The driver owns the state lifetime. These hooks must not store it on
+        the operator or include it in the returned :class:`Interval`.
         """
-        if self.use_default_ibp or self.never_perturbed:
+        if self.use_default_ibp:
             return self.default_interval_propagate(*v)
         else:
             return not_implemented_op(self, 'interval_propagate')
@@ -358,14 +408,16 @@ class Bound(nn.Module):
         but not values.
         """
         if len(v) == 0:
-            return Interval.make_interval(self.forward(), self.forward())
+            value = self.forward()
+            return Interval(value, value)
         else:
             if len(v) > 1:
                 for i in range(1, len(v)):
                     assert not self.is_input_perturbed(i)
-            return Interval.make_interval(
-                self.forward(v[0][0], *[vv[0] for vv in v[1:]]),
-                self.forward(v[0][1], *[vv[0] for vv in v[1:]]), v[0])
+            other_inputs = [vv.lower for vv in v[1:]]
+            lower = self.forward(v[0].lower, *other_inputs)
+            upper = self.forward(v[0].upper, *other_inputs)
+            return Interval(lower, upper)
 
     def bound_forward(self, dim_in, *x):
         r"""
@@ -549,10 +601,11 @@ class Bound(nn.Module):
         else:
             return axis
 
-    def update_requires_input_bounds(self):
-        """Update requires_input_bounds.
+    def update_input_perturbation_state(self):
+        """Update operator state after input perturbation flags are propagated.
 
-        This function is called once we know if the input nodesare perturbed.
+        Recompute relaxation requirements and any input-dependent splitting
+        eligibility on every call; verifier policy is applied separately.
         """
         pass
 
@@ -564,7 +617,7 @@ class Bound(nn.Module):
         if hasattr(node, 'cstr_interval'):
             flag = True
         for n in node.inputs:
-            if not n.from_input:
+            if not n.input_dependent:
                 flag = flag or self.check_constraint_available(n, flag)
         return flag
 
@@ -578,9 +631,11 @@ class Bound(nn.Module):
                     del n.cstr_lower
                     del n.cstr_upper
 
-        if not node.perturbed and hasattr(node, 'forward_value'):
-            node.cstr_lower, node.cstr_upper = node.cstr_interval = (
+        if not node.perturbed and node.forward_value is not None:
+            node.cstr_interval = Interval(
                 node.forward_value, node.forward_value)
+            node.cstr_lower = node.cstr_interval.lower
+            node.cstr_upper = node.cstr_interval.upper
 
         to_be_deleted_bounds = []
         if not hasattr(node, 'cstr_interval'):
@@ -592,21 +647,25 @@ class Bound(nn.Module):
                     to_be_deleted_bounds.append(n)
             inp = [n_pre.cstr_interval for n_pre in node.inputs]
             node.cstr_interval = node.interval_propagate(*inp)
+            if not isinstance(node.cstr_interval, Interval):
+                raise TypeError(
+                    f'{node}.interval_propagate() must return Interval, got '
+                    f'{type(node.cstr_interval)}')
 
-            node.cstr_lower, node.cstr_upper = node.cstr_interval
+            node.cstr_lower = node.cstr_interval.lower
+            node.cstr_upper = node.cstr_interval.upper
             if isinstance(node.cstr_lower, torch.Size):
                 node.cstr_lower = torch.tensor(node.cstr_lower)
-                node.cstr_interval = (node.cstr_lower, node.cstr_upper)
             if isinstance(node.cstr_upper, torch.Size):
                 node.cstr_upper = torch.tensor(node.cstr_upper)
-                node.cstr_interval = (node.cstr_lower, node.cstr_upper)
+            node.cstr_interval = Interval(
+                node.cstr_lower, node.cstr_upper)
 
         if node.is_lower_bound_current():
             node.lower = torch.where(node.lower >= node.cstr_lower, node.lower,
                             node.cstr_lower)
             node.upper = torch.where(node.upper <= node.cstr_upper, node.upper,
                             node.cstr_upper)
-            node.interval = (node.lower, node.upper)
 
         _delete_unused_bounds(to_be_deleted_bounds)
         return node.cstr_interval

@@ -11,9 +11,11 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
+import warnings
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -126,22 +128,40 @@ class Patches:
     """
     def __init__(
             self, patches=None, stride=1, padding=0, shape=None, identity=0,
-            unstable_idx=None, output_shape=None, inserted_zeros=0, output_padding=0, input_shape=None):
+            unstable_idx=None, output_shape=None, inserted_zeros=0, output_padding=0,
+            input_shape=None, padding_pos_masked=False):
         # Shape: [batch_size, num_of_patches, out_channel, in_channel, M, M]
         # M is the size of a single patch
         # Assume that we have a conv2D layer with w.weight(out_channel, in_channel, M, M), stride and padding applied on an image (N * N)
         # num_of_patches = ((N + padding * 2 - M)//stride + 1) ** 2
         # Here we only consider kernels with the same H and W
-        self.patches = patches
-        self.stride = stride
-        self.padding = padding
+        self.patches = patches            # Patch tensor, see class docstring for shape.
+        self.stride = stride              # Stride used when unfolding/propagating these patches.
+        self.padding = padding            # Padding applied to the input for these patches (same format as conv).
+        # Cached shape of the patch tensor. Used to reshape/restore dimensions when
+        # converting between patches and dense matrices (matrix mode).
         self.shape = shape
+        # 1 if representing an identity mapping. This avoids constructing large
+        # patch tensors for identity/spec selection fast paths.
         self.identity = identity
+        # Sparse indices of unstable neurons (for ReLU/activation). This keeps only the
+        # needed subset of patches during optimization, reducing memory/compute.
         self.unstable_idx = unstable_idx
-        self.output_shape = output_shape
-        self.input_shape = input_shape
+        self.output_shape = output_shape  # Output shape of the layer that produced these patches.
+        self.input_shape = input_shape    # Input shape corresponding to these patches.
+        # Inserted zeros simulate the spacing of transposed convolution or strided
+        # operations when propagating patches backward. insert_zeros() expands the
+        # patch grid so the effective stride matches the forward op.
         self.inserted_zeros = inserted_zeros
+        # Output padding used by transposed convolution to align spatial sizes when
+        # reversing stride/padding. Needed to keep patch shapes consistent.
         self.output_padding = output_padding
+        # True if padding positions inside patches have already been masked to zero.
+        # We must mask because padding locations do not contain real valid values in intermediate
+        # layers, but kernel merging (transposed conv on patches) would otherwise treat them
+        # as valid and mix their values into the result. create_padding() builds a valid-position
+        # mask and multiplies patches to zero out those padding entries.
+        self.padding_pos_masked = padding_pos_masked
         self.simplify()
 
     def __add__(self, other):
@@ -168,7 +188,9 @@ class Patches:
             ret = A1 + A2
             return Patches(ret, other.stride, torch.max(sp, op).tolist(),
                            ret.shape, unstable_idx=self.unstable_idx, output_shape=self.output_shape,
-                           inserted_zeros=self.inserted_zeros, output_padding=self.output_padding)
+                           inserted_zeros=self.inserted_zeros, output_padding=self.output_padding,
+                           padding_pos_masked=self.padding_pos_masked
+                           and other.padding_pos_masked)
         else:
             assert self.inserted_zeros == 0
             assert not is_shape_used(self.output_padding)
@@ -191,6 +213,7 @@ class Patches:
         return (
                 f"Patches(stride={self.stride}, padding={self.padding}, "
                 f"output_padding={self.output_padding}, inserted_zeros={self.inserted_zeros}, "
+                f"padding_pos_masked={self.padding_pos_masked}, "
                 f"kernel_shape={list(self.patches.shape)}, input_shape={self.input_shape}, "
                 f"output_shape={self.output_shape}, unstable_idx={type(self.unstable_idx)})"
         )
@@ -208,12 +231,17 @@ class Patches:
 
     def create_similar(self, patches=None, stride=None, padding=None, identity=None,
                        unstable_idx=None, output_shape=None, inserted_zeros=None, output_padding=None,
-                       input_shape=None):
+                       input_shape=None, padding_pos_masked=None):
         """
         Create a new Patches object with new patches weights, and keep other properties the same.
         """
         new_patches = self.patches.clone() if patches is None else patches
         new_identity = self.identity if identity is None else identity
+        new_padding_pos_masked = (
+            self.padding_pos_masked
+            if padding_pos_masked is None
+            else padding_pos_masked
+        )
         if new_identity and (new_patches is not None):
             raise ValueError("Identity Patches should have .patches property set to 0.")
         return Patches(
@@ -227,6 +255,7 @@ class Patches:
             inserted_zeros=self.inserted_zeros if inserted_zeros is None else inserted_zeros,
             output_padding=self.output_padding if output_padding is None else output_padding,
             input_shape=self.input_shape if input_shape is None else input_shape,
+            padding_pos_masked=new_padding_pos_masked,
         )
     
     def clone(self):
@@ -248,6 +277,7 @@ class Patches:
             inserted_zeros=self.inserted_zeros,
             output_padding=self.output_padding,
             input_shape=self.input_shape,
+            padding_pos_masked=self.padding_pos_masked,
         )
         return new_obj
 
@@ -271,9 +301,36 @@ class Patches:
             # when computing the simplified padding, we should view (inserted_zeros-1) padding entries from one end side
             # as part of the inserted_zero matrices (i.e., "consumed")
             consumed_padding = (padding[0], padding[1] - (stride[1] - 1), padding[2], padding[3] - (stride[0] - 1))
-            tentative_padding = tuple(p // s - o for p, s, o in zip(consumed_padding, full_stride, unify_shape(self.output_padding)))
+            output_padding = unify_shape(self.output_padding)
+            tentative_padding = tuple(p // s - o for p, s, o in zip(consumed_padding, full_stride, output_padding))
             # negative padding is inconvenient
-            if all([p >= 0 for p in tentative_padding]):
+            #
+            # Nonnegative simplified padding is not enough on its own. The old
+            # metadata keeps one axis as a single quantity:
+            #     floor((left + right + 1) / stride)
+            # but the simplified metadata splits the two sides and divides them
+            # independently:
+            #     floor(left / stride) + floor((right + 1) / stride)
+            #
+            # The "+1" on the right term comes from the asymmetric
+            # zero-inserted lattice:
+            #     [x 0 0 x 0 0 x]
+            # instead of
+            #     [x 0 0 x 0 0 x 0 0]
+            #
+            # These two expressions differ exactly when the two side remainders
+            # create a carry across the split. In that case simplifying would
+            # silently drop one output position on the axis.
+            #
+            # So simplification is only safe when the remainders do not carry:
+            #     (left % stride) + ((right + 1) % stride) < stride
+            width_preserves_grid = (
+                (padding[0] % stride[1]) + ((padding[1] + 1) % stride[1]) < stride[1]
+            )
+            height_preserves_grid = (
+                (padding[2] % stride[0]) + ((padding[3] + 1) % stride[0]) < stride[0]
+            )
+            if all([p >= 0 for p in tentative_padding]) and width_preserves_grid and height_preserves_grid:
                 remove_zero_start_idx = (padding[2] % stride[0], padding[0] % stride[1])
                 self.padding = tentative_padding
                 self.patches = remove_zeros(self.patches, self.inserted_zeros, remove_zero_start_idx=remove_zero_start_idx)
@@ -320,7 +377,7 @@ class Patches:
             return torch.einsum('bijchw,sbijchw->bsij', unfold_input, patches)
 
     def create_padding(self, output_shape):
-        # patches was not padded, so we need to pad them here.
+        # boundary padding was not masked, so we need to mask it here.
         # If this layer is followed by a ReLU layer, then the padding was already handled there and there is no need to pad again.
         one_d_unfolded_r = create_valid_mask(
             output_shape, self.patches.device,
@@ -332,6 +389,9 @@ class Patches:
             self.output_padding,
             self.unstable_idx if self.unstable_idx else None)
         patches = self.patches * one_d_unfolded_r
+        # In-place update so we keep returning a raw tensor but mark masked state.
+        self.patches = patches
+        self.padding_pos_masked = True
         return patches
 
 
@@ -339,24 +399,41 @@ def compute_patches_stride_padding(input_shape, patches_padding, patches_stride,
     """
     Compute stride and padding after a conv layer with patches mode.
     """
-    for p in (patches_padding, patches_stride, op_padding, op_stride):
-        assert isinstance(p, int) or (isinstance(p, (list, tuple)) and (len(p) == 2 or len(p) == 4))
-    # If p is int, then same padding on all 4 sides.
-    # If p is 2-tuple, then it is padding p[0] on both sides of H, p[1] on both sides of W
-    # If p is 4-tuple, then it is padding p[2], p[3] on top and bottom sides of H, p[0] and p[1] on left and right sides of W
+    assert isinstance(patches_stride, int) or (
+        isinstance(patches_stride, (list, tuple)) and len(patches_stride) == 2)
+    assert isinstance(op_stride, int) or (
+        isinstance(op_stride, (list, tuple)) and len(op_stride) == 2)
 
-    # If any of the inputs are not tuple/list, we convert them to tuple.
-    full_patch_padding, full_op_padding, full_patch_stride, full_op_stride = [
-            (p, p) if isinstance(p, int) else p for p in [patches_padding, op_padding, patches_stride, op_stride]]
-    full_patch_padding, full_op_padding, full_patch_stride, full_op_stride = [
-            (p[1], p[1], p[0], p[0]) if len(p) == 2 else p for p in [full_patch_padding, full_op_padding, full_patch_stride, full_op_stride]]
+    # Padding and stride carry different geometry. Padding uses four sides
+    # (left, right, top, bottom), while stride stays a true 2D quantity
+    # (stride_h, stride_w).
+    # unify_shape() validates accepted padding layouts; explicit assertions are
+    # kept for stride because only int and 2-tuple forms are valid here.
+    full_patch_padding = unify_shape(patches_padding)
+    full_op_padding = unify_shape(op_padding)
+    full_patch_stride = (
+        (patches_stride, patches_stride)
+        if isinstance(patches_stride, int) else tuple(patches_stride)
+    )
+    full_op_stride = (
+        (op_stride, op_stride)
+        if isinstance(op_stride, int) else tuple(op_stride)
+    )
+    # When padding is propagated through an operator, width-side padding scales
+    # with width stride and height-side padding scales with height stride.
+    op_stride_as_padding = (
+        full_op_stride[1], full_op_stride[1],
+        full_op_stride[0], full_op_stride[0],
+    )
     # Compute the new padding and stride after this layer.
-    new_padding = tuple(pp * os + op * (inserted_zeros + 1) for pp, op, os in zip(full_patch_padding, full_op_padding, full_op_stride))
+    new_padding = tuple(
+        pp * os + op * (inserted_zeros + 1)
+        for pp, op, os in zip(full_patch_padding, full_op_padding, op_stride_as_padding))
     new_stride = tuple(ps * os for ps, os in zip(full_patch_stride, full_op_stride))
 
     output_padding = unify_shape(output_padding)
     new_output_padding = (output_padding[0],  # Left
-          output_padding[1] + inserted_zeros * input_shape[3] % full_op_stride[2],  # Right
+          output_padding[1] + inserted_zeros * input_shape[3] % full_op_stride[1],  # Right
           output_padding[2],  # Top
           output_padding[3] + inserted_zeros * input_shape[2] % full_op_stride[0])  # Bottom
 
@@ -379,8 +456,29 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
     deterministic = torch.are_deterministic_algorithms_enabled()
     torch.use_deterministic_algorithms(False)
 
-    if type(padding) == int:
-        padding = (padding, padding, padding, padding)
+    padding = unify_shape(padding)
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    else:
+        # patches_to_matrix() builds a 2D sliding-window view, so stride must
+        # remain a true (height, width) quantity here.
+        #
+        # If a 4-tuple stride reaches this path, interpret it as padding-layout
+        # metadata "(left, right, top, bottom)" and convert it to
+        # "(stride_h, stride_w)".
+        stride = tuple(stride)
+        if len(stride) == 4:
+            warnings.warn(
+                "patches_to_matrix() received 4-tuple patch stride "
+                f"{stride}. Patch stride should be an int or a 2-tuple "
+                "(stride_h, stride_w), so interpreting the tuple as "
+                "padding-layout metadata.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            stride = (stride[2], stride[0])
+        assert len(stride) == 2
+    stride_h, stride_w = stride
 
     if pieces.ndim == 9:
         # Squeeze two additional dimensions for output and input respectively
@@ -410,7 +508,10 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
         orig_stride = A_matrix.stride()
         # This is the main trick - we create a *view* of the original matrix, and it contains all sliding windows for the convolution.
         # Since we only created a view (in fact, only metadata of the matrix changed), it should be very efficient.
-        matrix_strided = torch.as_strided(A_matrix, [batch_size, output_channel, output_x, output_y, output_x, output_y, input_channel, kernel_x, kernel_y], [orig_stride[0], orig_stride[1], orig_stride[2], orig_stride[3], (input_x + padding[2] + padding[3]) * stride, stride, orig_stride[4], input_y + padding[0] + padding[1], 1])
+        # The flattened padded input is row-major. Advancing one patch row must
+        # therefore move by "padded width * height stride", while advancing one
+        # patch column moves by the width stride alone.
+        matrix_strided = torch.as_strided(A_matrix, [batch_size, output_channel, output_x, output_y, output_x, output_y, input_channel, kernel_x, kernel_y], [orig_stride[0], orig_stride[1], orig_stride[2], orig_stride[3], (input_y + padding[0] + padding[1]) * stride_h, stride_w, orig_stride[4], input_y + padding[0] + padding[1], 1])
         # Now we need to fill the conv kernel parameters into the last three dimensions of matrix_strided.
         first_indices = torch.arange(output_x * output_y, device=pieces.device)
         second_indices = torch.div(first_indices, output_y, rounding_mode="trunc")
@@ -428,7 +529,8 @@ def patches_to_matrix(pieces, input_shape, stride, padding, output_shape=None,
         orig_stride = A_matrix.stride()
         # This is the main trick - we create a *view* of the original matrix, and it contains all sliding windows for the convolution.
         # Since we only created a view (in fact, only metadata of the matrix changed), it should be very efficient.
-        matrix_strided = torch.as_strided(A_matrix, [batch_size, unstable_size, output_x, output_y, input_channel, kernel_x, kernel_y], [orig_stride[0], orig_stride[1], (input_x + padding[2] + padding[3]) * stride, stride, orig_stride[2], input_y + padding[0] + padding[1], 1])
+        # Same row-major reasoning for the sparse unstable-index path.
+        matrix_strided = torch.as_strided(A_matrix, [batch_size, unstable_size, output_x, output_y, input_channel, kernel_x, kernel_y], [orig_stride[0], orig_stride[1], (input_y + padding[0] + padding[1]) * stride_h, stride_w, orig_stride[2], input_y + padding[0] + padding[1], 1])
         # pieces have shape (unstable_size, batch, c, h, w).
         first_indices = torch.arange(unstable_size, device=pieces.device)
         matrix_strided[:,first_indices,unstable_idx[1],unstable_idx[2],:,:,:] = pieces.transpose(0, 1).to(matrix_strided)
@@ -577,7 +679,7 @@ def maybe_unfold_patches(d_tensor, last_A, alpha_lookup_idx=None):
                     # Non spec-sparse, non-shared alpha.
                     # Shape after unfolding is (out_c*out_h*out_w, batch, out_h, out_w, in_c, patch_h, patch_w).
                     # Reshaped to (out_c, out_h, out_w, batch, out_h, out_w, in_c, patch_h, patch_w).
-                    d_unfolded_r = d_unfolded_r.view(last_A.shape[0], last_A.shape[2], last_A.shape[3], -1, *d_unfolded_r.shape[2:])
+                    d_unfolded_r = d_unfolded_r.view(*last_A.output_shape[1:4], -1, *d_unfolded_r.shape[2:])
                     # Select on all out_c, out_h, out_w dimensions.
                     d_unfolded_r = d_unfolded_r[last_A.unstable_idx[0], last_A.unstable_idx[1],
                             last_A.unstable_idx[2], :, last_A.unstable_idx[1], last_A.unstable_idx[2]]

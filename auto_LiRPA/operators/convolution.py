@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Convolution and padding operators"""
@@ -53,11 +53,8 @@ class BoundConv(Bound):
         if options is None:
             options = {}
         self.mode = options.get("conv_mode", "matrix")
-        # denote whether this Conv is followed by a ReLU
-        # if self.relu_followed is False, we need to manually pad the conv patches.
-        # If self.relu_followed is True, the patches are padded in the ReLU layer
-        # and the manual padding is not needed.
-        self.relu_followed = False
+        # Whether conv patches have been masked at the boundary is tracked by the
+        # incoming A (Patches.padding_pos_masked).
 
     def forward(self, *x):
         # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
@@ -118,11 +115,10 @@ class BoundConv(Bound):
                 assert self.conv_dim == 2, 'Patches mode not supports conv1d so far.'
                 assert type(last_A) == Patches
                 if last_A.identity == 0:
-                    # FIXME (09/20): Don't call it relu_followed. Instead, make this a property of A, called "padded" and propagate this property.
-                    if not self.relu_followed:
-                        patches = last_A.create_padding(self.output_shape)
-                    else:
+                    if last_A.padding_pos_masked:
                         patches = last_A.patches
+                    else:
+                        patches = last_A.create_padding(self.output_shape)
 
                     if self.has_bias:
                         # bias is x[2] (lower and upper are the same), and has shape (c,).
@@ -198,7 +194,7 @@ class BoundConv(Bound):
                     return A_matrix, sum_bias
                 new_patches = last_A.create_similar(
                         pieces, stride=stride, padding=padding, output_padding=output_padding,
-                        identity=0, input_shape=self.input_shape)
+                        identity=0, input_shape=self.input_shape, padding_pos_masked=False)
                 # if last_A is last_lA:
                 #     print(f'Conv : start_node {kwargs["start_node"].name} layer {self.name} {new_patches}')
                 return new_patches, sum_bias
@@ -350,46 +346,91 @@ class BoundConv(Bound):
         if self.is_input_perturbed(1):
             raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
 
-        norm = Interval.get_perturbation(v[0])
-        norm = norm[0]
+        h_L, h_U = v[0].lower, v[0].upper
+        weight = v[1].lower
 
-        h_L, h_U = v[0]
-        weight = v[1][0]
-        bias = v[2][0] if self.has_bias else None
+        mid = (h_U + h_L) / 2.0
+        diff = (h_U - h_L) / 2.0
+        weight_abs = weight.abs()
+        deviation = self.F_conv(
+            diff, weight_abs, None, self.stride, self.padding,
+            self.dilation, self.groups)
 
-        if norm == torch.inf:
-            mid = (h_U + h_L) / 2.0
-            diff = (h_U - h_L) / 2.0
-            weight_abs = weight.abs()
-            deviation = self.F_conv(diff, weight_abs, None, self.stride, self.padding, self.dilation, self.groups)
-        elif norm > 0:
-            norm, eps = Interval.get_perturbation(v[0])
-            # L2 norm, h_U and h_L are the same.
-            mid = h_U
-            # TODO: padding
-            assert not isinstance(eps, torch.Tensor) or eps.numel() == 1
-            deviation = torch.mul(weight, weight).sum((1, 2, 3)).sqrt() * eps
-            deviation = deviation.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-        else: # Here we calculate the L0 norm IBP bound using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
-            norm, eps, ratio = Interval.get_perturbation(v[0])
-            mid = h_U
-            k = int(eps)
-            weight_sum = torch.sum(weight.abs(), 1)
-            deviation = torch.sum(torch.topk(weight_sum.view(weight_sum.shape[0], -1), k)[0], dim=1) * ratio
-
-            if self.has_bias:
-                center = self.F_conv(mid, weight, v[2][0], self.stride, self.padding, self.dilation, self.groups)
-            else:
-                center = self.F_conv(mid, weight, None, self.stride, self.padding, self.dilation, self.groups)
-
-            ss = center.shape
-            deviation = deviation.repeat(ss[2] * ss[3]).view(-1, ss[1]).t().view(ss[1], ss[2], ss[3])
-
-        center = self.F_conv(mid, weight, bias, self.stride, self.padding, self.dilation, self.groups)
-
-        upper = center + deviation
+        lower_bias = v[2].lower if self.has_bias else None
+        upper_bias = v[2].upper if self.has_bias else None
+        center = self.F_conv(
+            mid, weight, lower_bias, self.stride, self.padding,
+            self.dilation, self.groups)
         lower = center - deviation
-        return lower, upper
+        if self.has_bias and self.is_input_perturbed(2):
+            upper = self.F_conv(
+                mid, weight, upper_bias, self.stride, self.padding,
+                self.dilation, self.groups) + deviation
+        else:
+            upper = center + deviation
+        return Interval(lower, upper)
+
+    def _bound_from_input_perturbation_state(
+            self, *v, state, C=None):
+        """Bound a convolution from preserved finite-p or L0 input geometry.
+
+        Ordinary IBP intervals retain only elementwise endpoints. While the
+        original input perturbation remains valid along this graph path, the
+        IBP driver additionally provides ``state=(center_input,
+        perturbation)``. This method consumes that state using the existing
+        direct L2 and L0 convolution bounds. Other finite p-norms fall back to
+        ordinary box IBP.
+
+        The L2 bound uses one filter norm per output channel. The L0 bound
+        sums the ``k`` largest absolute spatial weights after combining input
+        channels. Neither path supports specification merging or perturbed
+        convolution weights.
+        """
+        if C is not None:
+            raise NotImplementedError(
+                'Specification merging is not supported for Conv input '
+                'perturbation bounds')
+        if self.is_input_perturbed(1):
+            raise NotImplementedError(
+                'Weight perturbation is not supported for Conv IBP')
+        # Evaluate the convolution at the unperturbed input center.
+        center_input, perturbation = state
+        weight = v[1].lower
+        if isinstance(perturbation, PerturbationLpNorm):
+            if perturbation.norm != 2:
+                return self.interval_propagate(*v, C=C)
+            # Padding and non-scalar radii remain unsupported by the existing
+            # direct convolution L2 contract.
+            eps = perturbation.eps
+            assert not isinstance(eps, torch.Tensor) or eps.numel() == 1
+            deviation = weight.square().sum((1, 2, 3)).sqrt() * eps
+            deviation = deviation.view(1, -1, 1, 1)
+        elif isinstance(perturbation, PerturbationL0Norm):
+            # An L0 perturbation changes at most k input positions, scaled by
+            # ratio, so use the k largest absolute filter contributions.
+            k = int(perturbation.eps)
+            weight_sum = weight.abs().sum(1).flatten(1)
+            deviation = torch.topk(
+                weight_sum, k, dim=1
+            ).values.sum(dim=1) * perturbation.ratio
+            deviation = deviation.view(1, -1, 1, 1)
+        else:
+            raise TypeError(
+                'Unsupported input perturbation type '
+                f'{type(perturbation).__name__}')
+        lower_bias = v[2].lower if self.has_bias else None
+        upper_bias = v[2].upper if self.has_bias else None
+        center = self.F_conv(
+            center_input, weight, lower_bias, self.stride,
+            self.padding, self.dilation, self.groups)
+        lower = center - deviation
+        if self.has_bias and self.is_input_perturbed(2):
+            upper = self.F_conv(
+                center_input, weight, upper_bias, self.stride,
+                self.padding, self.dilation, self.groups) + deviation
+        else:
+            upper = center + deviation
+        return Interval(lower, upper)
 
     def bound_dynamic_forward(self, *x, max_dim=None, offset=0):
         if self.is_input_perturbed(1) or self.is_input_perturbed(2):
@@ -421,7 +462,7 @@ class BoundConv(Bound):
         w_new = w_new.reshape(shape[0], -1, *w_new.shape[1:])
         b_new = conv2d(
             b, weight, bias, self.stride, self.padding, self.dilation, self.groups)
-        return LinearBound(w_new, b_new, w_new, b_new, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
+        return LinearBound(w_new, b_new, w_new, b_new, tot_dim=x.tot_dim)
 
     def bound_forward(self, dim_in, *x):
         if self.is_input_perturbed(1) or self.is_input_perturbed(2):
@@ -465,7 +506,7 @@ class BoundConv(Bound):
             self.dilation, self.groups)
         return [(node_grad, (grad_upstream,), [])]
 
-    def update_requires_input_bounds(self):
+    def update_input_perturbation_state(self):
         self._check_weight_perturbation()
 
 
@@ -530,7 +571,10 @@ class BoundConvTranspose(Bound):
                 # Here we build and propagate a Patch object with (patches, stride, padding)
                 assert type(last_A) == Patches
                 if last_A.identity == 0:
-                    patches = last_A.patches
+                    if last_A.padding_pos_masked:
+                        patches = last_A.patches
+                    else:
+                        patches = last_A.create_padding(self.output_shape)
 
                     # FIXME: so far, assume there will be a relu layer in its input.
 
@@ -605,7 +649,7 @@ class BoundConvTranspose(Bound):
                     return A_matrix, sum_bias
                 new_patches = last_A.create_similar(
                         pieces, padding=padding, inserted_zeros=inserted_zeros, output_padding=output_padding,
-                        input_shape=self.input_shape)
+                        input_shape=self.input_shape, padding_pos_masked=False)
                 return new_patches, sum_bias
             else:
                 raise NotImplementedError()
@@ -618,34 +662,20 @@ class BoundConvTranspose(Bound):
         if self.is_input_perturbed(1):
             raise NotImplementedError("Weight perturbation for convolution layers has not been implmented.")
 
-        norm = Interval.get_perturbation(v[0])
-        norm = norm[0]
+        h_L, h_U = v[0].lower, v[0].upper
+        weight = v[1].lower
+        bias = v[2].lower if self.has_bias else None
 
-        h_L, h_U = v[0]
-        weight = v[1][0]
-        bias = v[2][0] if self.has_bias else None
-
-        if norm == torch.inf:
-            mid = (h_U + h_L) / 2.0
-            diff = (h_U - h_L) / 2.0
-            weight_abs = weight.abs()
-            deviation = F.conv_transpose2d(diff, weight_abs, None, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups, output_padding=self.output_padding)
-        elif norm > 0:
-            raise NotImplementedError()
-            norm, eps = Interval.get_perturbation(v[0])
-            # L2 norm, h_U and h_L are the same.
-            mid = h_U
-            # TODO: padding
-            deviation = torch.mul(weight, weight).sum((1, 2, 3)).sqrt() * eps
-            deviation = deviation.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-        else: # Here we calculate the L0 norm IBP bound using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
-            raise NotImplementedError()
+        mid = (h_U + h_L) / 2.0
+        diff = (h_U - h_L) / 2.0
+        weight_abs = weight.abs()
+        deviation = F.conv_transpose2d(diff, weight_abs, None, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups, output_padding=self.output_padding)
 
         center = F.conv_transpose2d(mid, weight, bias, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups, output_padding=self.output_padding)
 
         upper = center + deviation
         lower = center - deviation
-        return lower, upper
+        return Interval(lower, upper)
 
     def bound_forward(self, dim_in, *x):
         if self.is_input_perturbed(1) or self.is_input_perturbed(2):
@@ -691,7 +721,6 @@ class BoundPad(Bound):
             self.padding = attr['pads'][2:4] + attr['pads'][6:8]
         else:
             self.padding = [0, 0, 0, 0]
-        self.value = attr.get('value', 0.0)
         assert self.padding == [0, 0, 0, 0]
 
     def forward(self, x, pad, value=0.0):
@@ -701,12 +730,24 @@ class BoundPad(Bound):
         assert pad[0] == pad[1] == pad[4] == pad[5] == 0
         pad = [int(pad[3]), int(pad[7]), int(pad[2]), int(pad[6])]
         final = F.pad(x, pad, value=value)
-        self.padding, self.value = pad, value
+        self.padding = pad
         return final
 
     def interval_propagate(self, *v):
-        l, u = zip(*v)
-        return Interval.make_interval(self.forward(*l), self.forward(*u), v[0])
+        if any(self.is_input_perturbed(i) for i in range(1, len(v))):
+            raise OperatorCapabilityError(
+                self, 'IBP requires fixed padding parameters')
+        lower = [interval.lower for interval in v]
+        output_lower = self.forward(*lower)
+        upper = [interval.upper for interval in v]
+        return Interval(output_lower, self.forward(*upper))
+
+    def _propagate_input_perturbation_state(self, v, states):
+        if states[0] is None:
+            return None
+        center, perturbation = states[0]
+        fixed_inputs = [interval.lower for interval in v[1:]]
+        return self.forward(center, *fixed_inputs), perturbation
 
     def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         # TODO: padding for 3-D or more dimensional inputs.
@@ -720,7 +761,7 @@ class BoundPad(Bound):
                     new_padding = (last_A.padding[0] + left, last_A.padding[1] + right, last_A.padding[2] + top, last_A.padding[3] + bottom)
                 else:
                     new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)
-                return last_A.create_similar(padding=new_padding)
+                return last_A.create_similar(padding=new_padding, padding_pos_masked=False)
             else:
                 shape = last_A.size()
                 return last_A[:, :, :, top:(shape[3] - bottom), left:(shape[4] - right)]
@@ -956,26 +997,22 @@ class BoundConv2dGrad(Bound):
     def interval_propagate(self, *v, C=None):
         assert not self.is_input_perturbed(1)
 
-        norm = Interval.get_perturbation(v[0])[0]
-        h_L, h_U = v[0]
+        h_L, h_U = v[0].lower, v[0].upper
 
-        weight = v[1][0]
-        bias = v[2][0] if self.has_bias else None
+        weight = v[1].lower
+        bias = v[2].lower if self.has_bias else None
 
-        if norm == torch.inf:
-            mid = (h_U + h_L) / 2.0
-            diff = (h_U - h_L) / 2.0
-            weight_abs = weight.abs()
-            deviation = F.conv_transpose2d(
-                diff, weight_abs, None, stride=self.stride,
-                padding=self.padding, dilation=self.dilation,
-                groups=self.groups, output_padding=self.output_padding)
-        else:
-            raise NotImplementedError
+        mid = (h_U + h_L) / 2.0
+        diff = (h_U - h_L) / 2.0
+        weight_abs = weight.abs()
+        deviation = F.conv_transpose2d(
+            diff, weight_abs, None, stride=self.stride,
+            padding=self.padding, dilation=self.dilation,
+            groups=self.groups, output_padding=self.output_padding)
         center = F.conv_transpose2d(
             mid, weight, bias, stride=self.stride, padding=self.padding,
             dilation=self.dilation, groups=self.groups,
             output_padding=self.output_padding)
         upper = center + deviation
         lower = center - deviation
-        return lower, upper
+        return Interval(lower, upper)

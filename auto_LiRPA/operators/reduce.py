@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Reduce operators"""
@@ -66,12 +66,13 @@ class BoundReduceMax(BoundReduce):
                     return None
                 indices = self.indices.unsqueeze(0)
                 if not self.keepdim:
-                    assert (self.from_input)
+                    assert self.batch_dim != -1
                     last_A = last_A.unsqueeze(self.axis + 1)
                     indices = indices.unsqueeze(self.axis + 1)
                 shape = list(last_A.shape)
                 shape[self.axis + 1] *= self.input_shape[self.axis]
-                A = torch.zeros(shape, device=last_A.device)
+                A = torch.zeros(
+                    shape, dtype=last_A.dtype, device=last_A.device)
                 indices = indices.expand(*last_A.shape)
                 A.scatter_(dim=self.axis + 1, index=indices, src=last_A)
                 return A
@@ -169,7 +170,7 @@ class BoundReduceMean(BoundReduce):
             if last_A is None:
                 return None
             if not self.keepdim:
-                assert (self.from_input)
+                assert self.batch_dim != -1
                 for axis in self.axis:
                     if axis > 0:
                         last_A = last_A.unsqueeze(axis + 1)
@@ -209,7 +210,7 @@ class BoundReduceSum(BoundReduce):
             if last_A is None:
                 return None
             if not self.keepdim:
-                assert (self.from_input)
+                assert self.batch_dim != -1
                 for axis in self.axis:
                     if axis > 0:
                         last_A = last_A.unsqueeze(axis + 1)

@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Nonlinear functions that are either convex or convave within the entire domain."""
@@ -27,13 +27,23 @@ class BoundLog(BoundActivation):
         super().__init__(attr, inputs, output_index, options)
         self.range_l = 1e-6
 
+    @staticmethod
+    def _check_real_domain(lower):
+        if (lower <= 0).any():
+            raise OperatorDomainError(
+                'log',
+                'input bounds require a strictly positive lower bound',
+            )
+
     def forward(self, x):
         # NOTE adhoc implementation for loss fusion
         if self.loss_fusion:
             return torch.logsumexp(self.inputs[0].inputs[0].inputs[0].forward_value, dim=-1)
-        return torch.log(x.clamp(min=epsilon))
+        return torch.log(x)
 
     def bound_relax(self, x, init=False):
+        self._check_real_domain(x.lower)
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='log')
         if init:
             self.init_linear_relaxation(x)
         rl, ru = self.forward(x.lower), self.forward(x.upper)
@@ -50,7 +60,8 @@ class BoundLog(BoundActivation):
             par = self.inputs[0].inputs[0].inputs[0]
             lower = torch.logsumexp(par.lower, dim=-1)
             upper = torch.logsumexp(par.upper, dim=-1)
-            return lower, upper
+            return Interval(lower, upper)
+        self._check_real_domain(v[0].lower)
         return super().interval_propagate(*v)
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
@@ -70,10 +81,20 @@ class BoundSqrt(BoundOptimizableActivation):
         self.has_constraint = True
         self.range_l = 1e-6
 
+    @staticmethod
+    def _check_real_domain(lower):
+        if (lower < 0).any():
+            raise OperatorDomainError(
+                'sqrt',
+                'input bounds require a non-negative lower bound',
+            )
+
     def forward(self, x):
         return torch.sqrt(x)
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self._check_real_domain(x.lower)
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='sqrt')
         if init:
             self.init_linear_relaxation(x, dim_opt)
 
@@ -83,13 +104,26 @@ class BoundSqrt(BoundOptimizableActivation):
             mid = self.alpha[self._start]
         else:
             mid = (x.lower + x.upper) / 2
-        k = 0.5 / self.forward(mid)
-        self.add_linear_relaxation(mask=None, type='upper', k=k, x0=mid)
+        # The square-root derivative is infinite at zero, but a zero-width
+        # interval at zero is represented exactly by the constant line y = 0.
+        fixed_zero = (x.lower == 0) & (x.upper == 0)
+        safe_mid = torch.where(fixed_zero, torch.ones_like(mid), mid)
+        k = 0.5 / self.forward(safe_mid)
+        k = torch.where(fixed_zero, torch.zeros_like(k), k)
+        mid_value = self.forward(safe_mid)
+        mid_value = torch.where(
+            fixed_zero, torch.zeros_like(mid_value), mid_value)
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=k, x0=mid, y0=mid_value)
 
         sqrt_l = self.forward(x.lower)
         sqrt_u = self.forward(x.upper)
         k = (sqrt_u - sqrt_l) / (x.upper - x.lower).clamp(min=1e-8)
         self.add_linear_relaxation(mask=None, type='lower', k=k, x0=x.lower)
+
+    def interval_propagate(self, *v):
+        self._check_real_domain(v[0].lower)
+        return super().interval_propagate(*v)
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
         if self.use_prior_constraint and self.check_constraint_available(x):
@@ -98,19 +132,23 @@ class BoundSqrt(BoundOptimizableActivation):
                 del x.cstr_lower
                 del x.cstr_upper
 
-            x_l, x_u = self._ibp_constraint(x, delete_bounds_after_use=True)
+            constraint = self._ibp_constraint(
+                x, delete_bounds_after_use=True)
+            x_l, x_u = constraint.lower, constraint.upper
             x_u = torch.max(x_u, x_l + 1e-8)
         return super().bound_backward(last_lA, last_uA, x, **kwargs)
 
     def clamp_interim_bounds(self):
         self.cstr_lower = self.lower.clamp(min=0)
         self.cstr_upper = self.upper.clamp(min=0)
-        self.cstr_interval = (self.cstr_lower, self.cstr_upper)
+        self.cstr_interval = Interval(
+            self.cstr_lower, self.cstr_upper)
 
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
-        alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
+        alpha = torch.empty(
+            2, size_spec, *l.shape, dtype=l.dtype, device=l.device)
         alpha.data[:2] = (l + u) / 2
         return alpha
 
@@ -126,52 +164,91 @@ class BoundReciprocal(BoundOptimizableActivation):
         return torch.reciprocal(x)
 
     def interval_propagate(self, *v):
-        h_L = v[0][0].to(dtype=torch.get_default_dtype())
-        h_U = v[0][1].to(dtype=torch.get_default_dtype())
-        assert h_L.min() > 0, 'Only positive values are supported in BoundReciprocal'
-        return torch.reciprocal(h_U), torch.reciprocal(h_L)
+        h_L = v[0].lower
+        h_U = v[0].upper
+        lower = torch.reciprocal(h_U)
+        upper = torch.reciprocal(h_L)
+
+        # reciprocal(h_U), reciprocal(h_L) already handle intervals strictly
+        # on either side of zero and [0, h_U], since reciprocal(+0) is +inf.
+        # Correct the remaining singular cases: crossing zero needs the full
+        # real hull, approaching zero from below needs a -inf lower bound, and
+        # the zero-only interval is conservatively treated as fully unbounded.
+        crosses_zero = (h_L < 0) & (h_U > 0)
+        negative_to_zero = (h_L < 0) & (h_U == 0)
+        zero_only = (h_L == 0) & (h_U == 0)
+
+        lower = torch.where(
+            crosses_zero | negative_to_zero | zero_only,
+            torch.full_like(lower, -torch.inf),
+            lower)
+        upper = torch.where(
+            crosses_zero | zero_only,
+            torch.full_like(upper, torch.inf),
+            upper)
+        return Interval(lower, upper)
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        if ((x.lower <= 0) & (x.upper >= 0)).any():
+            raise OperatorDomainError(
+                'reciprocal',
+                'linear bound propagation input interval contains zero',
+            )
+        positive = x.lower > 0
+        negative = x.upper < 0
+
+        # Use the finite endpoint to choose a tangent for one-sided unbounded
+        # intervals. Their asymptotic relaxations are assigned below.
+        unbounded_lower = torch.isneginf(x.lower)
+        unbounded_upper = torch.isposinf(x.upper)
+        finite_lower = torch.where(
+            unbounded_lower, x.upper, x.lower)
+        finite_upper = torch.where(
+            unbounded_upper, x.lower, x.upper)
+        self.require_finite_relaxation_bounds(
+            finite_lower, finite_upper, operator='reciprocal')
         if init:
             self.init_linear_relaxation(x, dim_opt)
 
-        assert x.lower.min() >= 0
-
-        ku = -1. / (x.lower * x.upper)
-        self.add_linear_relaxation(mask=None, type='upper', k=ku, x0=x.lower)
+        # Reciprocal is convex on (0, +inf) and concave on (-inf, 0), so the
+        # secant and tangent exchange their upper/lower roles across zero.
+        secant_k = -1. / (x.lower * x.upper)
+        secant_x0 = torch.where(positive, x.lower, x.upper)
+        self.add_linear_relaxation(
+            mask=positive, type='upper', k=secant_k, x0=secant_x0)
+        self.add_linear_relaxation(
+            mask=negative, type='lower', k=secant_k, x0=secant_x0)
 
         if self.opt_stage in ['opt', 'reuse']:
             self.alpha[self._start].data[:2] = torch.min(torch.max(
-                self.alpha[self._start].data[:2], x.lower), x.upper)
-            mid = self.alpha[self._start].clamp(min=0.01)
+                self.alpha[self._start].data[:2], finite_lower), finite_upper)
+            mid = torch.where(
+                positive,
+                self.alpha[self._start].clamp(min=0.01),
+                self.alpha[self._start].clamp(max=-0.01),
+            )
         else:
-            mid = (x.lower + x.upper) / 2
+            mid = (finite_lower + finite_upper) / 2
 
+        tangent_k = -1. / (mid**2)
         self.add_linear_relaxation(
-            mask=None, type='lower', k=-1./(mid**2), x0=mid)
+            mask=positive, type='lower', k=tangent_k, x0=mid)
+        self.add_linear_relaxation(
+            mask=negative, type='upper', k=tangent_k, x0=mid)
 
-        if x.lower.min() <= 0:
-            mask = x.lower == 0
-            self.uw[..., mask] = 0
-            self.ub[..., mask] = torch.inf
-        if x.upper.isinf().any():
-            mask = x.upper.isinf()
-            self.lw[..., mask] = 0
-            self.lb[..., mask] = 0
-
-    def bound_backward(self, last_lA, last_uA, x, **kwargs):
-        As, lbias, ubias = super().bound_backward(last_lA, last_uA, x, **kwargs)
-        if isinstance(ubias, torch.Tensor) and ubias.isnan().any():
-            ubias[ubias.isnan()] = torch.inf if (last_uA != 0).any() else 0.
-        if isinstance(lbias, torch.Tensor) and lbias.isnan().any():
-            lbias[lbias.isnan()] = 0.
-        return As, lbias, ubias
+        self.lw[..., unbounded_upper] = 0
+        self.lb[..., unbounded_upper] = 0
+        self.uw[..., unbounded_lower] = 0
+        self.ub[..., unbounded_lower] = 0
 
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
-        alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
-        alpha.data[:2] = (l + u) / 2
+        alpha = torch.empty(
+            2, size_spec, *l.shape, dtype=l.dtype, device=l.device)
+        finite_lower = torch.where(torch.isneginf(l), u, l)
+        finite_upper = torch.where(torch.isposinf(u), l, u)
+        alpha.data[:2] = (finite_lower + finite_upper) / 2
         return alpha
 
     def build_gradient_node(self, grad_upstream):
@@ -204,15 +281,16 @@ class BoundExp(BoundOptimizableActivation):
     def interval_propagate(self, *v):
         assert len(v) == 1
         # unary monotonous functions only
-        h_L, h_U = v[0]
+        h_L, h_U = v[0].lower, v[0].upper
         if self.loss_fusion and self.options != 'no-max-input':
             self.max_input = torch.max(h_U, dim=-1, keepdim=True)[0]
             h_L, h_U = h_L - self.max_input, h_U - self.max_input
         else:
             self.max_input = 0
-        return torch.exp(h_L), torch.exp(h_U)
+        return Interval(torch.exp(h_L), torch.exp(h_U))
 
     def bound_forward(self, dim_in, x):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='exp')
         m = torch.min((x.lower + x.upper) / 2, x.lower + 0.99)
 
         exp_l, exp_m, exp_u = torch.exp(x.lower), torch.exp(m), torch.exp(x.upper)
@@ -230,7 +308,8 @@ class BoundExp(BoundOptimizableActivation):
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
         # Special case when computing log_softmax (FIXME: find a better solution, this trigger condition is not reliable).
         if self.loss_fusion and last_lA is None and last_uA is not None and torch.min(
-                last_uA) >= 0 and x.from_input:
+                last_uA) >= 0 and x.batch_dim != -1:
+            self.require_finite_relaxation_bounds(x.lower, x.upper, operator='exp')
             # Adding an extra bias term to the input. This is equivalent to adding a constant and subtract layer before exp.
             # Note that we also need to adjust the bias term at the end.
             if self.options == 'no-detach':
@@ -296,6 +375,7 @@ class BoundExp(BoundOptimizableActivation):
         return A, bias
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='exp')
         if init:
             self.init_linear_relaxation(x, dim_opt)
         min_val = -1e9
@@ -315,7 +395,8 @@ class BoundExp(BoundOptimizableActivation):
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
-        alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
+        alpha = torch.empty(
+            2, size_spec, *l.shape, dtype=l.dtype, device=l.device)
         alpha.data[:2] = (l + u) / 2
         return alpha
 

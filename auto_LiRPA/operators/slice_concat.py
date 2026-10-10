@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Shape operators """
@@ -36,38 +36,37 @@ class BoundConcat(Bound):
         return torch.cat(x, dim=int(self.axis))
 
     def interval_propagate(self, *v):
-        norms = []
-        eps = []
-        # Collect perturbation information for all inputs.
-        for i, _v in enumerate(v):
-            if self.is_input_perturbed(i):
-                n, e = Interval.get_perturbation(_v)
-                norms.append(n)
-                eps.append(e)
-            else:
-                norms.append(None)
-                eps.append(0.0)
-        eps = np.array(eps)
-        # Supporting two cases: all inputs are Linf norm, or all inputs are L2 norm perturbed.
-        # Some inputs can be constants without perturbations.
-        all_inf = all(map(lambda x: x is None or x == torch.inf, norms))
-        all_2 = all(map(lambda x: x is None or x == 2, norms))
+        h_L = [_v.lower for _v in v]
+        h_U = [_v.upper for _v in v]
+        return Interval(self.forward(*h_L), self.forward(*h_U))
 
-        h_L = [_v[0] for _v in v]
-        h_U = [_v[1] for _v in v]
-        if all_inf:
-            # Simply returns a tuple. Every subtensor has its own lower and upper bounds.
-            return self.forward(*h_L), self.forward(*h_U)
-        elif all_2:
-            # Sum the L2 norm over all subtensors, and use that value as the new L2 norm.
-            # This will be an over-approximation of the original perturbation (we can prove it).
-            max_eps = np.sqrt(np.sum(eps * eps))
-            # For L2 norm perturbed inputs, lb=ub and for constants lb=ub. Just propagate one object.
-            r = self.forward(*h_L)
-            ptb = PerturbationLpNorm(norm=2, eps=max_eps)
-            return Interval(r, r, ptb=ptb)
-        else:
-            raise RuntimeError(f"BoundConcat does not support inputs with norm {norms}")
+    def _propagate_input_perturbation_state(self, v, states):
+        """Preserve L2 input geometry when concatenating graph branches.
+
+        Constant inputs need no state. A perturbed input without preserved
+        state has already fallen back to elementwise bounds, so the concat
+        must also use its ordinary box interval.
+        """
+        if self.axis == 0:
+            return None
+        present = [item for item in states if item is not None]
+        if not present:
+            return None
+        if any(not isinstance(item[1], PerturbationLpNorm)
+               or item[1].norm != 2 for item in present):
+            return None
+        if any(state is None and self.is_input_perturbed(i)
+               for i, state in enumerate(states)):
+            return None
+        centers = [
+            item[0] if item is not None else bound.lower
+            for item, bound in zip(states, v)]
+        eps = [item[1].eps for item in present]
+        # The Cartesian product of the input L2 balls is enclosed by an L2
+        # ball whose squared radius is the sum of their squared radii.
+        combined_eps = sum(item ** 2 for item in eps) ** 0.5
+        perturbation = PerturbationLpNorm(norm=2, eps=combined_eps)
+        return self.forward(*centers), perturbation
 
     def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         self.axis = self.make_axis_non_negative(self.axis, 'output')
@@ -114,16 +113,20 @@ class BoundConcat(Bound):
 
     def bound_forward(self, dim_in, *x):
         self.axis = self.make_axis_non_negative(self.axis)
-        assert (self.axis == 0 and not self.from_input or self.from_input)
+        assert self.axis == 0 or self.batch_dim != -1
         # Concatenate each input's bounds along the axis.
         # If x[i].lw and x[i].uw is None, it means the input is a constant,
         # so we concatenate a tensor of zeros with the corresponding shape.
         lw = torch.cat([item.lw if item.lw is not None else
-                        torch.zeros(item.lb.shape[0], dim_in, *item.lb.shape[1:], device=item.lb.device)
+                        torch.zeros(
+                            item.lb.shape[0], dim_in, *item.lb.shape[1:],
+                            dtype=item.lb.dtype, device=item.lb.device)
                         for item in x], dim=self.axis + 1)
         lb = torch.cat([item.lb for item in x], dim=self.axis)
         uw = torch.cat([item.uw if item.uw is not None else
-                        torch.zeros(item.ub.shape[0], dim_in, *item.ub.shape[1:], device=item.ub.device)
+                        torch.zeros(
+                            item.ub.shape[0], dim_in, *item.ub.shape[1:],
+                            dtype=item.ub.dtype, device=item.ub.device)
                         for item in x], dim=self.axis + 1)
         ub = torch.cat([item.ub for item in x], dim=self.axis)
         return LinearBound(lw, lb, uw, ub)
@@ -155,12 +158,14 @@ class BoundSlice(Bound):
     def __repr__(self):
         attrs = {}
         if (len(self.inputs) == 5
-            and all(isinstance(item, BoundConstant) and item.value.numel() == 1
+            and all(isinstance(item, BoundConstant)
+                    and item.forward_value is not None
+                    and item.forward_value.numel() == 1
                     for item in self.inputs[1:])):
-            attrs['start'] = self.inputs[1].value.item()
-            attrs['end'] = self.inputs[2].value.item()
-            attrs['axes'] = self.inputs[3].value.item()
-            attrs['step'] = self.inputs[4].value.item()
+            attrs['start'] = self.inputs[1].forward_value.item()
+            attrs['end'] = self.inputs[2].forward_value.item()
+            attrs['axes'] = self.inputs[3].forward_value.item()
+            attrs['step'] = self.inputs[4].forward_value.item()
         return super().__repr__(attrs)
 
     def _fixup_params(self, shape, start, end, axes, steps):
@@ -190,9 +195,9 @@ class BoundSlice(Bound):
         return final
 
     def interval_propagate(self, *v):
-        lb = tuple(map(lambda x:x[0],v))
-        ub = tuple(map(lambda x:x[1],v))
-        return Interval.make_interval(self.forward(*lb), self.forward(*ub))
+        lower = [interval.lower for interval in v]
+        upper = [interval.upper for interval in v]
+        return Interval(self.forward(*lower), self.forward(*upper))
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(*v)
@@ -204,7 +209,7 @@ class BoundSlice(Bound):
             if isinstance(A, torch.Tensor):
                 # Reuse the batch and spec dimension of A, and replace other shapes with input.
                 A_shape = A.shape[:2] + self.input_shape[1:]
-                new_A = torch.zeros(size=A_shape, device=A.device,
+                new_A = torch.zeros(size=A_shape, dtype=A.dtype, device=A.device,
                                     requires_grad=A.requires_grad)
                 # Fill part of the new_A based on start, end, axes and steps.
                 # Skip the spec dimension at the front (axes + 1).
@@ -218,7 +223,7 @@ class BoundSlice(Bound):
                 # patches shape is [out_c, batch, out_h, out_w, in_c, patch_h, patch_w].
                 new_patches_shape = patches.shape[:4] + (self.input_shape[1], ) + patches.shape[-2:]
                 new_patches = torch.zeros(
-                    size=new_patches_shape, device=patches.device,
+                    size=new_patches_shape, dtype=patches.dtype, device=patches.device,
                     requires_grad=patches.requires_grad)
                 indices = torch.arange(start, end, device=patches.device)
                 new_patches = torch.index_copy(new_patches, dim=-3, index=indices, source=patches)
@@ -228,8 +233,10 @@ class BoundSlice(Bound):
                 raise ValueError(f'Unsupport A type {type(A)}')
             return new_A
 
-        start, end, axes = x[1].value.item(), x[2].value.item(), x[3].value.item()
-        steps = x[4].value.item() if len(x) == 5 else 1  # If step is not specified, it is 1.
+        start = x[1].forward_value.item()
+        end = x[2].forward_value.item()
+        axes = x[3].forward_value.item()
+        steps = x[4].forward_value.item() if len(x) == 5 else 1
         # Other step size untested, do not enable for now.
         assert steps == 1 and axes == int(axes) and start == int(start) and end == int(end)
         start, end = self._fixup_params(self.input_shape, start, end, axes, steps)
@@ -262,10 +269,10 @@ class BoundSlice(Bound):
 
     def build_gradient_node(self, grad_upstream):
         assert len(self.inputs) == 5
-        start = self.inputs[1].value.item()
-        end = self.inputs[2].value.item()
-        axes = self.inputs[3].value.item()
-        steps = self.inputs[4].value.item()
+        start = self.inputs[1].forward_value.item()
+        end = self.inputs[2].forward_value.item()
+        axes = self.inputs[3].forward_value.item()
+        steps = self.inputs[4].forward_value.item()
         assert steps == 1
         node_grad = SliceGrad(start, end, axes, steps)
         grad_input = (grad_upstream, self.inputs[0].forward_value)
@@ -289,9 +296,18 @@ class BoundSplit(Bound):
             self.axis = len(data.shape) - 1
         return torch.split(data, split, dim=self.axis)[self.output_index]
 
+    def _propagate_input_perturbation_state(self, v, states):
+        if (states[0] is None
+                or self.make_axis_non_negative(self.axis, 'input') == 0):
+            return None
+        center, perturbation = states[0]
+        fixed_inputs = [interval.lower for interval in v[1:]]
+        return self.forward(center, *fixed_inputs), perturbation
+
     def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         assert self.axis > 0
-        split = self.split if self.split is not None else x[1].value.tolist()
+        split = (self.split if self.split is not None
+                 else x[1].forward_value.tolist())
         pre = sum(split[:self.output_index])
         suc = sum(split[(self.output_index + 1):])
 
@@ -302,18 +318,18 @@ class BoundSplit(Bound):
             if pre > 0:
                 A.append(torch.zeros(
                     *last_A.shape[:(self.axis + 1)], pre, *last_A.shape[(self.axis + 2):],
-                    device=last_A.device))
+                    dtype=last_A.dtype, device=last_A.device))
             A.append(last_A)
             if suc > 0:
                 A.append(torch.zeros(
                     *last_A.shape[:(self.axis + 1)], suc, *last_A.shape[(self.axis + 2):],
-                    device=last_A.device))
+                    dtype=last_A.dtype, device=last_A.device))
             return torch.cat(A, dim=self.axis + 1)
 
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
     def bound_forward(self, dim_in, *x):
-        assert self.axis > 0 and self.from_input
+        assert self.axis > 0 and self.batch_dim != -1
         split = self.split if self.split is not None else x[1].lb.tolist()
         x = x[0]
         lw = torch.split(x.lw, split, dim=self.axis + 1)[self.output_index]
@@ -456,7 +472,9 @@ class BoundConcatGrad(Bound):
                          for i in range(self.input_index)])
             end = start + self.output_shape[self.axis+1]
             shape_behind = self.inputs[0].output_shape[self.axis+1:]
-            A = torch.zeros(*last_A.shape[:self.axis+2], *shape_behind, device=last_A.device)
+            A = torch.zeros(
+                *last_A.shape[:self.axis+2], *shape_behind,
+                dtype=last_A.dtype, device=last_A.device)
             A = A.view(-1, *shape_behind)
             A[:, start:end] = last_lA.reshape(-1, *last_A.shape[self.axis+2:])
             A = A.view(*last_A.shape[:self.axis+2], *shape_behind)

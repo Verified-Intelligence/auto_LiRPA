@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Edit the computational graph in BoundedModule."""
@@ -28,6 +28,7 @@ def add_nodes(self: 'BoundedModule', nodes):
     # TODO check duplicate names
     nodes = [(node if isinstance(node, Bound) else node.bound_node)
                 for node in nodes]
+    self.last_bound_target_name = None
     for node in nodes:
         if node.name in self._modules:
             raise NameError(f'Node with name {node.name} already exists')
@@ -43,20 +44,40 @@ def add_nodes(self: 'BoundedModule', nodes):
             self.layers_with_constraint.append(node.name)
 
 
-def add_input_node(self: 'BoundedModule', node, index=None):
+def add_input_node(
+        self: 'BoundedModule', node, model_input_index=None):
+    """Add a leaf node and assign its flattened model-input position."""
+    if model_input_index is None:
+        model_input_index = node.model_input_index
+    node.model_input_index = model_input_index
     self.add_nodes([node])
     self.input_name.append(node.name)
-    # default value for input_index
-    if index == 'auto':
-        index = max([0] + [(i + 1)
-                    for i in self.input_index if i is not None])
-    self.input_index.append(index)
+
+
+def _ancestors_of(self: 'BoundedModule', target):
+    """Return ``target`` and every node reachable through its inputs."""
+    ancestors = set()
+    pending = [target]
+    while pending:
+        node = pending.pop()
+        if node in ancestors:
+            continue
+        ancestors.add(node)
+        pending.extend(node.inputs)
+    return ancestors
 
 
 def delete_node(self: 'BoundedModule', node):
     for node_inp in node.inputs:
         node_inp.output_name.pop(node_inp.output_name.index(node.name))
     self._modules.pop(node.name)
+    self.bound_ancestors.discard(node)
+    self.disabled_split_nodes.discard(node)
+    self.last_bound_target_name = None
+    if node.name in self.input_name:
+        self.input_name.remove(node.name)
+    if node.name in self.root_names:
+        self.root_names.remove(node.name)
     # TODO Create a list to contain all such lists such as
     # "relus" and "optimizable_activations"
     self.relus = [

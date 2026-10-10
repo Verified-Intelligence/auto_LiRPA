@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Normalization operators"""
@@ -116,7 +116,7 @@ class BoundBatchNormalization(Bound):
         def get_param(p):
             if isinstance(p, BoundConstant):
                 # When affine is disabled in BN
-                return p.value
+                return p.forward_value
             elif isinstance(p, BoundParams):
                 return p.param
             else:
@@ -126,8 +126,8 @@ class BoundBatchNormalization(Bound):
         weight = get_param(x[1])
         bias = get_param(x[2])
         if not self.training:
-            self.current_mean = x[3].value
-            self.current_var = x[4].value
+            self.current_mean = x[3].forward_value
+            self.current_var = x[4].forward_value
         self._check_unused_mean_or_var()
         if not self.use_affine:
             weight = torch.ones_like(weight)
@@ -174,7 +174,10 @@ class BoundBatchNormalization(Bound):
                     # we should create a real identity Patch
                     num_channel = tmp_weight.numel()
                     # desired Shape is (c, batch, out_w, out_h, c, 1, 1) or (unstable_size, batch, c, 1, 1).
-                    patches = (torch.eye(num_channel, device=tmp_weight.device) * tmp_weight.view(-1)).view(num_channel, 1, 1, 1, num_channel, 1, 1)
+                    patches = (torch.eye(
+                        num_channel, dtype=tmp_weight.dtype,
+                        device=tmp_weight.device) * tmp_weight.view(-1)).view(
+                            num_channel, 1, 1, 1, num_channel, 1, 1)
                     # Expand out_h, out_w dimensions but not for batch dimension.
                     patches = patches.expand(-1, -1, last_A.output_shape[2], last_A.output_shape[3], -1, 1, 1)
                     if last_A.unstable_idx is not None:
@@ -182,7 +185,7 @@ class BoundBatchNormalization(Bound):
                         patches = patches[last_A.unstable_idx[0], :, last_A.unstable_idx[1], last_A.unstable_idx[2]]
                     # Expand the batch dimension.
                     patches = patches.expand(-1, last_A.shape[1], *([-1] * (patches.ndim - 2)))
-                    next_A = last_A.create_similar(patches, stride=1, padding=0, identity=0)
+                    next_A = last_A.create_similar(patches, stride=1, padding=0, identity=0, padding_pos_masked=False)
                     if last_A.unstable_idx is not None:
                         # Need to expand the bias and choose the selected ones.
                         bias = tmp_bias.view(-1,1,1,1).expand(-1, 1, last_A.output_shape[2], last_A.output_shape[3])
@@ -205,22 +208,23 @@ class BoundBatchNormalization(Bound):
         assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
             'Weight perturbation is not supported for BoundBatchNormalization'
 
-        h_L, h_U = v[0]
-        weight, bias = v[1][0], v[2][0]
+        h_L, h_U = v[0].lower, v[0].upper
+        weight, bias = v[1].lower, v[2].lower
 
         mid = (h_U + h_L) / 2.0
         diff = (h_U - h_L) / 2.0
 
         # Use `mid` in IBP to compute mean and variance for BN.
         # In this case, `forward` should not have been called.
-        if self.bn_mode == 'ibp' and not hasattr(self, 'forward_value'):
-            m, v, w, b = tuple(self.inputs[i].forward() for i in range(1, 5))
-            self.forward(mid, m, v, w, b)
+        if self.bn_mode == 'ibp' and self.forward_value is None:
+            weight, bias, running_mean, running_var = tuple(
+                v[i].lower for i in range(1, 5))
+            self.forward(mid, weight, bias, running_mean, running_var)
 
         if not self.training:
             assert not (self.is_input_perturbed(3) or self.is_input_perturbed(4))
-            self.current_mean = v[3][0]
-            self.current_var = v[4][0]
+            self.current_mean = v[3].lower
+            self.current_var = v[4].lower
         self._check_unused_mean_or_var()
         if not self.use_affine:
             weight = torch.ones_like(weight)
@@ -231,28 +235,33 @@ class BoundBatchNormalization(Bound):
         tmp_bias = bias - self.current_mean * tmp_weight
         shape = (1, -1) + (1,) * (mid.ndim - 2)
 
-        # interval_propagate() of the Linear layer may encounter input with different norms.
-        norm, eps = Interval.get_perturbation(v[0])[:2]
-        if norm == torch.inf:
-            center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
-            deviation = tmp_weight_abs.view(*shape) * diff
-        elif norm > 0:
-            mid = v[0][0]
-            center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
-            if norm == 2:
-                ptb = copy.deepcopy(v[0].ptb)
-                ptb.eps = eps * tmp_weight_abs.max()
-                return Interval(center, center, ptb=ptb)
-            else:
-                # General Lp norm.
-                center = tmp_weight.view(*shape) * mid
-                deviation = tmp_weight_abs.view(*shape) * eps  # use a Linf ball to replace Lp norm
-        else:
-            raise NotImplementedError
+        center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
+        deviation = tmp_weight_abs.view(*shape) * diff
 
         lower, upper = center - deviation, center + deviation
 
-        return lower, upper
+        return Interval(lower, upper)
+
+    def _propagate_input_perturbation_state(self, v, states):
+        if states[0] is None:
+            return None
+        input_center, perturbation = states[0]
+        if (not isinstance(perturbation, PerturbationLpNorm)
+                or perturbation.norm != 2):
+            return None
+
+        weight, bias = v[1].lower, v[2].lower
+        if not self.use_affine:
+            weight = torch.ones_like(weight)
+            bias = torch.zeros_like(bias)
+        tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
+        tmp_bias = bias - self.current_mean * tmp_weight
+        shape = (1, -1) + (1,) * (input_center.ndim - 2)
+        center = (tmp_weight.view(*shape) * input_center
+                  + tmp_bias.view(*shape))
+        perturbation = copy.deepcopy(perturbation)
+        perturbation.eps *= tmp_weight.abs().max()
+        return center, perturbation
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         # e.g., last layer input gurobi vars (3,32,32)
@@ -296,7 +305,7 @@ class BoundBatchNormalization(Bound):
         self.solver_vars = new_layer_gurobi_vars
         model.update()
 
-    def update_requires_input_bounds(self):
+    def update_input_perturbation_state(self):
         self._check_weight_perturbation()
 
 

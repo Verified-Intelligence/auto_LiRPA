@@ -31,6 +31,140 @@ can provide a reasonably tight bound almost instantly, and the tightest bounds
 can be obtained using α-CROWN within a few seconds.
 
 
+## Optimizing and Reading a Shared Affine Relaxation
+
+[examples/simple/dynamic_forward.py](../../examples/simple/dynamic_forward.py)
+constructs a small ReLU network with explicit weights and one input box. It
+runs on CPU, with no model or dataset downloads. From the repository root:
+
+```bash
+python examples/simple/dynamic_forward.py
+```
+
+### The relaxation and the optimization objective
+
+Dynamic forward represents a relaxed network over shared bounded variables:
+
+```text
+y_relaxed = centre + G e,    e in [-1, 1]^n.
+```
+
+The input box contributes normalized input variables. Each unstable ReLU
+contributes an error variable: on its fixed pre-activation interval `[l, u]`,
+
+```text
+relu(z) = s z + h (1 + e_k),
+h = max(-s l, (1 - s) u) / 2,    0 <= s <= 1.
+```
+
+For every concrete network input in the box, some assignment of the bounded
+variables reproduces the network's values. The relaxation also includes
+assignments that do not correspond to concrete inputs. Stable ReLUs are exact.
+
+`method='dynamic-forward'` uses the default slope `u / (u - l)` on unstable
+ReLUs. `method='dynamic-forward-optimized'` uses the native alpha-CROWN
+optimizer to choose one slope per ReLU neuron, shared across specifications,
+backward start nodes, and lower and upper bound sides. With specification
+matrix `C` shaped `[1, queries, output_elements]`, it maximizes the smallest
+query lower bound:
+
+```text
+maximize over shared slopes: min_q (C centre - row_sum(abs(C G)))[q].
+```
+
+Omitting `C` uses the identity specification, one query per output element.
+The returned upper bounds use the same chosen slopes; they are not optimized
+in a separate upper-bound search. Ordinary alpha-CROWN can use different
+parameters for different specifications, start nodes, and bound sides. Sharing
+the slopes instead provides one consistent affine relaxation whose output and
+intermediate rows can be consumed together. It is a different optimization
+constraint, not a guarantee of tighter bounds than ordinary alpha-CROWN.
+Improving the worst lower bound can loosen an upper bound or another query's
+lower bound.
+
+### Calling the method and reading generators
+
+The example first computes pre-activation bounds with CROWN and passes them
+as `interm_bounds` to both methods, so the comparison holds those intervals
+fixed. Providing `interm_bounds` is optional: the optimized method computes
+missing intervals before searching, then holds them fixed. Search settings
+come from the existing `optimize_bound_args`, for example:
+
+```python
+bm.set_bound_opts({'optimize_bound_args': {
+    'iteration': 40, 'lr_alpha': 0.05, 'early_stop_patience': 40}})
+lb, ub, forms = bm.compute_bounds(
+    x=(bounded_x,), C=C, method='dynamic-forward-optimized',
+    interm_bounds=interm_bounds, return_generators=True,
+    needed_generators_dict={bm.final_name: None, pre.name: unstable})
+G, centre = forms[bm.final_name]
+```
+
+The search uses the configured optimizer, iteration count, learning rate,
+learning-rate decay, patience, and stopping criterion. The method sets
+network-wide sharing, the worst-query objective, fixed intermediate bounds,
+and coherent best-iteration selection internally. In particular,
+`loss_reduction_func`, `keep_best`, and `reproduce_alpha_bounds` follow that
+objective rather than their caller-provided values.
+
+The dictionary maps each requested node name to flattened row indices, or
+`None` for every row. The example requests all output rows and the first
+ReLU's pre-activation rows at its unstable neurons. Requests must name the
+bound target or its ancestors. Omitting `needed_generators_dict` requests all
+rows of the target; `{}` requests no entries. With `return_generators=False`,
+the method returns only `(lb, ub)` and ignores the generator dictionary.
+Generator requests use `return_generators`, rather than `return_A`.
+
+Each entry is `(G, centre)` with shapes `[1, selected_rows, n]` and
+`[1, selected_rows]`. `C` shapes the returned bounds, while the generator rows
+describe the requested node itself. The example checks this relation:
+
+```python
+query_G = C @ G
+query_centre = (C @ centre.unsqueeze(-1)).squeeze(-1)
+radius = query_G.abs().sum(-1)
+torch.testing.assert_close(lb, query_centre - radius)
+torch.testing.assert_close(ub, query_centre + radius)
+```
+
+Column `j` denotes the same variable in every returned entry. An earlier
+node's generators can have fewer columns because later ReLU variables do not
+affect it; missing trailing columns are zero. When generators are requested,
+`bm[bm.input_name[0]].linear.dynamic_variable_ranges` maps node names to their
+`(start, count)` column blocks. Input variables precede ReLU error variables;
+sparse initialization can retain zero padding columns. The selected slopes
+are available as `bm.dynamic_forward_slopes` after the call; another
+`compute_bounds` call resets that attribute.
+
+### Supported scope and state
+
+The optimized method supports one input box (`batch_size=1`) with an explicit
+`PerturbationLpNorm(norm=float('inf'), x_L=..., x_U=...)` and ReLU relaxations.
+Generator extraction also requires the graph's perturbed operators to support
+dynamic forward. Reverse extraction uses a zero-column dynamic-forward pass
+for centres and variable numbering, followed by CROWN traversals for rows;
+it does not extend the supported operator set. Unsupported cases raise
+`NotImplementedError`; a generator request outside the target's ancestor
+subgraph raises `ValueError`.
+
+`bound_opts['dynamic_forward']['generators']` selects `'forward'`, `'reverse'`,
+or `'auto'`. The default `'auto'` chooses a direction based on the numbers of
+requested rows and variables. Both directions read the same relaxation.
+Requesting only one bound side returns `None` for the other side and does not
+change which generator entries are returned. An omitted `x` reuses the input
+from the previous call.
+
+The search uses fixed intermediate bounds and excludes beta, cuts,
+output-constraint refinement, and mixed-precision optimization. Existing
+alpha/beta parameters and optimization options are preserved; inputs and
+propagation caches follow the normal `compute_bounds` lifecycle. Results
+follow the caller's grad mode. Their gradients hold the chosen slopes and
+intermediate bounds fixed, while gradients through the input box,
+specification matrix, and model parameters remain available. Gradients do not
+differentiate through the slope search. The example uses `torch.no_grad()`
+because it only reads bounds and generators.
+
+
 ## Basic Certified Adversarial Defense Training
 
 We provide a [simple example of certified training](../../examples/vision/simple_training.py).

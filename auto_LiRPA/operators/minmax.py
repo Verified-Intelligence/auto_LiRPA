@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -30,9 +30,13 @@ class BoundMinMax(BoundOptimizableActivation):
     def _init_opt_parameters_impl(self, size_spec, name_start):
         """Implementation of init_opt_parameters for each start_node."""
         l = self.inputs[0].lower
+        if self.output_dtype is None:
+            raise RuntimeError(
+                f'Output dtype is unavailable for node {self.name}')
         # Alpha dimension is (2, output_shape, batch, *shape).
         shape = [2, size_spec] + list(l.shape)
-        return torch.ones(shape, device=l.device)
+        return torch.ones(
+            shape, dtype=self.output_dtype, device=l.device)
 
     def clip_alpha(self):
         # See https://www.overleaf.com/read/jzgrcmqtqpcx#9dbf97 for the math behind this code.
@@ -42,7 +46,8 @@ class BoundMinMax(BoundOptimizableActivation):
         ub_y = self._cached_ub_y
 
         for v in self.alpha.values():
-            eps = torch.tensor(1e-6).to(lb_x.dtype)
+            eps = torch.tensor(
+                1e-6, dtype=lb_x.dtype, device=lb_x.device)
             if self.op == 'max':
                 # Case 1: l_x >= u_y
                 case1 = (lb_x >= ub_y).requires_grad_(False).to(lb_x.dtype)
@@ -100,10 +105,19 @@ class BoundMinMax(BoundOptimizableActivation):
     def _backward_relaxation(self, x, y, start_node=None):
         # See https://www.overleaf.com/read/jzgrcmqtqpcx#9dbf97 for the math behind this code.
 
-        lb_x = x.lower
-        ub_x = x.upper
-        lb_y = y.lower
-        ub_y = y.upper
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator=self.op)
+        self.require_finite_relaxation_bounds(y.lower, y.upper, operator=self.op)
+
+        if self.output_dtype is None:
+            raise RuntimeError(
+                f'Output dtype is unavailable for node {self.name}')
+        # Min/max promotes its floating-point operands during forward. Apply
+        # the same promotion locally to the bounds used by this relaxation;
+        # the bounds stored on the input nodes retain their owner dtype.
+        lb_x = x.lower.to(dtype=self.output_dtype)
+        ub_x = x.upper.to(dtype=self.output_dtype)
+        lb_y = y.lower.to(dtype=self.output_dtype)
+        ub_y = y.upper.to(dtype=self.output_dtype)
 
         if self.opt_stage in ['opt', 'reuse']:
             selected_alpha = self.alpha[start_node.name]
@@ -152,12 +166,12 @@ class BoundMinMax(BoundOptimizableActivation):
             shape = alpha_u.shape
         else:
             shape = ub_x.shape
-        upper_dx = torch.zeros(shape, device=ub_x.device)
-        upper_dy = torch.zeros(shape, device=ub_x.device)
-        lower_dx = torch.zeros(shape, device=ub_x.device)
-        lower_dy = torch.zeros(shape, device=ub_x.device)
-        upper_b = torch.zeros(shape, device=ub_x.device)
-        lower_b = torch.zeros(shape, device=ub_x.device)
+        upper_dx = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
+        upper_dy = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
+        lower_dx = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
+        lower_dy = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
+        upper_b = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
+        lower_b = torch.zeros(shape, dtype=ub_x.dtype, device=ub_x.device)
         if self.op == 'max':
             # Case 1: l_x >= u_y
             case1 = (lb_x >= ub_y).requires_grad_(False).to(lb_x.dtype)
@@ -229,7 +243,10 @@ class BoundMinMax(BoundOptimizableActivation):
             if last_A is None:
                 return None, 0
             # Obtain the new linear relaxation coefficients based on the signs in last_A.
-            _A, _bias = multiply_by_A_signs(last_A, d_pos, d_neg, b_pos, b_neg)
+            _A, _bias = multiply_by_A_signs(
+                last_A, d_pos, d_neg, b_pos, b_neg,
+                patches_padding_pos_masked=self.get_bound_opt(
+                    'clampmult_patches_padding_pos_masked', False))
             if isinstance(last_A, Patches):
                 # Save the patch size, which will be used in init_slope() to determine the number of optimizable parameters.
                 A_prod = _A.patches
@@ -275,9 +292,10 @@ class BoundMinMax(BoundOptimizableActivation):
         return [(lAx, uAx), (lAy, uAy)], lbias, ubias
 
     def interval_propagate(self, *v):
-        h_Lx, h_Ux = v[0][0], v[0][1]
-        h_Ly, h_Uy = v[1][0], v[1][1]
-        return self.forward(h_Lx, h_Ly), self.forward(h_Ux, h_Uy)
+        h_Lx, h_Ux = v[0].lower, v[0].upper
+        h_Ly, h_Uy = v[1].lower, v[1].upper
+        return Interval(
+            self.forward(h_Lx, h_Ly), self.forward(h_Ux, h_Uy))
 
 
 class BoundMax(BoundMinMax):

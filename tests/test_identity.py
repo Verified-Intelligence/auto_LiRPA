@@ -24,6 +24,23 @@ class TestIdentity(TestCase):
         self.assertEqual(y_u, x + eps)
 
 
+def test_float64_default_specification_matches_output_dtype():
+    center = torch.tensor([[0.3, 0.4]], dtype=torch.float64)
+    bounded_model = BoundedModule(nn.Identity(), center)
+    bounded_input = BoundedTensor(
+        center,
+        PerturbationLpNorm(norm=float('inf'), eps=0.1),
+    )
+
+    lower, upper = bounded_model.compute_bounds(
+        x=(bounded_input,), method='CROWN')
+
+    assert lower.dtype == torch.float64
+    assert upper.dtype == torch.float64
+    assert torch.allclose(lower, center - 0.1)
+    assert torch.allclose(upper, center + 0.1)
+
+
 if __name__ == '__main__':
     testcase = TestIdentity()
     testcase.test()

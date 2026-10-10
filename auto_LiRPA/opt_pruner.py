@@ -11,21 +11,22 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Pruning during the optimization."""
 
+import os
 import time
 
 import torch
-
 
 class OptPruner:
 
     def __init__(self, x, threshold, multi_spec_keep_func, loss_reduction_func,
                  decision_thresh, fix_interm_bounds,
-                 epsilon_over_decision_thresh):
+                 epsilon_over_decision_thresh,
+                 low_precision_prune_margin_abs):
         self.x = x
         self.threshold = threshold
         self.multi_spec_keep_func = multi_spec_keep_func
@@ -33,6 +34,10 @@ class OptPruner:
         self.decision_thresh = decision_thresh
         self.fix_interm_bounds = fix_interm_bounds
         self.epsilon_over_decision_thresh = epsilon_over_decision_thresh
+        # Only speculatively prune a domain if its low-precision bound clears
+        # the decision threshold by this absolute margin, since marginal
+        # domains often fail the full-precision re-proof.
+        self.low_precision_prune_margin_abs = low_precision_prune_margin_abs
 
         # For computing the positive domain ratio
         self.original_size = x[0].shape[0]
@@ -44,9 +49,17 @@ class OptPruner:
         # For holding full-sized alphas
         self.cached_alphas = {}
 
+        # Snapshot of the pruning state decided by full-precision bounds,
+        # to which speculative prunes are rolled back.
+        self.committed = None
+        # Domains restored by the last roll_back_speculative() call, tracked
+        # only under SPEC_PRUNE_DEBUG for re-proof statistics.
+        self._last_restored = None
+
     def prune(self, x, C, ret_l, ret_u, ret, full_l, full_ret_l, full_ret_u,
               full_ret, interm_bounds, aux_reference_bounds, reference_bounds,
-              stop_criterion_func, bound_lower):
+              stop_criterion_func, bound_lower, is_low_precision_bound,
+              allow_prune):
         # positive domains may already be filtered out, so we use all domains -
         # negative domains to compute
         # FIXME Only using ret_l but not ret_u.
@@ -85,17 +98,43 @@ class OptPruner:
 
         if self.pruning_in_iteration:
             stime = time.time()
-            self.get_preserve_mask(ret_l)
-            # prune C
-            if C is not None and C.shape[0] == x[0].shape[0]:
-                C = C[self.now_preserve_mask]  # means C is also batch specific
-            # prune x
-            x, pre_prune_size = self._prune_x(x)
-            # prune bounds
-            ret_prune = self._prune_bounds_by_mask(
-                ret_l, ret_u, ret,
-                interm_bounds, aux_reference_bounds, reference_bounds, pre_prune_size)
-            full_l, full_ret_l, full_ret_u, full_ret = ret_prune
+            if self.committed is None:
+                # First prune since pruning was activated: the current
+                # (pre-slice) state is committed by construction.
+                self._commit(x, C, interm_bounds, aux_reference_bounds,
+                             reference_bounds, self.preserve_mask)
+            if allow_prune:
+                self.get_preserve_mask(
+                    ret_l, is_low_precision_bound=is_low_precision_bound)
+                nothing_pruned = (
+                    self.now_preserve_mask.numel() == x[0].shape[0])
+            else:
+                # Pruning is disabled for this round (e.g. speculative
+                # pruning turned off during low-precision iterations).
+                nothing_pruned = True
+            if nothing_pruned:
+                # Nothing is pruned in this round: skip the slicing, which
+                # would otherwise create a full copy of every tensor.
+                self.preserve_mask_next = self.preserve_mask
+                full_ret_l, full_l = self._recover_bounds_to_full_batch(ret_l)
+                full_ret_u, full_u = self._recover_bounds_to_full_batch(ret_u)
+                full_ret = (full_ret_l, full_ret_u) + ret[2:]
+            else:
+                # prune C
+                if C is not None and C.shape[0] == x[0].shape[0]:
+                    C = C[self.now_preserve_mask]  # means C is also batch specific
+                # prune x
+                x, pre_prune_size = self._prune_x(x)
+                # prune bounds
+                ret_prune = self._prune_bounds_by_mask(
+                    ret_l, ret_u, ret,
+                    interm_bounds, aux_reference_bounds, reference_bounds, pre_prune_size)
+                full_l, full_ret_l, full_ret_u, full_ret = ret_prune
+            if not is_low_precision_bound:
+                self._debug_print_reproof_stats(ret_l)
+                # Prune decided by full-precision bounds: commit it.
+                self._commit(x, C, interm_bounds, aux_reference_bounds,
+                             reference_bounds, self.preserve_mask_next)
             self.time += time.time() - stime
 
         stop_criterion = stop_criterion_func(
@@ -106,6 +145,110 @@ class OptPruner:
 
         return (x, C, full_l, full_ret_l, full_ret_u,
                 full_ret, stop_criterion)
+
+    def _commit(self, x, C, interm_bounds, aux_reference_bounds,
+                reference_bounds, mask):
+        """Snapshot the pruning state decided by full-precision bounds,
+        holding references (not copies) since slicing creates new tensors.
+        """
+        def _copy_dict(d):
+            return ({k: list(v) for k, v in d.items()}
+                    if d is not None else None)
+        self.committed = {
+            'x_data': x[0].data,
+            'x_L': x[0].ptb.x_L if hasattr(x[0], 'ptb') else None,
+            'x_U': x[0].ptb.x_U if hasattr(x[0], 'ptb') else None,
+            'C': C,
+            # Mirror the choice in _prune_bounds_by_mask: interm_bounds is
+            # only sliced when intermediate bounds are fixed.
+            'interm_bounds': _copy_dict(
+                interm_bounds if self.fix_interm_bounds else None),
+            'aux_reference_bounds': _copy_dict(aux_reference_bounds),
+            'reference_bounds': _copy_dict(reference_bounds),
+            'mask': mask,
+        }
+
+    @torch.no_grad()
+    def roll_back_speculative(self, x, C, interm_bounds, aux_reference_bounds,
+                            reference_bounds):
+        """Roll back speculative prunes to the last committed state before
+        a full-precision iteration, returning the restored (x, C) and
+        restoring the bound dicts in place.
+        """
+        if (not self.pruning_in_iteration or self.committed is None
+                # Masks only shrink, so equal sizes means no speculative
+                # prune happened since the last commit.
+                or self.preserve_mask.numel()
+                    == self.committed['mask'].numel()):
+            return x, C
+        x = list(x)
+        x[0].data = self.committed['x_data']
+        if hasattr(x[0], 'ptb'):
+            if self.committed['x_L'] is not None:
+                x[0].ptb.x_L = self.committed['x_L']
+            if self.committed['x_U'] is not None:
+                x[0].ptb.x_U = self.committed['x_U']
+        x = tuple(x)
+        if self.committed['C'] is not None:
+            C = self.committed['C']
+        for target, saved in (
+                (interm_bounds if self.fix_interm_bounds else None,
+                 self.committed['interm_bounds']),
+                (aux_reference_bounds,
+                 self.committed['aux_reference_bounds']),
+                (reference_bounds, self.committed['reference_bounds'])):
+            if target is not None and saved is not None:
+                for k, v in saved.items():
+                    target[k] = list(v)
+        if os.environ.get('SPEC_PRUNE_DEBUG'):
+            self._last_restored = self.committed['mask'][
+                ~torch.isin(self.committed['mask'], self.preserve_mask)]
+        self.preserve_mask = self.committed['mask']
+        return x, C
+
+    @torch.no_grad()
+    def _debug_print_reproof_stats(self, ret_l):
+        """Under SPEC_PRUNE_DEBUG, after a full-precision prune, print how
+        many restored domains failed the re-proof (still preserved) and how
+        far their full-precision bounds land from the decision threshold.
+        """
+        if (not os.environ.get('SPEC_PRUNE_DEBUG')
+                or self._last_restored is None
+                or self._last_restored.numel() == 0):
+            return
+        kept = torch.isin(self.preserve_mask_next,
+                          self._last_restored).sum().item()
+        restored_pos = torch.isin(self.preserve_mask, self._last_restored)
+        vals = ret_l[restored_pos].view(-1)
+        if isinstance(self.decision_thresh, torch.Tensor) \
+                and self.decision_thresh.numel() > 1:
+            th = self.decision_thresh[self.preserve_mask][
+                restored_pos].view(-1)
+        else:
+            th = self.decision_thresh
+        gap = vals - th
+        print(f'[spec-prune] restored {self._last_restored.numel()}, '
+              f're-proof failed (kept) {kept}, '
+              f'gap min/median/max = {gap.min().item():.4f}/'
+              f'{gap.median().item():.4f}/{gap.max().item():.4f}')
+        self._last_restored = None
+
+    def get_update_mask(self):
+        """Return preserve_mask for compute_bounds, or None when nothing is
+        pruned, since a complete mask would still trigger per-layer
+        alpha/beta masking in the backward pass for no effect.
+        """
+        if (not self.pruning_in_iteration
+                or self.preserve_mask is None
+                or self.preserve_mask.numel() == self.original_size):
+            return None
+        return self.preserve_mask
+
+    def has_uncommitted_speculation(self):
+        """True if some domains are currently speculatively pruned."""
+        return (self.pruning_in_iteration and self.committed is not None
+                and self.preserve_mask.numel()
+                    < self.committed['mask'].numel())
 
     def prune_idx(self, idx_mask, idx, x):
         if self.pruning_in_iteration:
@@ -232,10 +375,16 @@ class OptPruner:
         return full_l, full_ret_l, full_ret_u, full_ret
 
     @torch.no_grad()
-    def get_preserve_mask(self, ret_l):
+    def get_preserve_mask(self, ret_l, is_low_precision_bound):
         """
         Get preserve mask by decision_thresh to filter out the satisfied bounds.
+        :param ret_l: the lower bound of the current batch, which is used to compare with the decision threshold for pruning.
+        :param is_low_precision_bound: whether the ret_l is from low-precision bounds.
         """
+        if is_low_precision_bound:
+            # Require low-precision bounds to clear the threshold by a margin
+            # before speculatively pruning.
+            ret_l = ret_l - self.low_precision_prune_margin_abs
         if (isinstance(self.decision_thresh, torch.Tensor)
                 and self.decision_thresh.numel() > 1):
             if self.decision_thresh.shape[-1] == 1:
@@ -260,11 +409,15 @@ class OptPruner:
         directly update using the full batch size of l and u.
         """
         if ret is not None:
-            if (isinstance(self.decision_thresh, torch.Tensor)
+            if ret.shape[0] == self.original_size:
+                # ret is already full batch size, no need to recover
+                full_ret = ret
+            elif (isinstance(self.decision_thresh, torch.Tensor)
                     and self.decision_thresh.numel() > 1):
                 full_ret = (
                     self.decision_thresh.clone().to(ret.device).type(ret.dtype)
                     + self.epsilon_over_decision_thresh)
+                full_ret[self.preserve_mask] = ret
             else:
                 num_decision_thresh = self.decision_thresh
                 if isinstance(num_decision_thresh, torch.Tensor):
@@ -274,7 +427,7 @@ class OptPruner:
                     fill_value=(num_decision_thresh
                                 + self.epsilon_over_decision_thresh),
                     device=ret.device, dtype=ret.dtype)
-            full_ret[self.preserve_mask] = ret
+                full_ret[self.preserve_mask] = ret
             if full_ret.shape[1] > 1:
                 full_reduced_ret = self.loss_reduction_func(full_ret)
             else:
@@ -302,6 +455,10 @@ class OptPruner:
                     for start_node in act.alpha:
                         # cached alphas and alphas stored in nodes should share the same memory space
                         self.cached_alphas[act.name][start_node] = act.alpha[start_node]
+                        # skip slicing if self.preserve_mask is a full set. 
+                        ok_to_skip_slicing = self.preserve_mask.numel() == act.alpha[start_node].shape[2]
+                        if ok_to_skip_slicing:
+                            continue
                         act.alpha[start_node] = act.alpha[start_node][:, :, self.preserve_mask]
 
     def recover_full_sized_alpha(self, optimizable_activations: list):

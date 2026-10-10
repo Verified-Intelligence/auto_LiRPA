@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -62,7 +62,6 @@ def visualize(self: 'BoundedModule', output_path, print_bounds=False):
                     <TR><TD><FONT FACE="Courier" COLOR="black">{
                         (node.forward_value.max(dim=0)[0] - node.forward_value.min(dim=0)[0]).to(dtype=torch.float).mean().item() if (
                             node.perturbed and
-                            hasattr(node, "forward_value") and
                             isinstance(node.forward_value, torch.Tensor)) else None}</FONT></TD></TR>
                     <TR><TD><FONT FACE="Courier" COLOR="black">{
                         (node.upper - node.lower).to(dtype=torch.float).mean().item() if (

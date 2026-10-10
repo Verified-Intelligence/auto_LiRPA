@@ -15,16 +15,18 @@ import subprocess
 import inspect
 import sys
 from pygit2 import Repository
-sys.path.insert(0, '..')
+DOC_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(DOC_DIR))
 import auto_LiRPA
 
-subprocess.run(['python', 'process.py'])
+subprocess.run([sys.executable, 'process.py'], cwd=DOC_DIR, check=True)
 
 # -- Project information -----------------------------------------------------
 
 project = 'auto_LiRPA'
 author = '<a href="https://github.com/Verified-Intelligence/auto_LiRPA#developers-and-copyright">auto-LiRPA authors</a>'
-copyright = f'2020-2025, {author}'
+copyright = f'2020-2026, {author}'
+release = auto_LiRPA.__version__
 
 
 # -- General configuration ---------------------------------------------------
@@ -58,8 +60,8 @@ html_theme = 'alabaster'
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
 
-repo = Repository('../')
-branch = repo.head.shorthand
+repo = Repository(os.path.dirname(DOC_DIR))
+revision = str(repo.head.target)
 
 # Resolve function for the linkcode extension.
 def linkcode_resolve(domain, info):
@@ -77,7 +79,13 @@ def linkcode_resolve(domain, info):
         source, lineno = inspect.getsourcelines(obj)
         return fn, lineno, lineno + len(source) - 1
 
-    fn, lineno_start, lineno_end = find_source()
-    filename = f'{fn}#L{lineno_start}-L{lineno_end}'
+    if domain != 'py' or not info['module']:
+        return None
+    try:
+        fn, lineno_start, lineno_end = find_source()
+    except (AttributeError, KeyError, OSError, TypeError):
+        return None
+    filename = os.path.relpath(fn, os.path.dirname(DOC_DIR))
 
-    return f"https://github.com/Verified-Intelligence/auto_LiRPA/blob/{branch}/doc/{filename}"
+    return (f"https://github.com/Verified-Intelligence/auto_LiRPA/blob/"
+            f"{revision}/{filename}#L{lineno_start}-L{lineno_end}")

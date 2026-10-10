@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from .base import *
@@ -43,9 +43,17 @@ class BoundCast(Bound):
             uA = last_uA.to(self.type_in) if last_uA is not None else None
         else:
             if last_lA is not None:
-                lA = Patches(last_lA.patches.to(self.type_in), last_lA.stride, last_lA.padding, last_lA.shape, last_lA.identity, last_lA.unstable_idx, last_lA.output_shape)
+                lA = Patches(
+                    last_lA.patches.to(self.type_in), last_lA.stride, last_lA.padding,
+                    last_lA.shape, last_lA.identity, last_lA.unstable_idx,
+                    last_lA.output_shape,
+                    padding_pos_masked=last_lA.padding_pos_masked)
             if last_uA is not None:
-                uA = Patches(last_uA.patches.to(self.type_in), last_uA.stride, last_uA.padding, last_uA.shape, last_uA.identity, last_uA.unstable_idx, last_uA.output_shape)
+                uA = Patches(
+                    last_uA.patches.to(self.type_in), last_uA.stride, last_uA.padding,
+                    last_uA.shape, last_uA.identity, last_uA.unstable_idx,
+                    last_uA.output_shape,
+                    padding_pos_masked=last_uA.padding_pos_masked)
         return [(lA, uA)], 0, 0
 
     def bound_forward(self, dim_in, x):

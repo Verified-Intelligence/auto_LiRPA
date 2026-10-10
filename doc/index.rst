@@ -14,6 +14,7 @@ Documentation for `auto_LiRPA <https://github.com/Verified-Intelligence/auto_LiR
    examples
    api
    custom_op
+   operator_development
    paper
 
 .. raw:: html
@@ -33,4 +34,5 @@ Usage
 * :doc:`More Working Examples <examples>`
 * :doc:`API Usage <api>`
 * :doc:`Custom Operators <custom_op>`
+* :doc:`Operator Development and Maintenance <operator_development>`
 * :doc:`Reproducing our NeurIPS 2020 paper <paper>`

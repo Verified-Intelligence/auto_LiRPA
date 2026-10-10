@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Linear (possibly with weight perturbation) or Dot product layers """
@@ -52,7 +52,6 @@ class BoundLinear(BoundOptimizableActivation):
 
         options = options or {}
         self.opt_matmul = options.get('matmul')
-        self.splittable = False
 
         self.mul_helper = MulHelper()
         self.use_seperate_weights_for_lower_and_upper_bounds = False
@@ -108,7 +107,8 @@ class BoundLinear(BoundOptimizableActivation):
                 size_s = prod(size_s)
             elif isinstance(size_s, (list, tuple)):
                 size_s = size_s[0]
-            self.alpha[ns] = torch.ones(4, size_s, *shape, device=x_l.device)
+            self.alpha[ns] = torch.ones(
+                4, size_s, *shape, dtype=x_l.dtype, device=x_l.device)
 
     def forward(self, x, w, b=None):
         x, w, b = self._preprocess(x, w, b)
@@ -525,6 +525,11 @@ class BoundLinear(BoundOptimizableActivation):
                                    x, y, reduce_bias=True, **kwargs):
         # FIXME This is nonlinear. Move to `bivariate.py`.
 
+        self.require_finite_relaxation_bounds(
+            input_lb[0], input_ub[0], operator='linear')
+        self.require_finite_relaxation_bounds(
+            input_lb[1], input_ub[1], operator='linear')
+
         # Note: x and y are not tranposed or scaled, and we should avoid using them directly.
         # Use input_lb and input_ub instead.
         (alpha_l, beta_l, gamma_l,
@@ -550,7 +555,8 @@ class BoundLinear(BoundOptimizableActivation):
             if isinstance(last_A, eyeC):  # FIXME (12/28): Handle the OneHotC case.
                 #FIXME previous implementation is incorrect
                 #      expanding eyeC for now
-                last_A = (torch.eye(last_A.shape[0], device=last_A.device)
+                last_A = (torch.eye(
+                    last_A.shape[0], dtype=alpha_pos.dtype, device=last_A.device)
                     .view(last_A.shape[0], 1, *last_A.shape[2:]).expand(last_A.shape))
 
             A_x, A_y = BoundLinear.propagate_A_xy(
@@ -598,7 +604,7 @@ class BoundLinear(BoundOptimizableActivation):
 
     @staticmethod
     def _propagate_Linf(x, w):
-        h_L, h_U = x
+        h_L, h_U = x.lower, x.upper
         mid = (h_L + h_U) / 2
         diff = (h_U - h_L) / 2
         w_abs = w.abs()
@@ -610,20 +616,70 @@ class BoundLinear(BoundOptimizableActivation):
             deviation = diff.matmul(w_abs.transpose(-1, -2))
         return center, deviation
 
+    @staticmethod
+    def _bound_box(x, weight, lower_bias=0.0, upper_bias=0.0):
+        """Bound an affine map over an elementwise input interval."""
+        center, deviation = BoundLinear._propagate_Linf(x, weight)
+        return Interval(
+            center - deviation + lower_bias,
+            center + deviation + upper_bias)
+
+    @staticmethod
+    def _bound_input_perturbation(
+            center_input, perturbation, weight,
+            lower_bias=0.0, upper_bias=None):
+        """Bound a linear map of a finite-p or L0 perturbation."""
+        if upper_bias is None:
+            upper_bias = lower_bias
+        if weight.ndim == 3:
+            center = weight.matmul(center_input.unsqueeze(-1)).squeeze(-1)
+        else:
+            center = center_input.matmul(weight.transpose(-1, -2))
+
+        if isinstance(perturbation, PerturbationLpNorm):
+            dual_norm = np.float64(1.0) / (
+                1 - 1.0 / perturbation.norm)
+            deviation = (
+                weight.norm(dual_norm, dim=-1) * perturbation.eps)
+        elif isinstance(perturbation, PerturbationL0Norm):
+            k = int(perturbation.eps)
+            deviation = torch.topk(
+                weight.abs(), k, dim=-1
+            ).values.sum(dim=-1) * perturbation.ratio
+        else:
+            raise TypeError(
+                'Unsupported input perturbation type '
+                f'{type(perturbation).__name__}')
+        return Interval(
+            center - deviation + lower_bias,
+            center + deviation + upper_bias)
+
+    @staticmethod
+    def _matmul_interval(weight, lower, upper):
+        """Apply a matrix to an elementwise interval."""
+        if isinstance(lower, float):
+            return lower, upper
+        weight_pos = weight.clamp(min=0)
+        weight_neg = weight.clamp(max=0)
+        return (
+            weight_pos.matmul(lower) + weight_neg.matmul(upper),
+            weight_pos.matmul(upper) + weight_neg.matmul(lower))
+
     def interval_propagate(self, *v, C=None, w=None):
         has_bias = self is not None and len(v) == 3
         if self is not None:
-            # This will convert an Interval object to tuple.
-            # We need to add perturbation property later.
-            v_lb, v_ub = zip(*v)
+            v_lb = [interval.lower for interval in v]
+            v_ub = [interval.upper for interval in v]
             v_lb = self._preprocess(*v_lb)
             v_ub = self._preprocess(*v_ub)
-            # After preprocess the lower and upper bounds, we make them Intervals again.
-            v = [Interval.make_interval(bounds[0], bounds[1], bounds[2])
-                 for bounds in zip(v_lb, v_ub, v)]
+            if has_bias and self.beta_linear < 0:
+                v_lb[2], v_ub[2] = v_ub[2], v_lb[2]
+            v = [
+                Interval(lb, ub)
+                for lb, ub, _ in zip(v_lb, v_ub, v)]
         if w is None and self is None:
             # Use C as the weight, no bias.
-            w, lb, ub = C, torch.tensor(0., device=C.device), torch.tensor(0., device=C.device)
+            w, lb, ub = C, 0.0, 0.0
         else:
             if w is None:
                 # No specified weight, use this layer's weight.
@@ -632,72 +688,87 @@ class BoundLinear(BoundOptimizableActivation):
                     # C matrix merging not supported.
                     assert C is None
                     res = self.interval_propagate_with_weight(*v)
-                    l, u = res
                     if has_bias:
-                        return l + v[2][0], u + v[2][1]
-                    else:
-                        return l, u
+                        return Interval(
+                            res.lower + v[2].lower,
+                            res.upper + v[2].upper)
+                    return res
                 else:
                     # Use weight
-                    w = v[1][0]
+                    w = v[1].lower
             if has_bias:
-                lb, ub = v[2]
+                lb, ub = v[2].lower, v[2].upper
             else:
                 lb = ub = 0.0
 
             if C is not None:
                 w = C.matmul(w)
-                lb = C.matmul(lb) if not isinstance(lb, float) else lb
-                ub = C.matmul(ub) if not isinstance(ub, float) else ub
+                if has_bias and self.is_input_perturbed(2):
+                    lb, ub = BoundLinear._matmul_interval(C, lb, ub)
+                else:
+                    lb = C.matmul(lb) if not isinstance(lb, float) else lb
+                    ub = C.matmul(ub) if not isinstance(ub, float) else ub
 
-        # interval_propagate() of the Linear layer may encounter input with different norms.
-        norm, eps = Interval.get_perturbation(v[0])[:2]
-        if norm == torch.inf:
-            interval = BoundLinear._propagate_Linf(v[0], w)
-            center, deviation = interval
-        elif norm > 0:
-            # General Lp norm.
-            norm, eps = Interval.get_perturbation(v[0])
-            mid = v[0][0]
-            dual_norm = np.float64(1.0) / (1 - 1.0 / norm)
-            if w.ndim == 3:
-                # Extra batch dimension.
-                # mid has dimension [batch, input], w has dimension [batch, output, input].
-                center = w.matmul(mid.unsqueeze(-1)).squeeze(-1)
+        return BoundLinear._bound_box(v[0], w, lb, ub)
+
+    def _bound_from_input_perturbation_state(
+            self, *v, state, C=None, w=None):
+        """Bound a linear map from preserved finite-p or L0 input geometry.
+
+        ``state=(center_input, perturbation)`` retains the input geometry that
+        ordinary elementwise intervals cannot represent. Finite p-norm bounds
+        use the dual norm of each weight row; L0 bounds use the ``k`` largest
+        absolute weights. Specification merging is applied before either
+        formula.
+        """
+        if self.is_input_perturbed(1):
+            raise NotImplementedError(
+                'Simultaneous structured input and weight perturbations are '
+                'not supported by Linear IBP')
+
+        has_bias = len(v) == 3
+        bias_perturbed = has_bias and self.is_input_perturbed(2)
+        weight = v[1].lower if w is None else w
+        lower_bias = v[2].lower if has_bias else 0.0
+        upper_bias = v[2].upper if has_bias else 0.0
+        if C is not None:
+            weight = C.matmul(weight)
+            if bias_perturbed:
+                lower_bias, upper_bias = self._matmul_interval(
+                    C, lower_bias, upper_bias)
             else:
-                # mid has dimension [batch, input], w has dimension [output, input].
-                center = mid.matmul(w.t())
-            deviation = w.norm(dual_norm, dim=-1) * eps
-        else:
-            # here we calculate the L0 norm IBP bound of Linear layers,
-            # using the bound proposed in [Certified Defenses for Adversarial Patches, ICLR 2020]
-            norm, eps, ratio = Interval.get_perturbation(v[0])
-            mid = v[0][0]
-            weight_abs = w.abs()
-            if w.ndim == 3:
-                # Extra batch dimension.
-                # mid has dimension [batch, input], w has dimension [batch, output, input].
-                center = w.matmul(mid.unsqueeze(-1)).squeeze(-1)
-            else:
-                # mid has dimension [batch, input], w has dimension [output, input].
-                center = mid.matmul(w.t())
-            # L0 norm perturbation
-            k = int(eps)
-            deviation = torch.sum(torch.topk(weight_abs, k)[0], dim=1) * ratio
-
-        lower, upper = center - deviation + lb, center + deviation + ub
-
-        return (lower, upper)
+                lower_bias = (
+                    C.matmul(lower_bias)
+                    if not isinstance(lower_bias, float) else lower_bias)
+                upper_bias = lower_bias
+        if self.beta_linear < 0:
+            lower_bias, upper_bias = upper_bias, lower_bias
+        center_input, perturbation = state
+        center_input, weight, lower_bias = self._preprocess(
+            center_input, weight, lower_bias)
+        if bias_perturbed and self.beta_linear != 1.0:
+            upper_bias = self.beta_linear * upper_bias
+        elif not bias_perturbed:
+            upper_bias = lower_bias
+        return self._bound_input_perturbation(
+            center_input, perturbation, weight, lower_bias, upper_bias)
 
     def interval_propagate_with_weight(self, *v):
-        input_norm, input_eps = Interval.get_perturbation(v[0])
-        weight_norm, weight_eps = Interval.get_perturbation(v[1])
+        weight_perturbation = getattr(
+            self.inputs[1], 'perturbation', None)
+        if (weight_perturbation is not None
+                and not isinstance(weight_perturbation, PerturbationLpNorm)):
+            raise NotImplementedError(
+                'Linear IBP supports only Lp weight perturbations, got '
+                f'{type(weight_perturbation).__name__}')
 
-        if input_norm == torch.inf and weight_norm == torch.inf:
+        if (weight_perturbation is None
+                or weight_perturbation.norm == torch.inf):
             # A memory-efficient implementation without expanding all the elementary multiplications
             if self.opt_matmul == 'economic':
-                x_l, x_u = v[0][0], v[0][1]
-                y_l, y_u = v[1][0].transpose(-1, -2), v[1][1].transpose(-1, -2)
+                x_l, x_u = v[0].lower, v[0].upper
+                y_l = v[1].lower.transpose(-1, -2)
+                y_u = v[1].upper.transpose(-1, -2)
 
                 dx, dy = F.relu(x_u - x_l), F.relu(y_u - y_l)
                 base = x_l.matmul(y_l)
@@ -720,28 +791,34 @@ class BoundLinear(BoundOptimizableActivation):
             else:
                 # Both input data and weight are Linf perturbed (with upper and lower bounds).
                 # We need a x_l, x_u for each row of weight matrix.
-                x_l, x_u = v[0][0].unsqueeze(-2), v[0][1].unsqueeze(-2)
-                y_l, y_u = v[1][0].unsqueeze(-3), v[1][1].unsqueeze(-3)
+                x_l = v[0].lower.unsqueeze(-2)
+                x_u = v[0].upper.unsqueeze(-2)
+                y_l = v[1].lower.unsqueeze(-3)
+                y_u = v[1].upper.unsqueeze(-3)
                 # Reuse the multiplication bounds and sum over results.
-                lower, upper = BoundMul.interval_propagate_both_perturbed(*[(x_l, x_u), (y_l, y_u)])
-                lower, upper = torch.sum(lower, -1), torch.sum(upper, -1)
+                product = BoundMul.interval_propagate_both_perturbed(
+                    Interval(x_l, x_u), Interval(y_l, y_u))
+                lower = torch.sum(product.lower, -1)
+                upper = torch.sum(product.upper, -1)
 
-            return lower, upper
-        elif input_norm == torch.inf and weight_norm == 2:
+            return Interval(lower, upper)
+        elif weight_perturbation.norm == 2:
             # This eps is actually the epsilon per row, as only one row is involved for each output element.
-            eps = weight_eps
+            eps = weight_perturbation.eps
             # Input data and weight are Linf perturbed (with upper and lower bounds).
-            h_L, h_U = v[0]
+            h_L, h_U = v[0].lower, v[0].upper
             # First, handle non-perturbed weight with Linf perturbed data.
-            center, deviation = BoundLinear._propagate_Linf(v[0], v[1][0])
+            center, deviation = BoundLinear._propagate_Linf(
+                v[0], v[1].lower)
             # Compute the maximal L2 norm of data. Size is [batch, 1].
             max_l2 = torch.max(h_L.abs(), h_U.abs()).norm(2, dim=-1).unsqueeze(-1)
             # Add the L2 eps to bounds.
             lb, ub = center - deviation - max_l2 * eps, center + deviation + max_l2 * eps
-            return lb, ub
+            return Interval(lb, ub)
         else:
             raise NotImplementedError(
-                "Unsupported perturbation combination: data={}, weight={}".format(input_norm, weight_norm))
+                'Linear IBP does not support weight perturbation norm '
+                f'{weight_perturbation.norm}')
 
     @staticmethod
     @torch.jit.script
@@ -762,10 +839,14 @@ class BoundLinear(BoundOptimizableActivation):
         return lw, lb, uw, ub
 
     # w: an optional argument which can be utilized by BoundMatMul
-    def bound_dynamic_forward(self, x, w=None, b=None, C=None, max_dim=None, offset=0):
-        assert not self.transA and self.alpha_linear == 1.0 and self.transB and self.beta_linear == 1.0
-        assert not self.is_input_perturbed(1)
-        assert not self.is_input_perturbed(2)
+    def bound_dynamic_forward(self, x, w=None, b=None, C=None, max_dim=None,
+                              offset=0):
+        if (self.transA or not self.transB or self.alpha_linear != 1.0
+                or self.beta_linear != 1.0
+                or self.is_input_perturbed(1) or self.is_input_perturbed(2)):
+            raise NotImplementedError(
+                f'bound_dynamic_forward is not implemented for {self} with a '
+                f'perturbed weight or bias, or a scaled or transposed operand.')
 
         weight = w.lb
         bias = b.lb if b is not None else None
@@ -777,7 +858,6 @@ class BoundLinear(BoundOptimizableActivation):
         else:
             weight = weight.transpose(-1, -2)
             lb = x.lb
-
         w_new = x.lw.matmul(weight)
         b_new = lb.matmul(weight)
         if C is not None:
@@ -785,7 +865,7 @@ class BoundLinear(BoundOptimizableActivation):
         if bias is not None:
             b_new += bias
 
-        return LinearBound(w_new, b_new, w_new, b_new, x_L=x.x_L, x_U=x.x_U, tot_dim=x.tot_dim)
+        return LinearBound(w_new, b_new, w_new, b_new, tot_dim=x.tot_dim)
 
     # w: an optional argument which can be utilized by BoundMatMul
     def bound_forward(self, dim_in, x, w=None, b=None, C=None, weight_has_batch=False):
@@ -846,6 +926,8 @@ class BoundLinear(BoundOptimizableActivation):
         # Then we can use the bound_forward_mul function to compute the bounds
         # for element-wise multiplication and sum over the last dimension.
         # The result will have shape (B, s_k, s_{k-1}, ..., s_1, m, p)
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='linear')
+        self.require_finite_relaxation_bounds(y.lower, y.upper, operator='linear')
         x_unsqueeze = LinearBound(
             x.lw.unsqueeze(-2), x.lb.unsqueeze(-2),
             x.uw.unsqueeze(-2), x.ub.unsqueeze(-2),
@@ -942,7 +1024,7 @@ class BoundLinear(BoundOptimizableActivation):
             elif isinstance(self.inputs[1], BoundBuffers):
                 w = self.inputs[1].buffer
             else:
-                w = self.inputs[1].value
+                w = self.inputs[1].forward_value
             if not self.transB:
                 w = w.t()
             node_grad = LinearGrad(w.detach())
@@ -951,7 +1033,7 @@ class BoundLinear(BoundOptimizableActivation):
             raise NotImplementedError(
                 "Gradient computation for weight perturbation is not supported yet.")
 
-    def update_requires_input_bounds(self):
+    def update_input_perturbation_state(self):
         self._check_weight_perturbation()
 
 
@@ -961,7 +1043,6 @@ class BoundMatMul(BoundLinear):
         super().__init__(attr, inputs, output_index, options)
         self.transA = 0
         self.transB = 0
-        self.splittable = True
 
     def forward(self, x, y):
         self.x_shape = x.shape
@@ -969,8 +1050,7 @@ class BoundMatMul(BoundLinear):
         return x.matmul(y)
 
     def interval_propagate(self, *v, C=None):
-        lower, upper = super().interval_propagate(*v, C=C)
-        return lower, upper
+        return super().interval_propagate(*v, C=C)
 
     def bound_backward(self, last_lA, last_uA, *x, start_node=None, **kwargs):
         assert len(x) == 2
@@ -1019,18 +1099,16 @@ class BoundMatMul(BoundLinear):
         else:
             return _bound_forward(x, y, weight_index=1)
 
-    def update_requires_input_bounds(self):
+    def update_input_perturbation_state(self):
+        self.splittable = all(node.perturbed for node in self.inputs)
         # If any multiplier is a constant, we do not need input bounds.
         self.is_linear_op = not self.inputs[1].perturbed or not self.inputs[0].perturbed
         if self.is_linear_op:
             # One input is constant; no bounds required.
             self.requires_input_bounds = []
-            self.splittable = False
         else:
             # Both inputs are perturbed. Need relaxation.
             self.requires_input_bounds = [0, 1]
-            if not self.force_not_splittable:
-                self.splittable = True
 
 
 class BoundNeg(Bound):
@@ -1049,14 +1127,16 @@ class BoundNeg(Bound):
             if last_lA is not None:
                 lA = Patches(-last_lA.patches, last_lA.stride, last_lA.padding,
                              last_lA.shape, unstable_idx=last_lA.unstable_idx,
-                             output_shape=last_lA.output_shape)
+                             output_shape=last_lA.output_shape,
+                             padding_pos_masked=last_lA.padding_pos_masked)
             else:
                 lA = None
 
             if last_uA is not None:
                 uA = Patches(-last_uA.patches, last_uA.stride, last_uA.padding,
                              last_uA.shape, unstable_idx=last_uA.unstable_idx,
-                             output_shape=last_uA.output_shape)
+                             output_shape=last_uA.output_shape,
+                             padding_pos_masked=last_uA.padding_pos_masked)
             else:
                 uA = None
             return [(lA, uA)], 0, 0
@@ -1067,7 +1147,7 @@ class BoundNeg(Bound):
         return LinearBound(-x.uw, -x.ub, -x.lw, -x.lb)
 
     def interval_propagate(self, *v):
-        return -v[0][1], -v[0][0]
+        return Interval(-v[0].upper, -v[0].lower)
 
     def build_gradient_node(self, grad_upstream):
         return [(NegGrad(), (grad_upstream,), [])]
@@ -1094,6 +1174,9 @@ class BoundIdentity(Bound):
 
     def forward(self, x):
         return x
+
+    def _propagate_input_perturbation_state(self, v, states):
+        return states[0]
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
         return [(last_lA, last_uA)], 0, 0

@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Activation operators or other unary nonlinear operators"""
@@ -30,7 +30,6 @@ class BoundActivation(Bound):
         super().__init__(attr, inputs, output_index, options)
         self.requires_input_bounds = [0]
         self.use_default_ibp = True
-        self.splittable = False
         # "core" region of input where precomputation can be done
         self.range_l = -10
         self.range_u = 10
@@ -101,11 +100,14 @@ class BoundActivation(Bound):
             b_neg = maybe_unfold_patches(b_neg, last_A)
             if self.batch_dim == 0:
                 _A, _bias = multiply_by_A_signs(
-                    last_A, w_pos, w_neg, b_pos, b_neg, reduce_bias=reduce_bias)
+                    last_A, w_pos, w_neg, b_pos, b_neg,
+                    reduce_bias=reduce_bias,
+                    patches_padding_pos_masked=self.get_bound_opt(
+                        'clampmult_patches_padding_pos_masked', False))
             elif self.batch_dim == -1:
                 # FIXME: why this is different from above?
                 assert reduce_bias
-                mask = torch.gt(last_A, 0.).to(torch.float)
+                mask = torch.gt(last_A, 0.).to(dtype=last_A.dtype)
                 _A = last_A * (mask * w_pos.unsqueeze(1) +
                                (1 - mask) * w_neg.unsqueeze(1))
                 _bias = last_A * (mask * b_pos.unsqueeze(1) +
@@ -159,8 +161,8 @@ class BoundActivation(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
-        return self.forward(h_L), self.forward(h_U)
+        h_L, h_U = v[0].lower, v[0].upper
+        return Interval(self.forward(h_L), self.forward(h_U))
 
     def get_split_mask(self, lower, upper, input_index):
         """Return a mask to indicate if each neuron potentially needs a split.
@@ -316,7 +318,9 @@ class BoundOptimizableActivation(BoundActivation):
             b_pos = maybe_unfold_patches(b_pos, last_A)
             b_neg = maybe_unfold_patches(b_neg, last_A)
             unstable_idx = kwargs.get('unstable_idx', None)
-            if unstable_idx is not None:
+            if unstable_idx is not None and isinstance(last_A, Tensor):
+                # In patches mode maybe_unfold_patches already selected the
+                # unstable specs using last_A.unstable_idx.
                 assert isinstance(unstable_idx, Tensor) and unstable_idx.ndim == 1
                 # Shape is (spec, batch, neurons).
                 # FIXME: Sigmoid and other activation functions should also support
@@ -326,7 +330,9 @@ class BoundOptimizableActivation(BoundActivation):
                 b_pos = self.non_deter_index_select(b_pos, index=unstable_idx, dim=0)
                 b_neg = self.non_deter_index_select(b_neg, index=unstable_idx, dim=0)
             A_prod, _bias = multiply_by_A_signs(
-                last_A, w_pos, w_neg, b_pos, b_neg, reduce_bias)
+                last_A, w_pos, w_neg, b_pos, b_neg, reduce_bias,
+                patches_padding_pos_masked=self.get_bound_opt(
+                    'clampmult_patches_padding_pos_masked', False))
             return A_prod, _bias
 
         lA, lbias = _bound_oneside(last_lA, sign=-1)

@@ -8,6 +8,7 @@ from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import Flatten
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE
 
+
 # This simple model comes from https://github.com/locuslab/convex_adversarial
 def mnist_model():
     model = nn.Sequential(

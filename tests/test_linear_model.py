@@ -98,4 +98,3 @@ class TestLinearModel(TestCase):
     def test_L1_backward_IBP(self):
         with np.errstate(divide='ignore'):
             self.compute_and_compare_bounds(eps=3.0, norm=1, IBP=True, method='backward')
-

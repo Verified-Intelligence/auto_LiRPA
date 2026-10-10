@@ -6,9 +6,10 @@ import torch.nn as nn
 
 sys.path.append('../examples/vision')
 from jacobian import compute_jacobians
-from auto_LiRPA import BoundedModule
+from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.utils import Flatten
 from auto_LiRPA.jacobian import JacobianOP
+from auto_LiRPA.perturbations import PerturbationLpNorm
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE
 
 
@@ -50,6 +51,36 @@ class TestJacobian(TestCase):
         x0 = torch.randn(1, 5, device=self.default_device, dtype=self.default_dtype)
         BoundedModule(concatmodel, x0)
         print('Concat JacobianOP test passed.')
+
+
+def test_jacobian_placeholder_preserves_output_dtype():
+    value = torch.tensor([[1.0]], dtype=torch.float64)
+    variable = torch.tensor([[0.5]], dtype=torch.float64)
+
+    placeholder = JacobianOP.apply(value, variable)
+
+    assert placeholder.dtype == value.dtype
+
+
+def test_float64_jacobian_bounds_preserve_dtype():
+    class SquareJacobian(nn.Module):
+        def forward(self, x):
+            return JacobianOP.apply(x * x, x)
+
+    center = torch.tensor([[0.5]], dtype=torch.float64)
+    bounded_model = BoundedModule(SquareJacobian(), center)
+    bounded_input = BoundedTensor(
+        center,
+        PerturbationLpNorm(norm=float('inf'), eps=0.1),
+    )
+
+    lower, upper = bounded_model.compute_bounds(
+        x=(bounded_input,), method='CROWN')
+
+    assert lower.dtype == torch.float64
+    assert upper.dtype == torch.float64
+    assert torch.allclose(lower, torch.tensor([[[0.8]]], dtype=torch.float64))
+    assert torch.allclose(upper, torch.tensor([[[1.2]]], dtype=torch.float64))
 
 
 if __name__ == '__main__':

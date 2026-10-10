@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Softmax """
@@ -56,14 +56,47 @@ class BoundSoftmax(Bound):
     def interval_propagate(self, *v):
         assert self.option != 'complex'
         assert self.perturbed
-        h_L, h_U = v[0]
+        h_L, h_U = v[0].lower, v[0].upper
         shift = h_U.max(dim=self.axis, keepdim=True).values
         exp_L, exp_U = torch.exp(h_L - shift), torch.exp(h_U - shift)
         lower = exp_L / (torch.sum(exp_U, dim=self.axis, keepdim=True)
-                         - exp_U + exp_L + epsilon)
+                         - exp_U + exp_L)
         upper = exp_U / (torch.sum(exp_L, dim=self.axis, keepdim=True)
-                         - exp_L + exp_U + epsilon)
-        return lower, upper
+                         - exp_L + exp_U)
+        finite_inputs = (
+            torch.isfinite(h_L).all(dim=self.axis, keepdim=True)
+            & torch.isfinite(h_U).all(dim=self.axis, keepdim=True)
+        )
+        # IBP can conservatively produce infinite intermediate
+        # bounds. Softmax remains in [0, 1], which is tighter than allowing
+        # inf - inf in the shifted exponentials to propagate NaNs.
+        lower = torch.where(
+            finite_inputs,
+            torch.nan_to_num(lower, nan=0.0, posinf=0.0, neginf=0.0),
+            torch.zeros_like(lower))
+        upper = torch.where(
+            finite_inputs,
+            torch.nan_to_num(upper, nan=1.0, posinf=1.0, neginf=1.0),
+            torch.ones_like(upper))
+        return Interval(
+            lower.clamp(min=0, max=1), upper.clamp(min=0, max=1))
+
+    @staticmethod
+    def _expm1_div_x(x):
+        """Compute expm1(x) / x accurately, including its limit at zero.
+
+        This form is used to evaluate the exponential secant slope:
+
+            (exp(u) - exp(l)) / (u - l)
+              = exp(l) * (exp(u - l) - 1) / (u - l)
+              = exp(l) * expm1(d) / d,  where d = u - l.
+
+        ``expm1(d)`` avoids cancellation for small ``d``, and
+        lim_{d -> 0} expm1(d) / d = 1.
+        """
+        nonzero_x = torch.where(x == 0, torch.ones_like(x), x)
+        ratio = torch.expm1(x) / nonzero_x
+        return torch.where(x == 0, torch.ones_like(x), ratio)
 
     def _softmax_lse_lower(self, lb_p, ub_p, x0_p):
         """Lower bound Jacobian and bias via LSE (Eqs. 39-40).
@@ -79,16 +112,14 @@ class BoundSoftmax(Bound):
 
         diff = u_s - l_s
         # Chordal slope and intercept of exp on [l_i, u_i].
-        kappa = torch.where(
-            diff > 1e-5,
-            (torch.exp(u_s) - torch.exp(l_s)) / diff,
-            torch.exp(u_s))
-        beta = torch.where(
-            diff > 1e-5,
-            (u_s * torch.exp(l_s) - l_s * torch.exp(u_s)) / diff,
-            torch.exp(u_s) * (1 - u_s))
-
-        se_x0 = (kappa * x0_s + beta).sum(dim=-1, keepdim=True)
+        # Using exp(l) * expm1(u-l) / (u-l) avoids cancellation when
+        # the interval is narrow. A tangent is not a valid replacement here:
+        # this chord must upper-bound exp throughout the interval.
+        exp_l = torch.exp(l_s)
+        kappa = exp_l * self._expm1_div_x(diff)
+        se_x0 = (
+            exp_l + kappa * (x0_s - l_s)
+        ).sum(dim=-1, keepdim=True)
         L_x0 = torch.exp(x0_s) / se_x0
         V_k = L_x0 / se_x0
 
@@ -103,7 +134,8 @@ class BoundSoftmax(Bound):
 
         return J_L_comp, b_L
 
-    def _softmax_lse_upper(self, lb_p, ub_p, x0_p, sm_x0, max_x0, sum_exp_x0, eps):
+    def _softmax_lse_upper(
+            self, lb_p, ub_p, x0_p, sm_x0, max_x0, sum_exp_x0):
         """Upper bound Jacobian and bias via LSE (Eqs. 46-47).
 
         U_k(x) = a_k - c_k (log SE(x) - x_k) is concave, so its tangent
@@ -113,33 +145,48 @@ class BoundSoftmax(Bound):
         max_u = ub_p.max(dim=-1, keepdim=True)[0]
         u_s = ub_p - max_u
         l_s = lb_p - max_u
-        sum_exp_u = torch.exp(u_s).sum(dim=-1, keepdim=True)
-        p_under = torch.exp(l_s) / (
-            torch.exp(l_s) - torch.exp(u_s) + sum_exp_u + eps)
+        exp_u = torch.exp(u_s)
+        exp_l = torch.exp(l_s)
+        sum_exp_u = exp_u.sum(dim=-1, keepdim=True)
+        sum_exp_l = exp_l.sum(dim=-1, keepdim=True)
+        lower_denominator = exp_l + (sum_exp_u - exp_u)
+        upper_denominator = exp_u + (sum_exp_l - exp_l)
 
-        max_l = lb_p.max(dim=-1, keepdim=True)[0]
-        u_sl = ub_p - max_l
-        l_sl = lb_p - max_l
-        sum_exp_l = torch.exp(l_sl).sum(dim=-1, keepdim=True)
-        p_bar = torch.exp(u_sl) / (
-            torch.exp(u_sl) - torch.exp(l_sl) + sum_exp_l + eps)
-
-        p_diff = p_bar - p_under
-        log_p_bar = torch.log(p_bar + eps)
-        log_p_under = torch.log(p_under + eps)
+        # Compute the logarithms directly so small probability lower bounds do
+        # not underflow before taking log. These denominators are strictly
+        # positive, so adding epsilon would only make p_bar unsoundly smaller.
+        log_p_under = l_s - torch.log(lower_denominator)
+        log_p_bar = u_s - torch.log(upper_denominator)
+        p_under = torch.exp(log_p_under)
+        p_bar = torch.exp(log_p_bar)
         log_p_diff = log_p_bar - log_p_under
 
-        c_k = torch.where(p_diff > 1e-5, p_diff / log_p_diff, p_bar)
-        a_k = torch.where(
-            p_diff > 1e-5,
-            (p_under * log_p_bar - p_bar * log_p_under) / log_p_diff,
-            p_bar * (1 - log_p_bar))
+        # Secant of exp on [log(p_under), log(p_bar)]. Let
+        # d = log(p_bar) - log(p_under). Its slope can be rewritten as
+        #
+        #   (p_bar - p_under) / d
+        #     = (exp(log(p_bar)) - exp(log(p_under))) / d
+        #     = p_under * (exp(d) - 1) / d
+        #     = p_under * expm1(d) / d.
+        #
+        # This is the same secant, but avoids cancellation for small d. At
+        # d == 0, expm1(d) / d is defined by its limit 1, so the slope becomes
+        # p_under, which is also the tangent slope of exp at log(p_under).
+        use_expm1 = log_p_diff < 1e-3
+        small_log_diff = torch.where(
+            use_expm1, log_p_diff, torch.zeros_like(log_p_diff))
+        c_k_expm1 = p_under * self._expm1_div_x(small_log_diff)
+        safe_log_diff = torch.where(
+            use_expm1, torch.ones_like(log_p_diff), log_p_diff)
+        c_k_secant = (p_bar - p_under) / safe_log_diff
+        c_k = torch.where(use_expm1, c_k_expm1, c_k_secant)
+        a_k = p_under - c_k * log_p_under
 
         # OPTIMIZED: Return implicit components (D, u, v) instead of full Jacobian
         # J_U = diag(c_k) - outer(c_k, sm_x0)
         J_U_comp = (c_k, c_k, sm_x0)
 
-        lse_x0 = max_x0 + torch.log(sum_exp_x0 + eps)
+        lse_x0 = max_x0 + torch.log(sum_exp_x0)
         U_x0 = a_k - c_k * (lse_x0 - x0_p)
 
         # OPTIMIZED: Calculate b_U without full matrix multiplication
@@ -203,6 +250,7 @@ class BoundSoftmax(Bound):
         """CROWN backward via LSE decomposition (Wei et al., AISTATS 2023)."""
         lb = x[0].lower
         ub = x[0].upper
+        self.require_finite_relaxation_bounds(lb, ub, operator='softmax')
 
         ndim = lb.ndim
         dim = self.axis if self.axis >= 0 else ndim + self.axis
@@ -210,8 +258,6 @@ class BoundSoftmax(Bound):
 
         lb_p = self._move_dim_to_last(lb, dim, ndim)
         ub_p = self._move_dim_to_last(ub, dim, ndim)
-
-        eps = 1e-8
 
         # Tangent point; TODO: make x0 optimizable (alpha-CROWN style).
         x0_p = (lb_p + ub_p) / 2.0
@@ -225,7 +271,7 @@ class BoundSoftmax(Bound):
 
         J_L_comp, b_L = self._softmax_lse_lower(lb_p, ub_p, x0_p)
         J_U_comp, b_U = self._softmax_lse_upper(
-            lb_p, ub_p, x0_p, sm_x0, max_x0, sum_exp_x0, eps)
+            lb_p, ub_p, x0_p, sm_x0, max_x0, sum_exp_x0)
 
         # CROWN: lower uses (J_L, J_U), upper uses (J_U, J_L).
         lA, lbias = self._propagate(

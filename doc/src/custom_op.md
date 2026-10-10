@@ -1,10 +1,13 @@
 # Custom Operators
 
-In this documentation, we introduce how users can define custom operators (such as other activations) that are not currently supported in auto_LiRPA, with bound propagation methods. 
+This page explains how users can register an application-specific operator
+without modifying auto_LiRPA. Contributors adding or maintaining built-in
+operators should also read the
+[Operator Development and Maintenance](operator_development.md) guide.
 
 ## Write a Custom Operator
 
-There are three steps to write an operator:
+There are four steps to write an operator:
 
 1. Define a `torch.autograd.Function` (or `Function` for short) class, wrap the computation of the operator into this `Function`, and also define a symbolic method so that the operator can be parsed in auto_LiRPA via ONNX. Please refer to [PyTorch documentation](https://pytorch.org/docs/stable/onnx.html?highlight=symbolic#static-symbolic-method) on defining a `Function` with a symbolic method. 
 
@@ -21,4 +24,7 @@ We provide an [code example](../../examples/vision/custom_op.py) of using a cust
 
 ## Contributing to the Library
 
-We encourage the community to upload their new operators to the auto_LiRPA library so that the new operators can also be used by other users. To do this, please put the `Function` and the Bound class of the new operator at the `auto_LiRPA/operators`, add the mapping at `bound_op_map.py`, and submit a pull request.
+We encourage the community to contribute generally useful operators to the
+auto_LiRPA library. Follow the
+[Operator Development and Maintenance](operator_development.md) guide for
+built-in ownership, registration, testing, and review requirements.

@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Activation operators or other unary nonlinear operators, not including
@@ -44,6 +44,7 @@ class BoundAbs(BoundActivation):
         return x.abs()
 
     def bound_relax(self, x, init=False):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='abs')
         if init:
             self.init_linear_relaxation(x)
         x_L = x.lower.clamp(max=0)
@@ -56,6 +57,7 @@ class BoundAbs(BoundActivation):
         self.add_linear_relaxation(mask=None, type='lower', k=lower_k, x0=0, y0=0)
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='abs')
         x_L = x.lower.clamp(max=0)
         x_U = torch.max(x.upper.clamp(min=0), x_L + 1e-8)
         mask_neg = x_U <= 0
@@ -96,10 +98,10 @@ class BoundAbs(BoundActivation):
         return [(lA, uA)], lbias, ubias
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
+        h_L, h_U = v[0].lower, v[0].upper
         lower = ((h_U < 0) * h_U.abs() + (h_L > 0) * h_L.abs())
         upper = torch.max(h_L.abs(), h_U.abs())
-        return lower, upper
+        return Interval(lower, upper)
 
 
 class BoundATenHeaviside(BoundOptimizableActivation):
@@ -110,7 +112,9 @@ class BoundATenHeaviside(BoundOptimizableActivation):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-        return self.forward(v[0][0], v[1][0]), self.forward(v[0][1], v[1][0])
+        return Interval(
+            self.forward(v[0].lower, v[1].lower),
+            self.forward(v[0].upper, v[1].lower))
 
     def _init_opt_parameters_impl(self, size_spec, name_start):
         """Implementation of init_opt_parameters for each start_node."""
@@ -130,6 +134,7 @@ class BoundATenHeaviside(BoundOptimizableActivation):
         else:
             lb_r = self.lower
             ub_r = self.upper
+        self.require_finite_relaxation_bounds(lb_r, ub_r, operator='heaviside')
 
         if self.opt_stage not in ['opt', 'reuse']:
             # zero slope:
@@ -177,6 +182,7 @@ class BoundSqr(BoundOptimizableActivation):
         return x ** 2
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='square')
         if init:
             self.init_linear_relaxation(x, dim_opt)
         upper_k = x.lower + x.upper
@@ -200,15 +206,16 @@ class BoundSqr(BoundOptimizableActivation):
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
-        alpha = torch.empty(2, size_spec, *l.shape, device=l.device)
+        alpha = torch.empty(
+            2, size_spec, *l.shape, dtype=l.dtype, device=l.device)
         alpha.data[:2] = F.relu(l) - F.relu(-u)
         return alpha
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
+        h_L, h_U = v[0].lower, v[0].upper
         lower = ((h_U < 0) * (h_U ** 2) + (h_L > 0) * (h_L ** 2))
         upper = torch.max(h_L ** 2, h_U ** 2)
-        return lower, upper
+        return Interval(lower, upper)
 
     def build_gradient_node(self, grad_upstream):
         return [(SqrGrad(), (grad_upstream, self.inputs[0].forward_value), [self.inputs[0]])]
@@ -263,7 +270,9 @@ class BoundHardTanh(BoundActivation):
 
             # For all tensors having batch as the first dimension (batch,.....)
             _A, _bias = multiply_by_A_signs(
-                last_A, w_pos, w_neg, b_pos, b_neg)
+                last_A, w_pos, w_neg, b_pos, b_neg,
+                patches_padding_pos_masked=self.get_bound_opt(
+                    'clampmult_patches_padding_pos_masked', False))
 
             return _A, _bias
 
@@ -273,12 +282,14 @@ class BoundHardTanh(BoundActivation):
         return [(lA, uA), (None, None), (None, None)], lbias, ubias
 
     def bound_relax(self, x, min_val, max_val, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='hardtanh')
         epsilon = 1e-8
-        preact_lb = x.lower.clamp(max=max_val.value)
-        preact_ub = torch.max(x.upper.clamp(min=min_val.value), preact_lb + epsilon)
+        preact_lb = x.lower.clamp(max=max_val.forward_value)
+        preact_ub = torch.max(
+            x.upper.clamp(min=min_val.forward_value), preact_lb + epsilon)
 
-        min_val = min_val.value
-        max_val = max_val.value
+        min_val = min_val.forward_value
+        max_val = max_val.forward_value
 
         uw = torch.zeros_like(preact_ub)
         ub = torch.zeros_like(preact_ub)
@@ -403,11 +414,14 @@ class BoundHardTanh(BoundActivation):
         self.lb = lb
 
     def interval_propagate(self, *v):
-        h_L, h_U = v[0][0], v[0][1]
-        min_val = v[1][0]
-        max_val = v[2][0]
-        assert v[1][0] == v[1][1] and v[2][0] == v[2][1]
-        return self.forward(h_L, min_val, max_val), self.forward(h_U, min_val, max_val)
+        h_L, h_U = v[0].lower, v[0].upper
+        min_val = v[1].lower
+        max_val = v[2].lower
+        assert not self.is_input_perturbed(1)
+        assert not self.is_input_perturbed(2)
+        return Interval(
+            self.forward(h_L, min_val, max_val),
+            self.forward(h_U, min_val, max_val))
 
 
 class BoundFloor(BoundActivation):
@@ -415,6 +429,7 @@ class BoundFloor(BoundActivation):
         return torch.floor(x)
 
     def bound_relax(self, x, init=False):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='floor')
         if init:
             self.init_linear_relaxation(x)
         self.lb += torch.floor(x.lower)
@@ -437,17 +452,11 @@ class BoundMultiPiecewiseNonlinear(BoundOptimizableActivation):
                        reduce_bias=True, start_node=None, **kwargs):
         assert not self.is_input_perturbed(1)
         assert not self.is_input_perturbed(2)
+        self.require_finite_relaxation_bounds(
+            x.lower, x.upper, operator='multi_piecewise_nonlinear')
 
-        weight = (
-            self.inputs[1].forward_value
-            if hasattr(self.inputs[1], 'forward_value')
-            else self.inputs[1].forward()
-        )
-        offset = (
-            self.inputs[2].forward_value
-            if hasattr(self.inputs[2], 'forward_value')
-            else self.inputs[2].forward()
-        )
+        weight = self.inputs[1].forward_value
+        offset = self.inputs[2].forward_value
 
         relu_x_lower = (x.lower.unsqueeze(-1) - offset).clamp(max=0)
         relu_x_upper = (x.upper.unsqueeze(-1) - offset).clamp(min=0)
@@ -491,15 +500,13 @@ class BoundMultiPiecewiseNonlinear(BoundOptimizableActivation):
         return [(lA, uA), (None, None), (None, None)], lb, ub
 
     def _init_opt_parameters_impl(self, size_spec, **kwargs):
-        alpha = torch.empty(2, size_spec, *self.init_lower_k.shape,
-                            device=self.init_lower_k.device)
+        alpha = torch.empty(
+            2, size_spec, *self.init_lower_k.shape,
+            dtype=self.init_lower_k.dtype,
+            device=self.init_lower_k.device)
         alpha.data[:2] = self.init_lower_k
         return alpha
 
     def get_split_mask(self, lower, upper, input_index):
-        offset = (
-            self.inputs[2].forward_value
-            if hasattr(self.inputs[2], 'forward_value')
-            else self.inputs[2].forward()
-        )
+        offset = self.inputs[2].forward_value
         return ((lower.unsqueeze(-1) < offset) & (upper.unsqueeze(-1) > offset)).any(dim=-1)

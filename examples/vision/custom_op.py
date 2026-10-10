@@ -47,6 +47,7 @@ class BoundPlusConstant(Bound):
         """ `const` is an attribute and can be obtained from the dict `attr` """
         super().__init__(attr, inputs, output_index, options)
         self.const = attr['const']
+        self.use_default_ibp = True
 
     def forward(self, x):
         return x + self.const
@@ -69,17 +70,6 @@ class BoundPlusConstant(Bound):
         lA, lbias = _bound_oneside(last_lA)
         uA, ubias = _bound_oneside(last_lA)
         return [(lA, uA)], lbias, ubias
-
-    def interval_propagate(self, *v):
-        """ IBP computation """
-        print('Calling interval_propagate for custom::PlusConstant')
-        # Interval bound of the input
-        h_L, h_U = v[0]
-        # Since this function is monotonic, we can get the lower bound and upper bound
-        # by applying the function on h_L and h_U respectively.
-        lower = h_L + self.const
-        upper = h_U + self.const
-        return lower, upper
 
 """ Step 4: Register the custom operator """
 register_custom_op("custom::PlusConstant", BoundPlusConstant)
@@ -122,4 +112,3 @@ for method in ['IBP', 'IBP+backward (CROWN-IBP)', 'backward (CROWN)']:
             print("f_{j}(x_0): {l:8.3f} <= f_{j}(x_0+delta) <= {u:8.3f} {ind}".format(
                 j=j, l=lb[i][j].item(), u=ub[i][j].item(), ind=indicator))
     print()
-

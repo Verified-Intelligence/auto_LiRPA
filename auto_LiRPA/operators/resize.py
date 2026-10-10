@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Resize operator """
@@ -47,8 +47,13 @@ class BoundResize(Bound):
         return final
 
     def interval_propagate(self, *v):
-        l, u = zip(*v)
-        return Interval.make_interval(self.forward(*l), self.forward(*u), v[0])
+        if any(self.is_input_perturbed(i) for i in range(1, len(v))):
+            raise OperatorCapabilityError(
+                self, 'IBP requires fixed resize parameters')
+        lower = [interval.lower for interval in v]
+        output_lower = self.forward(*lower)
+        upper = [interval.upper for interval in v]
+        return Interval(output_lower, self.forward(*upper))
 
     def bound_forward(self, dim_in, *inp):
         x = inp[0]
@@ -100,7 +105,7 @@ class BoundResize(Bound):
                     return last_A.create_similar(patches=new_patches,
                                                  stride=last_A.stride//self.scale_factor[0],
                                                  padding=last_A.padding//self.scale_factor[0],
-                                                 )
+                                                 padding_pos_masked=False)
                 else:
                     """
                         The following part is created and mainly maintained by Linyi
@@ -190,7 +195,9 @@ class BoundResize(Bound):
                     if last_A.unstable_idx is None:
                         # with nonsparse index, create full-sized sum musk for rows
                         ker_h_indexer = torch.arange(0, ker_size_h).to(last_A.device)
-                        sum_mask_h = torch.zeros(last_A.shape[2], ker_size_h, new_ker_size_h).to(last_A.device)
+                        sum_mask_h = torch.zeros(
+                            last_A.shape[2], ker_size_h, new_ker_size_h,
+                            dtype=last_A.patches.dtype, device=last_A.device)
                         for i in range(last_A.shape[2]):
                             sum_mask_h[i, ker_h_indexer, \
                                 shrank_h_idx[h_idx_map[i] - min_h_idx: h_idx_map[i] - min_h_idx + ker_size_h] - shrank_h_idx[h_idx_map[i] - min_h_idx]] = 1
@@ -199,7 +206,9 @@ class BoundResize(Bound):
                             sum_mask_h[i, padding_place_mask] = 0
                     else:
                         # with sparse index, create sparse sum musk
-                        sum_mask_h = torch.zeros(last_A.shape[0], ker_size_h, new_ker_size_h).to(last_A.device)
+                        sum_mask_h = torch.zeros(
+                            last_A.shape[0], ker_size_h, new_ker_size_h,
+                            dtype=last_A.patches.dtype, device=last_A.device)
 
                         row_nos = last_A.unstable_idx[1]
                         unstable_loc_indexer = torch.arange(0, row_nos.shape[0]).to(last_A.device)
@@ -216,7 +225,9 @@ class BoundResize(Bound):
                     if last_A.unstable_idx is None:
                         # with nonsparse index, create full-sized sum musk for columns
                         ker_w_indexer = torch.arange(0, ker_size_w).to(last_A.device)
-                        sum_mask_w = torch.zeros(last_A.shape[3], ker_size_w, new_ker_size_w).to(last_A.device)
+                        sum_mask_w = torch.zeros(
+                            last_A.shape[3], ker_size_w, new_ker_size_w,
+                            dtype=last_A.patches.dtype, device=last_A.device)
                         for i in range(last_A.shape[3]):
                             sum_mask_w[i, ker_w_indexer, \
                                 shrank_w_idx[w_idx_map[i] - min_w_idx: w_idx_map[i] - min_w_idx + ker_size_w] - shrank_w_idx[w_idx_map[i] - min_w_idx]] = 1
@@ -225,7 +236,9 @@ class BoundResize(Bound):
                             sum_mask_w[i, padding_place_mask] = 0
                     else:
                         # with sparse index, create sparse sum musk
-                        sum_mask_w = torch.zeros(last_A.shape[0], ker_size_w, new_ker_size_w).to(last_A.device)
+                        sum_mask_w = torch.zeros(
+                            last_A.shape[0], ker_size_w, new_ker_size_w,
+                            dtype=last_A.patches.dtype, device=last_A.device)
 
                         col_nos = last_A.unstable_idx[2]
                         unstable_loc_indexer = torch.arange(0, col_nos.shape[0]).to(last_A.device)
@@ -252,8 +265,10 @@ class BoundResize(Bound):
                     """
                     ext_new_ker_size_h, ext_new_ker_size_w = \
                         new_ker_size_h * tot_scale_fac[0], new_ker_size_w * tot_scale_fac[1]
-                    ext_new_patches = torch.zeros(list(new_patches.shape[:-2]) +
-                                                  [ext_new_ker_size_h, ext_new_ker_size_w], device=new_patches.device)
+                    ext_new_patches = torch.zeros(
+                        list(new_patches.shape[:-2])
+                        + [ext_new_ker_size_h, ext_new_ker_size_w],
+                        dtype=new_patches.dtype, device=new_patches.device)
                     for i in range(ext_new_ker_size_h):
                         for j in range(ext_new_ker_size_w):
                             ext_new_patches[..., i, j] = new_patches[..., i // tot_scale_fac[0], j // tot_scale_fac[1]]
@@ -300,7 +315,8 @@ class BoundResize(Bound):
                     #       f'{ext_new_patches.shape} (pad={new_padding}, iz={inserted_zeros}, s={last_A.stride})')
                     ret_patches_A = last_A.create_similar(patches=ext_new_patches,
                                                           padding=new_padding,
-                                                          inserted_zeros=inserted_zeros)
+                                                          inserted_zeros=inserted_zeros,
+                                                          padding_pos_masked=False)
                     if self.input_shape[-2] < ret_patches_A.shape[-2] and self.input_shape[-1] < ret_patches_A.shape[-2] \
                             and not is_shape_used(ret_patches_A.output_padding):
                         # using matrix mode could be more memory efficient
@@ -314,4 +330,3 @@ class BoundResize(Bound):
         last_lA = _bound_oneside(last_lA)
         last_uA = _bound_oneside(last_uA)
         return [(last_lA, last_uA), (None, None), (None, None)], 0, 0
-

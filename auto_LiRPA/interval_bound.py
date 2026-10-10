@@ -11,9 +11,11 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
+import copy
+
 import torch
 from .bound_ops import *
 from .utils import logger
@@ -23,8 +25,102 @@ if TYPE_CHECKING:
     from .bound_general import BoundedModule
 
 
+def _widen_nan_bounds(node, bounds):
+    """Replace indeterminate IBP endpoints with conservative infinities."""
+    if not isinstance(bounds, Interval):
+        raise TypeError(
+            f'{node}.interval_propagate() must return Interval, got '
+            f'{type(bounds)}')
+    lower, upper = bounds.lower, bounds.upper
+    if isinstance(lower, torch.Size):
+        lower = torch.tensor(lower)
+    if isinstance(upper, torch.Size):
+        upper = torch.tensor(upper)
+
+    lower_nan = torch.isnan(lower)
+    if lower_nan.any():
+        print(
+            f'[Interval Warning] NaN detected in lower bounds of node {node}. '
+            f'Replacing with -inf.'
+        )
+        lower = torch.where(
+            lower_nan, torch.full_like(lower, float('-inf')), lower)
+
+    upper_nan = torch.isnan(upper)
+    if upper_nan.any():
+        print(
+            f'[Interval Warning] NaN detected in upper bounds of node {node}. '
+            f'Replacing with +inf.'
+        )
+        upper = torch.where(
+            upper_nan, torch.full_like(upper, float('inf')), upper)
+
+    return Interval(lower, upper)
+
+
+def _interval_propagate(node, intervals, input_states, **kwargs):
+    """Consume the first input's structured state, or run ordinary box IBP."""
+    bound_from_state = getattr(
+        node, '_bound_from_input_perturbation_state', None)
+    if (input_states and input_states[0] is not None
+            and bound_from_state is not None):
+        return bound_from_state(
+            *intervals, state=input_states[0], **kwargs)
+    return node.interval_propagate(*intervals, **kwargs)
+
+
+def _initialize_root_interval(self: 'BoundedModule', node, value):
+    """Initialize a root's box interval and finite-p/L0 IBP state."""
+    self._ibp_input_perturbation_states.pop(node, None)
+    perturbation = getattr(node, 'perturbation', None)
+    if perturbation is None:
+        return Interval(value, value)
+
+    lower, upper = node.linear.lower, node.linear.upper
+    state = None
+    if type(node) is BoundInput:
+        # LiRPA keeps finite-p and L0 geometry in the perturbation object, but
+        # ordinary box IBP still needs sound elementwise root bounds.
+        if (isinstance(perturbation, PerturbationLpNorm)
+                and perturbation.norm != torch.inf):
+            eps = perturbation.eps
+            if isinstance(eps, torch.Tensor) and eps.ndim < value.ndim:
+                # Batched radii omit trailing input dimensions.
+                eps = eps.reshape(
+                    *eps.shape, *((1,) * (value.ndim - eps.ndim)))
+            lower = value - eps
+            upper = value + eps
+            if perturbation.x_L is not None:
+                lower = torch.maximum(lower, perturbation.x_L)
+            if perturbation.x_U is not None:
+                upper = torch.minimum(upper, perturbation.x_U)
+            if perturbation.norm >= 1:
+                state_perturbation = perturbation
+                if (isinstance(perturbation.eps, torch.Tensor)
+                        and perturbation.eps.ndim == 1
+                        and value.ndim > 0
+                        and perturbation.eps.shape[0] == value.shape[0]):
+                    # Structured affine bounds use one radius per batch row.
+                    state_perturbation = copy.copy(perturbation)
+                    state_perturbation.eps = perturbation.eps.unsqueeze(-1)
+                state = value, state_perturbation
+        elif isinstance(perturbation, PerturbationL0Norm):
+            lower = (torch.zeros_like(value) if perturbation.x_L is None
+                     else perturbation.x_L)
+            upper = (torch.ones_like(value) if perturbation.x_U is None
+                     else perturbation.x_U)
+            state = value, perturbation
+
+    interval = Interval(lower, upper)
+    if state is not None:
+        self._ibp_input_perturbation_states[node] = state
+    return interval
+
+
 def IBP_general(self: 'BoundedModule', node=None, C=None,
-                delete_bounds_after_use=False):
+                delete_bounds_after_use=False, recompute=False):
+
+    input_perturbation_states = self._ibp_input_perturbation_states
 
     logger.debug('IBP for %s', node)
 
@@ -33,72 +129,85 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
         sparse_intermediate_bounds_with_ibp is true."""
         if delete_bounds_after_use:
             for n in node_list:
-                del n.interval
+                input_perturbation_states.pop(n, None)
                 n.delete_lower_and_upper_bounds()
 
     if self.bound_opts.get('loss_fusion', False):
         res = self._IBP_loss_fusion(node, C)
         if res is not None:
+            res = _widen_nan_bounds(node, res)
+            input_perturbation_states.pop(node, None)
+            node.lower = res.lower
+            node.upper = res.upper
             return res
 
     if not node.perturbed:
         fv = self.get_forward_value(node)
-        node.lower, node.upper = node.interval = (fv, fv)
+        input_perturbation_states.pop(node, None)
+        node.lower, node.upper = fv, fv
+        node.check_bound_invariants(
+            node.lower, node.upper, context='IBP output')
 
     to_be_deleted_bounds = []
-    if not hasattr(node, 'interval'):
+    if (node.perturbed
+            and (recompute
+                 or not node.is_lower_bound_current()
+                 or not node.is_upper_bound_current())):
         for n in node.inputs:
-            if not hasattr(n, 'interval'):
+            if (not n.is_lower_bound_current()
+                    or not n.is_upper_bound_current()):
                 # Node n does not have interval bounds; we must compute it.
                 self.IBP_general(
                     n, delete_bounds_after_use=delete_bounds_after_use)
                 to_be_deleted_bounds.append(n)
-        inp = [n_pre.interval for n_pre in node.inputs]
+        inp = [Interval(n_pre.lower, n_pre.upper) for n_pre in node.inputs]
+        input_states = [
+            input_perturbation_states.get(n_pre)
+            for n_pre in node.inputs]
         if (C is not None and isinstance(node, BoundLinear)
                 and not node.is_input_perturbed(1)):
             # merge the last BoundLinear node with the specification, available
             # when weights of this layer are not perturbed
-            ret = node.interval_propagate(*inp, C=C)
+            ret = _widen_nan_bounds(
+                node, _interval_propagate(
+                    node, inp, input_states, C=C))
             _delete_unused_bounds(to_be_deleted_bounds)
             return ret
+
+        # Compute this node's box bounds first. Linear and Conv may consume a
+        # preserved input perturbation state here instead of using box IBP.
+        bounds = _interval_propagate(node, inp, input_states)
+
+        # Independently determine whether that state remains valid after this
+        # operator and should be made available to downstream nodes.
+        propagate_state = getattr(
+            node, '_propagate_input_perturbation_state', None)
+        state = None
+        if propagate_state is not None:
+            state = propagate_state(inp, input_states)
+
+        bounds = _widen_nan_bounds(node, bounds)
+        if state is None:
+            input_perturbation_states.pop(node, None)
         else:
-            node.interval = node.interval_propagate(*inp)
-
-        node.lower, node.upper = node.interval
-        if isinstance(node.lower, torch.Size):
-            node.lower = torch.tensor(node.lower)
-        if isinstance(node.upper, torch.Size):
-            node.upper = torch.tensor(node.upper)
-
-        # Handle NaNs in lower and upper bounds
-        if torch.isnan(node.lower).any():
-            print(
-                f'[Interval Warning] NaN detected in lower bounds of node {node}. '
-                f'Replacing with -inf.'
-            )
-            node.lower = torch.where(
-                torch.isnan(node.lower),
-                torch.full_like(node.lower, float('-inf')),
-                node.lower
-            )
-        if torch.isnan(node.upper).any():
-            print(
-                f'[Interval Warning] NaN detected in upper bounds of node {node}. '
-                f'Replacing with +inf.'
-            )
-            node.upper = torch.where(
-                torch.isnan(node.upper),
-                torch.full_like(node.upper, float('inf')),
-                node.upper
-            )
-        node.interval = Interval.make_interval(node.lower, node.upper, other=node.interval)
+            input_perturbation_states[node] = state
+        node.lower = bounds.lower
+        node.upper = bounds.upper
 
     if C is not None:
         _delete_unused_bounds(to_be_deleted_bounds)
-        return BoundLinear.interval_propagate(None, node.interval, C=C)
-    else:
-        _delete_unused_bounds(to_be_deleted_bounds)
-        return node.interval
+        state = input_perturbation_states.get(node)
+        if state is None:
+            result = BoundLinear._bound_box(
+                Interval(node.lower, node.upper), C)
+        else:
+            center, perturbation = state
+            result = BoundLinear._bound_input_perturbation(
+                center, perturbation, C)
+        return _widen_nan_bounds(node, result)
+
+    _delete_unused_bounds(to_be_deleted_bounds)
+    return Interval(node.lower, node.upper)
 
 
 def _IBP_loss_fusion(self: 'BoundedModule', node, C):
@@ -123,10 +232,12 @@ def _IBP_loss_fusion(self: 'BoundedModule', node, C):
         w = node_linear.inputs[1].param
         b = node_linear.inputs[2].param
         labels = node_gather.inputs[1]
-        if not hasattr(node_start, 'interval'):
+        if (not node_start.is_lower_bound_current()
+                or not node_start.is_upper_bound_current()):
             self.IBP_general(node_start)
         for n in node_gather.inputs:
-            if not hasattr(n, 'interval'):
+            if (not n.is_lower_bound_current()
+                    or not n.is_upper_bound_current()):
                 self.IBP_general(n)
         if torch.isclose(labels.lower, labels.upper, 1e-8).all():
             labels = labels.lower
@@ -138,13 +249,17 @@ def _IBP_loss_fusion(self: 'BoundedModule', node, C):
             b = b.expand(batch_size, *b.shape)
             b = b - torch.gather(b, dim=1,
                                     index=labels.repeat(1, b.shape[1]))
-            lower, upper = node_start.interval
+            lower = node_start.lower
+            upper = node_start.upper
             lower, upper = lower.unsqueeze(1), upper.unsqueeze(1)
-            node.lower, node.upper = node_linear.interval_propagate(
-                (lower, upper), (w, w), (b.unsqueeze(1), b.unsqueeze(1)))
-            node.interval = node.lower, node.upper = (
-                node.lower.squeeze(1), node.upper.squeeze(1))
-            return node.interval
+            bias = b.unsqueeze(1)
+            intervals = [
+                Interval(lower, upper), Interval(w, w),
+                Interval(bias, bias)]
+            output_interval = node_linear.interval_propagate(*intervals)
+            node.lower = output_interval.lower.squeeze(1)
+            node.upper = output_interval.upper.squeeze(1)
+            return Interval(node.lower, node.upper)
 
     return None
 
@@ -171,14 +286,15 @@ def check_IBP_intermediate(self: 'BoundedModule', node):
 
     if (isinstance(node, BoundReshape)
             and node.inputs[0].is_lower_bound_current()
-            and hasattr(node.inputs[1], 'value')):
+            and not node.inputs[1].perturbed):
         # Node for input value.
         val_input = node.inputs[0]
         # Node for input parameter (e.g., shape, permute)
         arg_input = node.inputs[1]
-        node.lower = node.forward(val_input.lower, arg_input.value)
-        node.upper = node.forward(val_input.upper, arg_input.value)
-        node.interval = (node.lower, node.upper)
+        argument = self.get_forward_value(arg_input)
+        node.lower = node.forward(val_input.lower, argument)
+        node.upper = node.forward(val_input.upper, argument)
+        self._ibp_input_perturbation_states.pop(node, None)
         return True
 
     # Use IBP if node.ibp_intermediate == True (for nodes such as ReLU)
@@ -224,7 +340,8 @@ def check_IBP_first_linear(self: 'BoundedModule', node):
                 or type(node) == BoundConv
                 and node.name not in intermediate_beta_enabled_layers)):
         if type(node.inputs[0]) == BoundInput:
-            node.lower, node.upper = self.IBP_general(node)
+            interval = self.IBP_general(node)
+            node.lower, node.upper = interval.lower, interval.upper
             return True
 
     return False
@@ -234,7 +351,9 @@ def compare_with_IBP(self, node, lower, upper, C=None):
     """Re-compute the bounds by IBP given the existing intermediate bounds.
     Update the bounds if IBP gives tighter bounds."""
 
-    lower_ibp, upper_ibp = self.IBP_general(node, C=C, delete_bounds_after_use=True)
+    interval = self.IBP_general(
+        node, C=C, delete_bounds_after_use=True, recompute=True)
+    lower_ibp, upper_ibp = interval.lower, interval.upper
     if lower is not None:
         lower = torch.max(lower, lower_ibp)
     if upper is not None:

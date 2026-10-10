@@ -11,13 +11,55 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from torch.nn import Module
 from .base import *
 from .constant import BoundConstant
 from .solver_utils import grb
+
+
+def _broadcast_dynamic_forward(w, lb, reference):
+    """Bounds whose coefficients come from a single operand.
+
+    Coefficients are shaped ``[batch, variables, *shape]`` and a bias
+    ``[batch, *shape]``, so the missing variable axis is inserted before the
+    coefficients are broadcast to the merged output shape.
+    """
+    merged = (lb.shape[0], w.shape[1], *lb.shape[1:])
+    if tuple(w.shape) != merged:
+        w = w + torch.zeros_like(lb).unsqueeze(1)
+    return LinearBound(w, lb, w, lb, tot_dim=reference.tot_dim)
+
+
+def _combine_dynamic_forward(x, y, sign):
+    """Combine two dynamic forward bounds as ``x + sign * y``.
+
+    Both operands lay their coefficients out over the same variable layout
+    (see BoundRelu.bound_dynamic_forward), so a column index denotes the same
+    bounded variable on either side and the affine forms combine by linearity
+    -- negating one included. An operand reaching fewer columns does not depend
+    on the variables the rest hold, so widening it with zero coefficients is
+    exact.
+    """
+    lb = x.lb + sign * y.lb
+    if x.lw is None and y.lw is None:
+        return LinearBound(None, lb, None, lb, tot_dim=0)
+    if x.lw is None:
+        return _broadcast_dynamic_forward(sign * y.lw, lb, y)
+    if y.lw is None:
+        return _broadcast_dynamic_forward(x.lw, lb, x)
+
+    width = max(x.lw.shape[1], y.lw.shape[1])
+
+    def pad_columns(w):
+        return w if w.shape[1] == width else torch.cat(
+            [w, w.new_zeros((w.shape[0], width - w.shape[1], *w.shape[2:]))],
+            dim=1)
+
+    lw = pad_columns(x.lw) + sign * pad_columns(y.lw)
+    return LinearBound(lw, lb, lw, lb, tot_dim=max(x.tot_dim, y.tot_dim))
 
 
 class BoundAdd(Bound):
@@ -46,6 +88,9 @@ class BoundAdd(Bound):
         lA_y = _bound_oneside(last_lA, y)
         return [(lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
+    def bound_dynamic_forward(self, x, y, max_dim=None, offset=0):
+        return _combine_dynamic_forward(x, y, 1)
+
     def bound_forward(self, dim_in, x, y):
         lb, ub = x.lb + y.lb, x.ub + y.ub
 
@@ -66,7 +111,8 @@ class BoundAdd(Bound):
 
     def interval_propagate(self, x, y):
         assert (not isinstance(y, Tensor))
-        return x[0] + y[0], x[1] + y[1]
+        return Interval(
+            x.lower + y.lower, x.upper + y.upper)
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         if isinstance(v[0], Tensor) and isinstance(v[1], Tensor):
@@ -106,13 +152,13 @@ class BoundAdd(Bound):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        if not self.inputs[0].no_jacobian:
+        if not self.inputs[0].blocks_jacobian:
             grad0_node = AddGrad(self.inputs[0].output_shape if self.inputs[0].batch_dim != -1 else
                                  torch.Size((1,) + self.inputs[0].output_shape))
             grad0 = (grad0_node, (grad_upstream,), [])
         else:
             grad0 = None
-        if not self.inputs[1].no_jacobian:
+        if not self.inputs[1].blocks_jacobian:
             grad1_node = AddGrad(self.inputs[1].output_shape if self.inputs[1].batch_dim != -1 else
                                  torch.Size((1,) + self.inputs[1].output_shape))
             grad1 = (grad1_node, (grad_upstream,), [])
@@ -154,6 +200,9 @@ class BoundSub(Bound):
         lA_y = _bound_oneside(last_lA, y, sign=-1)
         return [(lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
+    def bound_dynamic_forward(self, x, y, max_dim=None, offset=0):
+        return _combine_dynamic_forward(x, y, -1)
+
     def bound_forward(self, dim_in, x, y):
         lb, ub = x.lb - y.ub, x.ub - y.lb
 
@@ -174,7 +223,8 @@ class BoundSub(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, x, y):
-        return x[0] - y[1], x[1] - y[0]
+        return Interval(
+            x.lower - y.upper, x.upper - y.lower)
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         if isinstance(v[0], Tensor) and isinstance(v[1], Tensor):
@@ -203,13 +253,13 @@ class BoundSub(Bound):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        if not self.inputs[0].no_jacobian:
+        if not self.inputs[0].blocks_jacobian:
             grad_node_0 = AddGrad(self.inputs[0].output_shape if self.inputs[0].batch_dim != -1 else
                                   torch.Size((1,) + self.inputs[0].output_shape), w=1.0)
             grad0 = (grad_node_0, (grad_upstream,), [])
         else:
             grad0 = None
-        if not self.inputs[1].no_jacobian:
+        if not self.inputs[1].blocks_jacobian:
             grad_node_1 = AddGrad(self.inputs[1].output_shape if self.inputs[1].batch_dim != -1 else
                                   torch.Size((1,) + self.inputs[1].output_shape), w=-1.0)
             grad1 = (grad_node_1, (grad_upstream,), [])

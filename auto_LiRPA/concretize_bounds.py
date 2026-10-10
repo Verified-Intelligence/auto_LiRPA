@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -39,6 +39,7 @@ def concretize_bounds(
     # for `forward_concretize`
     lw=None,
     uw=None,
+    return_A=False,
     # common
     clip_neuron_selection_value=-1.0,
     clip_neuron_selection_type="ratio"
@@ -51,7 +52,7 @@ def concretize_bounds(
     def _call_concretize(use_constraints, save_bounds=False, heuristic_indices=None):
         if concretize_mode == 'backward':
             # backward concretize signature
-            return backward_concretize(
+            result = backward_concretize(
                 self, batch_size, output_dim, lower, upper,
                 average_A=average_A,
                 node_start=node,
@@ -61,15 +62,21 @@ def concretize_bounds(
             )
         elif concretize_mode == 'forward':
             # forward_concretize signature
-            return forward_concretize(
+            result = forward_concretize(
                 self, lower, upper, lw, uw,
                 use_constraints=use_constraints,
                 save_bounds=save_bounds,
                 heuristic_indices=heuristic_indices,
+                return_A=return_A,
             )
         else:
             raise ValueError(f"Unknown concretize mode: {concretize_mode}. "
                              "Please use 'backward' or 'forward'.")
+        result_lower, result_upper, _ = result
+        node.check_bound_invariants(
+            result_lower, result_upper,
+            context=f'{concretize_mode} concretization')
+        return result
 
     use_constraints = True
     save_bounds = False
@@ -229,7 +236,10 @@ def concretize_root(self, root, batch_size, output_dim,
             if isinstance(A, eyeC):
                 return fv.view(batch_size_, -1)
             elif isinstance(A, Patches):
-                return A.matmul(fv, input_shape=input_shape)
+                # Root contributions use [batch_size, spec]. Dense patches
+                # retain spatial output dimensions and must be flattened.
+                out = A.matmul(fv, input_shape=input_shape)
+                return out.reshape(out.shape[0], -1)
             elif type(root) == BoundInput:
                 return A.matmul(fv.view(batch_size_, -1, 1)).squeeze(-1)
             else:
@@ -287,7 +297,9 @@ def backward_concretize(self, batch_size, output_dim, lb=None, ub=None,
     return lb, ub, has_constraints
 
 
-def forward_concretize(self, lower, upper, lw, uw, use_constraints=False, heuristic_indices=None, save_bounds=False):
+def forward_concretize(
+        self, lower, upper, lw, uw, use_constraints=False,
+        heuristic_indices=None, save_bounds=False, return_A=False):
     """
     Concretize function for forward bound. 
 
@@ -300,6 +312,8 @@ def forward_concretize(self, lower, upper, lw, uw, use_constraints=False, heuris
     :param heuristic_indices:       Index Tensor. A index tensor, it select **equal** number of hidden neurons from each batch.
         Constrained solving will be further applied on these neurons. Shape (batchsize, n_h_neurons)
     :param save_bounds:             bool. A flag controling whether to save naive bounds.
+    :param return_A:                bool. Retain each root's concretized
+        contribution while constructing input-space affine bounds.
     
     :return res_lower:              Tensor. The lower bound tensor.
     :return res_upper:              Tensor. The upper bound tensor.
@@ -314,6 +328,8 @@ def forward_concretize(self, lower, upper, lw, uw, use_constraints=False, heuris
     lA = lw.reshape(self.batch_size, self.dim_in, -1).transpose(1, 2)
     uA = uw.reshape(self.batch_size, self.dim_in, -1).transpose(1, 2)
     for root in roots:
+        if return_A:
+            root.lb = root.ub = None
         if hasattr(root, 'perturbation') and root.perturbation is not None:
             _lA = lA[:, :, prev_dim_in : (prev_dim_in + root.dim)]
             _uA = uA[:, :, prev_dim_in : (prev_dim_in + root.dim)]
@@ -334,6 +350,11 @@ def forward_concretize(self, lower, upper, lw, uw, use_constraints=False, heuris
             temp_upper = root.perturbation.concretize(
                 root.center, _uA, sign=+1, aux=root.aux
                 ).view(upper.shape)
+            if return_A:
+                # _save_forward_A subtracts this root contribution from the
+                # total bound so the entry bias represents every other root.
+                # forward_general clears these temporary values after use.
+                root.lb, root.ub = temp_lower, temp_upper
             
             # Update infeasible_batches
             if (isinstance(root.perturbation, PerturbationLpNorm)
@@ -355,7 +376,9 @@ def forward_concretize(self, lower, upper, lw, uw, use_constraints=False, heuris
             # Here we add temp_lower onto res_lower, instead of lower. 
             # It's because the lower value will be used twice, any modification to it should be avoided.
             res_lower = res_lower + temp_lower
-            res_upper = res_upper + temp_upper                        
+            res_upper = res_upper + temp_upper
+            # Forward coefficients concatenate all perturbed roots.
+            prev_dim_in += root.dim
     
     res_lower = res_lower + lower
     res_upper = res_upper + upper

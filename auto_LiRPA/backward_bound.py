@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import os
@@ -30,10 +30,14 @@ if TYPE_CHECKING:
 
 
 def batched_backward(self: 'BoundedModule', node, C, unstable_idx, batch_size,
-                     bound_lower=True, bound_upper=True, return_A=None):
+                     bound_lower=True, bound_upper=True, return_A=None,
+                     apply_output_constraints_to=None):
     if return_A is None: return_A = self.return_A
     output_shape = node.output_shape[1:]
     dim = int(prod(output_shape))
+    # Batched dense specifications must follow the bounded node's dtype. The
+    # cached dtype avoids rebuilding concrete values during bound iterations.
+    specification_dtype = self.get_output_dtype(node)
     if unstable_idx is None:
         unstable_idx = torch.arange(dim, device=self.device)
         dense = True
@@ -75,7 +79,11 @@ def batched_backward(self: 'BoundedModule', node, C, unstable_idx, batch_size,
                     self.device, unstable_idx_batch, None)
             else:
                 assert C is None or C.type == 'eye'
-                C_batch = torch.zeros([1, unstable_size_batch, dim], device=self.device)
+                C_batch = torch.zeros(
+                    [1, unstable_size_batch, dim],
+                    dtype=specification_dtype,
+                    device=self.device,
+                )
                 C_batch[0, torch.arange(unstable_size_batch), unstable_idx_batch] = 1.0
                 C_batch = C_batch.expand(batch_size, -1, -1).view(
                     batch_size, unstable_size_batch, *output_shape)
@@ -86,7 +94,10 @@ def batched_backward(self: 'BoundedModule', node, C, unstable_idx, batch_size,
             batch_ret = self.backward_general(
                 node, C_batch,
                 bound_lower=bound_lower, bound_upper=bound_upper,
-                average_A=False, need_A_only=False, unstable_idx=unstable_idx_batch)
+                average_A=False, need_A_only=False, unstable_idx=unstable_idx_batch,
+                # Each concrete chunk must use the same INVPROP constraints as
+                # the unbatched intermediate-bound query.
+                apply_output_constraints_to=apply_output_constraints_to)
             ret.append(batch_ret[:2])
 
             if len(batch_ret) > 2:
@@ -139,11 +150,36 @@ def backward_general(
     initial_As: Optional[dict] = None,
     initial_lb: Optional[torch.tensor] = None,
     initial_ub: Optional[torch.tensor] = None,
+    incoming_A_callback=None,
 ):
+    """Propagate CROWN bounds backward.
+
+    In the direct queue traversal, ``incoming_A_callback(node, lA, uA)`` reads
+    incoming coefficients after DAG accumulation and before the node is
+    processed, including the roots. Batched-CROWN and output-constraint
+    dispatches do not invoke it. The callback must not modify the coefficients,
+    which retain their autograd history.
+    """
     use_beta_crown = self.bound_opts['optimize_bound_args']['enable_beta_crown']
     tighten_input_bounds = (
         self.bound_opts['optimize_bound_args']['tighten_input_bounds']
     )
+
+    # Resolve the batching marker before INVPROP inspects C's concrete shape.
+    # Each chunk then initializes infeasibility state and applies constraints.
+    if isinstance(C, BatchedCrownC):
+        if need_A_only or average_A:
+            raise ValueError(
+                'Batched CROWN is not compatible with '
+                f'need_A_only={need_A_only}, average_A={average_A}')
+        ret = self.batched_backward(
+            bound_node, C, unstable_idx,
+            batch_size=self.get_forward_value(self.roots()[0]).shape[0],
+            bound_lower=bound_lower, bound_upper=bound_upper,
+            apply_output_constraints_to=apply_output_constraints_to,
+        )
+        bound_node.lower, bound_node.upper = ret[:2]
+        return ret
 
     if self.invprop_enabled():
         self.invprop_init_infeasible_bounds(bound_node, C)
@@ -179,21 +215,6 @@ def backward_general(
             logger.debug(f'  C: shape {C.shape}, type {type(C)}')
     _print_time = bool(os.environ.get('AUTOLIRPA_PRINT_TIME', 0))
 
-    if isinstance(C, BatchedCrownC):
-        # If C is a str, use batched CROWN. If batched CROWN is not intended to
-        # be enabled, C must be a explicitly provided non-str object for this function.
-        if need_A_only or average_A:
-            raise ValueError(
-                'Batched CROWN is not compatible with '
-                f'need_A_only={need_A_only}, average_A={average_A}')
-        ret = self.batched_backward(
-            bound_node, C, unstable_idx,
-            batch_size=roots[0].value.shape[0],
-            bound_lower=bound_lower, bound_upper=bound_upper,
-        )
-        bound_node.lower, bound_node.upper = ret[:2]
-        return ret
-
     for n in self.nodes():
         n.lA = n.uA = None
 
@@ -208,12 +229,13 @@ def backward_general(
             self[layer_name].lA = lA
             self[layer_name].uA = uA
         assert start_backpropagation_at_node.lA is not None or start_backpropagation_at_node.uA is not None
+    specification_dtype = self.get_output_dtype(bound_node)
     if initial_lb is None:
-        lb = torch.tensor(0., device=self.device)
+        lb = torch.tensor(0., dtype=specification_dtype, device=self.device)
     else:
         lb = initial_lb
     if initial_ub is None:
-        ub = torch.tensor(0., device=self.device)
+        ub = torch.tensor(0., dtype=specification_dtype, device=self.device)
     else:
         ub = initial_ub
 
@@ -224,6 +246,8 @@ def backward_general(
     while len(queue) > 0:
         l = queue.popleft()  # backward from l
 
+        if incoming_A_callback is not None:
+            incoming_A_callback(l, l.lA, l.uA)
         if l.name in self.root_names:
             continue
 
@@ -251,7 +275,7 @@ def backward_general(
             self.backward_from[l.name].append(bound_node)
 
             if not l.perturbed:
-                if not hasattr(l, 'forward_value'):
+                if l.forward_value is None:
                     self.get_forward_value(l)
                 lb, ub = add_constant_node(lb, ub, l)
                 continue
@@ -277,6 +301,11 @@ def backward_general(
                 l.preserve_mask = update_mask
             else:
                 start_shape = None
+            # Prepare concrete values for fixed operands used by bound_backward().
+            for input_node in l.inputs:
+                if (not input_node.perturbed
+                        and input_node.forward_value is None):
+                    self.get_forward_value(input_node)
             A, lower_b, upper_b = l.bound_backward(
                 lA, uA, *l.inputs,
                 start_node=bound_node, unstable_idx=unstable_idx,
@@ -350,7 +379,6 @@ def backward_general(
         clip_neuron_selection_value=self.clip_neuron_selection_value,
         clip_neuron_selection_type=self.clip_neuron_selection_type
     )
-
     if self.return_A and self.needed_A_dict and bound_node.name in self.needed_A_dict:
         save_root_A(
             bound_node, A_record, self.A_dict, roots,
@@ -428,6 +456,7 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
     crown_batch_size = self.bound_opts.get('crown_batch_size', 1e9)
     dim = int(prod(node.output_shape[1:]))
     batch_size = self.batch_size
+    specification_dtype = self.get_output_dtype(node)
 
     reduced_dim = False  # Only partial neurons (unstable neurons) are bounded.
     unstable_idx = None
@@ -534,9 +563,11 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
                 # use sparse C. Otherwise we determine it by sparsity.
                 num_channel = node.output_shape[-3]
                 # Identity patch size: (ouc_c, 1, 1, 1, out_c, 1, 1).
-                patches = (
-                    torch.eye(num_channel, device=self.device,
-                    dtype=list(self.parameters())[0].dtype)).view(
+                patches = torch.eye(
+                    num_channel,
+                    device=self.device,
+                    dtype=specification_dtype,
+                ).view(
                         num_channel, 1, 1, 1, num_channel, 1, 1)
                 # Expand to (out_c, 1, unstable_size, out_c, 1, 1).
                 patches = patches.expand(-1, 1, node.output_shape[-2],
@@ -556,9 +587,11 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
         if not reduced_dim:
             num_channel = node.output_shape[-3]
             # Identity patch size: (ouc_c, 1, 1, 1, out_c, 1, 1).
-            patches = (
-                torch.eye(num_channel, device=self.device,
-                dtype=list(self.parameters())[0].dtype)).view(
+            patches = torch.eye(
+                num_channel,
+                device=self.device,
+                dtype=specification_dtype,
+            ).view(
                     num_channel, 1, 1, 1, num_channel, 1, 1)
             # Expand to (out_c, batch, out_h, out_w, out_c, 1, 1).
             patches = patches.expand(-1, batch_size, node.output_shape[-2],
@@ -579,7 +612,11 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
                 reduced_dim = True
             elif (unstable_size <= minimum_sparsity * dim
                   and alpha_is_sparse is None) or alpha_is_sparse:
-                newC = torch.zeros([1, unstable_size, dim], device=self.device)
+                newC = torch.zeros(
+                    [1, unstable_size, dim],
+                    dtype=specification_dtype,
+                    device=self.device,
+                )
                 # Fill the corresponding elements to 1.0
                 newC[0, torch.arange(unstable_size), unstable_idx] = 1.0
                 newC = newC.expand(batch_size, -1, -1).view(
@@ -598,7 +635,11 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
             if dim > crown_batch_size:
                 newC = BatchedCrownC('eye')
             else:
-                newC = torch.eye(dim, device=self.device).unsqueeze(0).expand(
+                newC = torch.eye(
+                    dim,
+                    dtype=specification_dtype,
+                    device=self.device,
+                ).unsqueeze(0).expand(
                     batch_size, -1, -1
                 ).view(batch_size, dim, *node.output_shape[1:])
 
@@ -861,15 +902,23 @@ def get_alpha_crown_start_nodes(
         final_node_name=None,
     ):
     """
-    Given a layer "node", return a list of following nodes after this node whose bounds
-    will propagate through this node. Each element in the list is a tuple with 3 elements:
-    (following_node_name, following_node_shape, unstable_idx)
+    Return alpha-bank descriptors for bounds propagated through ``node``:
+    (bank_name, specification_shape, unstable_idx, is_final).
+    Ordinary banks correspond to backward start nodes; network sharing uses
+    one bank for all start nodes and bound sides.
     """
     # When use_full_conv_alpha is True, conv layers do not share alpha.
     sparse_intermediate_bounds = self.bound_opts.get('sparse_intermediate_bounds', False)
     use_full_conv_alpha_thresh = self.bound_opts.get('use_full_conv_alpha_thresh', 512)
 
     start_nodes = []
+
+    if share_alphas == 'network':
+        # A single parameter bank; every start node broadcasts the same alpha.
+        if type(node) is not BoundRelu:
+            raise NotImplementedError('Network-wide alpha sharing supports ReLU only.')
+        return ([(node.SHARED_ALPHA_KEY, 1, None, True)]
+                if self.backward_from[node.name] else [])
 
     for nj in self.backward_from[node.name]:  # Pre-activation layers.
         unstable_idx = None

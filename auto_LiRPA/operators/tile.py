@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """BoundTile"""
@@ -28,7 +28,7 @@ class BoundTile(Bound):
 
     def bound_backward(self, last_lA, last_uA, *x, **kwargs):
         assert not self.is_input_perturbed(1)
-        repeats = x[1].value
+        repeats = x[1].forward_value
 
         def _bound_oneside(A):
             if A is None:

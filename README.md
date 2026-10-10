@@ -11,10 +11,11 @@
 </p>
 
 ## What's New?
+- [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2026](https://github.com/VNN-COMP/vnncomp2026_results). (08/2026)
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2025](https://sites.google.com/view/vnn2025) and is **ranked top-1** in all [scored benchmarks](https://github.com/VNN-COMP/vnncomp2025_results/blob/main/SCORING-SMALL-TOL/latex/main.pdf). (08/2025)
 - Bounding of computation graphs containing Jacobian operators now supports more nonlinear operators (e.g., ```tanh```, ```sigmoid```), enabling verification of [continuous-time Lyapunov stability](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training). (12/2025)
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2024](https://sites.google.com/view/vnn2024). Our tool is **ranked top-1** in all benchmarks (including 12 [regular track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_regular_track.pdf) and 9 [extended track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_extended_track.pdf) benchmarks). (08/2024)
-- The [INVPROP algorithm](https://arxiv.org/pdf/2302.01404.pdf) allows to compute overapproximationsw of preimages (the set of inputs of an NN generating a given output set) and tighten bounds using output constraints. (03/2024)
+- The [INVPROP algorithm](https://arxiv.org/pdf/2302.01404.pdf) allows to compute overapproximations of preimages (the set of inputs of an NN generating a given output set) and tighten bounds using output constraints. (03/2024)
 - Branch-and-bound support for non-ReLU and general nonlinearities ([GenBaB](https://arxiv.org/pdf/2405.21063)) with optimizable bounds (α-CROWN) for new nonlinear functions (sin, cos, GeLU). We achieve significant improvements on verifying neural networks with non-ReLU nonlinearities such as Transformers, LSTM, and [ML4ACOPF](https://github.com/AI4OPT/ml4acopf_benchmark). (09/2023)
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) ([alpha-beta-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git)) (using `auto_LiRPA` as its core library) **won** [VNN-COMP 2023](https://sites.google.com/view/vnn2023). (08/2023)
 - Bound computation for higher-order computational graphs to support bounding Jacobian, Jacobian-vector products, and [local Lipschitz constants](https://arxiv.org/abs/2210.07394). (11/2022)
@@ -99,8 +100,7 @@ user-defined ranges.  We get guaranteed output ranges (bounds):
 
 ## Installation
 
-Python 3.11+ and PyTorch (`>=2.0`, `<2.12`) are required
-(`torchvision >=0.21`).
+Python 3.11 and PyTorch (`>=2.0`, `<2.12`) are required.
 It is highly recommended to have a pre-installed PyTorch
 that matches your system and our version requirement
 (see [PyTorch Get Started](https://pytorch.org/get-started)).
@@ -132,6 +132,8 @@ to obtain certified lower and upper bounds under input perturbations:
 
 ```python
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
+import numpy as np
+import torch.nn as nn
 
 # Define computation as a nn.Module.
 class MyModel(nn.Module):
@@ -244,19 +246,30 @@ Team leaders:
 * Faculty: Huan Zhang (huan@huan-zhang.com), UIUC
 * Student: Xiangru Zhong (xiangru4@illinois.edu), UIUC
 
-Current developers (* indicates members of VNN-COMP 2025 team):
+Current developers (* indicates members of VNN-COMP 2026 team):
 * \*Duo Zhou (duozhou2@illinois.edu), UIUC
-* \*Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
-* \*Hesun Chen (hesunc2@illinois.edu), UIUC
-* \*Haoyu Li (haoyuli5@illinois.edu), UIUC
-* \*Ruize Gao (ruizeg2@illinois.edu), UIUC
-* \*Hao Cheng (haoc539@illinois.edu), UIUC
-* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
-* Lei Huang (leih5@illinois.edu), UIUC
+* \*Lei Huang (leih5@illinois.edu), UIUC
+* Hesun Chen (hesunc2@illinois.edu), UIUC (graduated)
+* Haoyu Li (haoyuli5@illinois.edu), UIUC
+* Ruize Gao (ruizeg2@illinois.edu), UIUC (graduated)
+* Hao Cheng (haoc539@illinois.edu), UIUC (graduated)
+* \*Yifei Li (yifei28@illinois.edu), UIUC
+* \*Jingyi Wang (jingyi66@illinois.edu), UIUC
+* \*Xuanle Li (xuanlel2@illinois.edu), UIUC
+* \*Ashmit Dutta (ashmitd2@illinois.edu), UIUC
+* \*Lingyin Zhang (emilyz5@illinois.edu), UIUC
 * Taobo Liao (taobol2@illinois.edu), UIUC
-* Jorge Chavez (jorgejc2@illinois.edu), UIUC
+* Robert Bates (rbates8@gatech.edu), Georgia Tech / VISS
+* Ketan Bhardwaj (ketanbj@cc.gatech.edu), Georgia Tech / VISS
+* Yanheng Zhuang (yzhua2@illinois.edu), UIUC
+* Zhongyue Yang (ky23@illinois.edu), UIUC
+* Jiuru Lin (jiurul2@illinois.edu), UIUC
+* William Lu (willlu2@illinois.edu), UIUC
 
 Past developers:
+* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
+* Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
+* Jorge Chavez (jorgejc2@illinois.edu), UIUC
 * Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
 * Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
 * Hao Chen (haoc8@illinois.edu), UIUC
@@ -271,7 +284,7 @@ Past developers:
 * Yihan Wang (yihanwang@ucla.edu), UCLA
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
 
-`auto_LiRPA` is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), and a Mathworks research award.
+`auto_LiRPA` is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), a Mathworks research award, and an NSF CAREER award.
 
 We thank the [commits](https://github.com/Verified-Intelligence/auto_LiRPA/commits) and [pull requests](https://github.com/Verified-Intelligence/auto_LiRPA/pulls) from community contributors.
 

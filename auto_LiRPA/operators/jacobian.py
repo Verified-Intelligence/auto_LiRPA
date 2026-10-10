@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -30,7 +30,7 @@ class JacobianOP(torch.autograd.Function):
         output_ = output.flatten(1)
         return torch.zeros(
             output.shape[0], output_.shape[-1], *input.shape[1:],
-            device=output.device)
+            dtype=output.dtype, device=output.device)
 
 
 class BoundJacobianOP(Bound):
@@ -44,11 +44,17 @@ class BoundJacobianOP(Bound):
 class BoundJacobianInit(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
+        self.blocks_perturbation = True
+        self.use_default_ibp = True
 
     def forward(self, x):
         dim = prod(x.shape[1:])
-        eye = torch.eye(dim, device=x.device, requires_grad=x.requires_grad)
+        eye = torch.eye(
+            dim,
+            dtype=x.dtype,
+            device=x.device,
+            requires_grad=x.requires_grad,
+        )
         eye = eye.unsqueeze(0).expand(
             x.shape[0], -1, -1
         ).view(x.shape[0], dim, *x.shape[1:])

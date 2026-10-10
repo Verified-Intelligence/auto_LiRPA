@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Shape operators """
@@ -21,14 +21,15 @@ from .base import *
 class BoundShape(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
+        self.blocks_perturbation = True
+        self.blocks_input_dependency = True
+        self.use_default_ibp = True
 
     @staticmethod
     def shape(x):
         return x.shape if isinstance(x, Tensor) else torch.tensor(x).shape
 
     def forward(self, x):
-        self.from_input = False
         return BoundShape.shape(x)
 
     def bound_forward(self, dim_in, x):

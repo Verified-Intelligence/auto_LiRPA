@@ -14,6 +14,27 @@ class Dummy:
         self.output_shape = lower.shape
 
 
+def test_where_backward_preserves_coefficient_dtype():
+    where = BoundWhere(attr={}, inputs=[], output_index=0, options={})
+    where.batch_dim = 0
+    x = Bound(attr={}, inputs=[], output_index=0, options={})
+    y = Bound(attr={}, inputs=[], output_index=0, options={})
+    x.output_shape = y.output_shape = (1, 2)
+    x.batch_dim = y.batch_dim = 0
+    condition = Bound(attr={}, inputs=[], output_index=0, options={})
+    condition_value = torch.tensor([[True, False]])
+    condition.lower = condition_value
+    condition.upper = condition_value
+    last_A = torch.tensor([[[1.0, -2.0]]], dtype=torch.float64)
+
+    coeffs = where.bound_backward(last_A, None, condition, x, y)[0]
+
+    torch.testing.assert_close(
+        coeffs[1][0], torch.tensor([[[1.0, 0.0]]], dtype=torch.float64))
+    torch.testing.assert_close(
+        coeffs[2][0], torch.tensor([[[0.0, -2.0]]], dtype=torch.float64))
+
+
 class TestBoundOp(TestCase):
     def __init__(self, methodName='runTest', generate=False,
                  device=DEFAULT_DEVICE, dtype=DEFAULT_DTYPE):
@@ -87,18 +108,18 @@ class TestBoundOp(TestCase):
             + bound_in.lb.matmul(weight.t().clamp(max=0)) + bias)
 
         # test `interval_propagate`
-        bound_in = (
+        bound_in = Interval(
             torch.randn(*data_in.shape, device=device),
             torch.randn(*data_in.shape, device=device))
-        bound_weight = (bound_weight.lower, bound_weight.upper)
-        bound_bias = (bound_bias.lower, bound_bias.upper)
+        bound_weight = Interval(bound_weight.lower, bound_weight.upper)
+        bound_bias = Interval(bound_bias.lower, bound_bias.upper)
         bound_out = op.interval_propagate(bound_in, bound_weight, bound_bias)
-        self.assertEqual(bound_out[0],
-                         bound_in[0].matmul(weight.t().clamp(min=0))
-                         + bound_in[1].matmul(weight.t().clamp(max=0)) + bias)
-        self.assertEqual(bound_out[1],
-                         bound_in[1].matmul(weight.t().clamp(min=0))
-                         + bound_in[0].matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(bound_out.lower,
+                         bound_in.lower.matmul(weight.t().clamp(min=0))
+                         + bound_in.upper.matmul(weight.t().clamp(max=0)) + bias)
+        self.assertEqual(bound_out.upper,
+                         bound_in.upper.matmul(weight.t().clamp(min=0))
+                         + bound_in.lower.matmul(weight.t().clamp(max=0)) + bias)
 
         # test weight perturbation
         # `bound_backward`
@@ -108,10 +129,12 @@ class TestBoundOp(TestCase):
         op.inputs[2].perturbation = None # no perturbation on bias
         A, lbias, ubias = op.bound_backward(last_lA, last_uA, *op.inputs)
         # `interval_propagate`
-        bound_weight = (op.inputs[1].lower, op.inputs[1].upper)
+        bound_weight = Interval(
+            op.inputs[1].lower, op.inputs[1].upper)
         bound_out = op.interval_propagate(bound_in, bound_weight, bound_bias)
 
-        self.result = (A, lbias, ubias, bound_out)
+        self.result = (A, lbias, ubias,
+                       (bound_out.lower, bound_out.upper))
 
         if self.generate:
             self.save()
@@ -132,8 +155,8 @@ class TestBoundOp(TestCase):
         )
         self.assertEqual(lbias, lbias_ref)
         self.assertEqual(ubias, ubias_ref)
-        self.assertEqual(bound_out[0], bound_out_ref[0])
-        self.assertEqual(bound_out[1], bound_out_ref[1])
+        self.assertEqual(bound_out.lower, bound_out_ref[0])
+        self.assertEqual(bound_out.upper, bound_out_ref[1])
 
 
 if __name__ == '__main__':

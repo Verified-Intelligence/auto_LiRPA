@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Leaf nodes (indepedent nodes in the auto_LiRPA paper).
@@ -20,17 +20,22 @@ Including input, parameter, buffer, etc."""
 
 from itertools import chain
 from .base import *
+from ..bounded_tensor import BoundedParameter, BoundedTensor
 
 
 class BoundInput(Bound):
-    def __init__(self, ori_name, value, perturbation=None, input_index=None, options=None, attr=None):
+    def __init__(self, ori_name, value, perturbation=None,
+                 model_input_index=None, options=None, attr=None):
         super().__init__(options=options, attr=attr)
         self.ori_name = ori_name
         self.value = value
         self.perturbation = perturbation
-        self.from_input = True
-        self.input_index = input_index
-        self.no_jacobian = True
+        self.input_dependent = True
+        self.batch_dim = 0
+        # Position in the flattened original model inputs used for binding.
+        # Model inputs hold an integer; parameters and buffers hold None.
+        self.model_input_index = model_input_index
+        self.blocks_jacobian = True
 
     def __setattr__(self, key, value):
         super().__setattr__(key, value)
@@ -43,6 +48,15 @@ class BoundInput(Bound):
 
     def forward(self):
         return self.value
+
+    def bind_input(self, value):
+        """Bind a runtime model input and invalidate its concrete cache."""
+        self.value = value
+        self.forward_value = None
+        if isinstance(value, (BoundedTensor, BoundedParameter)):
+            self.perturbation = value.ptb
+        else:
+            self.perturbation = None
 
     def bound_forward(self, dim_in):
         assert 0
@@ -62,7 +76,8 @@ class BoundParams(BoundInput):
         if options is None:
             options = {}
         self.auto_requires_grad = options.get("param", {}).get("auto_requires_grad", True)
-        self.from_input = False
+        self.input_dependent = False
+        self.batch_dim = -1
 
     def register_parameter(self, name, param):
         """Override register_parameter() hook to register only needed parameters."""
@@ -85,14 +100,14 @@ class BoundBuffers(BoundInput):
     def __init__(self, ori_name, value, perturbation=None, options=None, attr=None):
         super().__init__(ori_name, None, perturbation, attr=attr)
         self.register_buffer('buffer', value.clone().detach())
-        # BoundBuffers are like constants and they are by default not from inputs.
-        # The "has_batchdim" was a hack that will forcibly set BoundBuffer to be
-        # from inputs, to workaround buffers with a batch size dimension. This is
-        # not needed in most cases now.
+        self.input_dependent = False
+        self.batch_dim = -1
+        # has_batchdim marks a batch-shaped buffer layout.
         if 'buffers' in options and 'has_batchdim' in options['buffers']:
             warnings.warn('The "has_batchdim" option for BoundBuffers is deprecated.'
                           ' It may be removed from the next release.')
-        self.from_input = options.get('buffers', {}).get('has_batchdim', False)
+        if options.get('buffers', {}).get('has_batchdim', False):
+            self.batch_dim = 0
 
     def forward(self):
         return self.buffer

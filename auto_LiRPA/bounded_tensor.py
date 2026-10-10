@@ -11,10 +11,11 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import copy
+import torch
 import torch.nn as nn
 from torch import Tensor
 import torch._C as _C
@@ -47,21 +48,37 @@ class BoundedTensor(Tensor):
 
     def _func(self, func, *args, **kwargs):
         temp = func(*args, **kwargs)
-        new_obj = BoundedTensor([], self.ptb)
-        new_obj.data = temp.data
-        new_obj.requires_grad = temp.requires_grad
+        new_obj = temp.as_subclass(BoundedTensor)
+        new_obj.ptb = self.ptb
+        new_obj.requires_grad_(temp.requires_grad)
         return new_obj
 
     # Copy to other devices with perturbation
     def to(self, *args, **kwargs):
-        # FIXME add a general "to" function in perturbation class, not here.
-        if hasattr(self.ptb, 'x_L') and isinstance(self.ptb.x_L, Tensor):
-            self.ptb.x_L = self.ptb.x_L.to(*args, **kwargs)
-        if hasattr(self.ptb, 'x_U') and isinstance(self.ptb.x_U, Tensor):
-            self.ptb.x_U = self.ptb.x_U.to(*args, **kwargs)
-        if hasattr(self.ptb, 'eps') and isinstance(self.ptb.eps, Tensor):
-            self.ptb.eps = self.ptb.eps.to(*args, **kwargs)
-        return self._func(super().to, *args, **kwargs)
+        converted = self._func(super().to, *args, **kwargs)
+        converted.ptb = copy.copy(self.ptb)
+        # TODO: Move conversion of owned input-specification state to an
+        # explicit Perturbation copy/conversion interface.
+        for attr in ('x_L', 'x_U', 'eps'):
+            value = getattr(converted.ptb, attr, None)
+            if isinstance(value, Tensor):
+                result = value.to(*args, **kwargs)
+                if not value.is_floating_point() and not value.is_complex():
+                    result = result.to(dtype=value.dtype)
+                setattr(converted.ptb, attr, result)
+        return converted
+
+    def double(self):
+        return self.to(dtype=torch.float64)
+
+    def float(self):
+        return self.to(dtype=torch.float32)
+
+    def half(self):
+        return self.to(dtype=torch.float16)
+
+    def bfloat16(self):
+        return self.to(dtype=torch.bfloat16)
 
     @classmethod
     def _convert(cls, ret):

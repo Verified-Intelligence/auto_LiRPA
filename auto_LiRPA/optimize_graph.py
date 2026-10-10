@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Optimize the graph to merge nodes and remove unnecessary ones.
@@ -106,9 +106,9 @@ def convert_sqr(model: 'BoundedModule'):
         if type(node) == BoundMul and node.inputs[0] == node.inputs[1]:
             replace = True
         elif type(node) == BoundPow:
-            if ((isinstance(node.inputs[1], BoundBuffers) and node.inputs[1].buffer == 2) or
-                (isinstance(node.inputs[1], BoundConstant) and node.inputs[1].value == 2) or 
-                (isinstance(node.inputs[1], BoundCast) and node.inputs[1].value == 2)):
+            exponent = node.inputs[1]
+            if (isinstance(exponent, (BoundBuffers, BoundConstant, BoundCast))
+                    and model.get_forward_value(exponent) == 2):
                 replace = True
         if replace:
             node_new = BoundSqr(inputs=[node.inputs[0]])
@@ -289,18 +289,18 @@ def optimize_relu_relation(model: 'BoundedModule'):
         if (isinstance(A, BoundConv) and isinstance(B, BoundRelu) and
             isinstance(C, BoundConv) and isinstance(D, BoundRelu) and tuple(C.attr['kernel_shape'])==(1,1)):
             
-            # Here use forward() to extract weights to handle BoundParam/BoundConstant, or any other node
-            # that could represent weights a unified interface.
-            Ws = C.inputs[1].forward()
-            Wc = A.inputs[1].forward()
+            Ws = model.get_forward_value(C.inputs[1])
+            Wc = model.get_forward_value(A.inputs[1])
             
             # We only care about 2D conv
             if Ws.ndim != 4 or Wc.ndim != 4:
                 i += 1
                 continue
             
-            bs = C.inputs[2].forward() if C.has_bias else torch.zeros_like(Ws[:, 0, 0, 0])
-            bc = A.inputs[2].forward() if A.has_bias else torch.zeros_like(Wc[:, 0, 0, 0])
+            bs = (model.get_forward_value(C.inputs[2]) if C.has_bias
+                  else torch.zeros_like(Ws[:, 0, 0, 0]))
+            bc = (model.get_forward_value(A.inputs[2]) if A.has_bias
+                  else torch.zeros_like(Wc[:, 0, 0, 0]))
             
             # Detect whether and where the identity presents in the weight matrix.
             pairs, skip = {}, set()
@@ -364,10 +364,12 @@ def optimize_relu_relation(model: 'BoundedModule'):
         elif (isinstance(A, BoundLinear) and isinstance(B, BoundRelu) and
             isinstance(C, BoundLinear) and isinstance(D, BoundRelu)):
             
-            Ws = A.inputs[1].forward()
-            Wm = C.inputs[1].forward()
-            bs = A.inputs[2].forward() if len(A.inputs) == 3 else torch.zeros_like(Ws[:, 0])
-            bm = C.inputs[2].forward() if len(C.inputs) == 3 else torch.zeros_like(Wm[:, 0])
+            Ws = model.get_forward_value(A.inputs[1])
+            Wm = model.get_forward_value(C.inputs[1])
+            bs = (model.get_forward_value(A.inputs[2])
+                  if len(A.inputs) == 3 else torch.zeros_like(Ws[:, 0]))
+            bm = (model.get_forward_value(C.inputs[2])
+                  if len(C.inputs) == 3 else torch.zeros_like(Wm[:, 0]))
             
             pairs, skip = {}, set()
             for j in range(0, Ws.size(0) - 1):

@@ -8,6 +8,7 @@ from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE
 
+
 class cnn_MNIST(nn.Module):
     def __init__(self):
         super(cnn_MNIST, self).__init__()

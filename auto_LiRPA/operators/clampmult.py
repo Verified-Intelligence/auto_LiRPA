@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Element multiplication with the A matrix based on its sign."""
@@ -146,7 +146,8 @@ class ClampedMultiplication(torch.autograd.Function):
 
 
 def multiply_by_A_signs(A, d_pos, d_neg, b_pos, b_neg, contiguous='auto',
-                        reduce_bias=True, same_slope=False):
+                        reduce_bias=True, same_slope=False,
+                        patches_padding_pos_masked=False):
     if isinstance(A, Tensor):
         if contiguous is True or contiguous == 'auto':
             # For dense mode, convert d_pos and d_neg to contiguous tensor by default.
@@ -184,5 +185,5 @@ def multiply_by_A_signs(A, d_pos, d_neg, b_pos, b_neg, contiguous='auto',
         # For regular patches the return bias size is (spec, batch, out_h, out_w).
         if len(patches_shape) == 6:
             A_prod = A_prod.view(*patches_shape)
-        return A.create_similar(A_prod), bias
-
+        return A.create_similar(
+            A_prod, padding_pos_masked=patches_padding_pos_masked), bias

@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Bivariate operators"""
@@ -109,7 +109,6 @@ class MulHelper:
 class BoundMul(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.splittable = True
         self.mul_helper = MulHelper()
         if options is None:
             options = {}
@@ -121,6 +120,16 @@ class BoundMul(BoundOptimizableActivation):
         return x * y
 
     def get_relaxation_opt(self, x_l, x_u, y_l, y_u):
+        if self.output_dtype is None:
+            raise RuntimeError(
+                f'Output dtype is unavailable for node {self.name}')
+        # Multiplication promotes its floating-point operands during forward.
+        # Apply the same promotion locally before combining bounds in one
+        # relaxation; the bounds stored on the input nodes remain unchanged.
+        x_l = x_l.to(dtype=self.output_dtype)
+        x_u = x_u.to(dtype=self.output_dtype)
+        y_l = y_l.to(dtype=self.output_dtype)
+        y_u = y_u.to(dtype=self.output_dtype)
         return self.mul_helper.get_relaxation(
             x_l, x_u, y_l, y_u, self.opt_stage, getattr(self, 'alpha', None),
             getattr(self, '_start', None), middle=self.middle)
@@ -129,9 +138,13 @@ class BoundMul(BoundOptimizableActivation):
         """Implementation of init_opt_parameters for each start_node."""
         x_l = self.inputs[0].lower
         y_l = self.inputs[1].lower
+        if self.output_dtype is None:
+            raise RuntimeError(
+                f'Output dtype is unavailable for node {self.name}')
         assert x_l.ndim == y_l.ndim
         shape = [max(x_l.shape[i], y_l.shape[i]) for i in range(x_l.ndim)]
-        alpha = torch.ones(4, size_spec, *shape, device=x_l.device)
+        alpha = torch.ones(
+            4, size_spec, *shape, dtype=self.output_dtype, device=x_l.device)
         return alpha
 
     def _is_softmax(self):
@@ -149,6 +162,9 @@ class BoundMul(BoundOptimizableActivation):
     def bound_relax(self, x, y, init=False, dim_opt=None):
         if init:
             pass
+        if not self._is_softmax():
+            self.require_finite_relaxation_bounds(x.lower, x.upper, operator='mul')
+            self.require_finite_relaxation_bounds(y.lower, y.upper, operator='mul')
         (alpha_l, beta_l, gamma_l,
          alpha_u, beta_u, gamma_u) = self.get_relaxation_opt(
             x.lower, x.upper, y.lower, y.upper)
@@ -266,9 +282,13 @@ class BoundMul(BoundOptimizableActivation):
                 gamma_pos = maybe_unfold_patches(gamma_pos, last_A)
                 gamma_neg = maybe_unfold_patches(gamma_neg, last_A)
                 A_x, bias = multiply_by_A_signs(
-                    last_A, alpha_pos, alpha_neg, gamma_pos, gamma_neg)
+                    last_A, alpha_pos, alpha_neg, gamma_pos, gamma_neg,
+                    patches_padding_pos_masked=self.get_bound_opt(
+                        'clampmult_patches_padding_pos_masked', False))
                 A_y, _ = multiply_by_A_signs(
-                    last_A, beta_pos, beta_neg, None, None)
+                    last_A, beta_pos, beta_neg, None, None,
+                    patches_padding_pos_masked=self.get_bound_opt(
+                        'clampmult_patches_padding_pos_masked', False))
             elif type(last_A) == Tensor:
                 last_A_pos, last_A_neg = last_A.clamp(min=0), last_A.clamp(max=0)
                 A_x, _ = multiply_by_A_signs(last_A, alpha_pos, alpha_neg, None, None)
@@ -332,6 +352,8 @@ class BoundMul(BoundOptimizableActivation):
                 return self.bound_forward_constant(y, x, self.inputs[1].batch_dim != -1)
             else:
                 assert False, "When is_linear_op is True, at least one input should be constant."
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='mul')
+        self.require_finite_relaxation_bounds(y.lower, y.upper, operator='mul')
         return self.bound_forward_both_perturbed(dim_in, x, y)
     
     def bound_forward_constant(self, x, y, batched_constant):
@@ -378,14 +400,14 @@ class BoundMul(BoundOptimizableActivation):
     @staticmethod
     def interval_propagate_constant(x, y, op=lambda x, const: x * const):
         # x is constant
-        const = x[0]
-        inp_lb = y[0]
-        inp_ub = y[1]
+        const = x.lower
+        inp_lb = y.lower
+        inp_ub = y.upper
         pos_mask = (const > 0).to(dtype=inp_lb.dtype)
         neg_mask = 1. - pos_mask
         lb = op(inp_lb, const * pos_mask) + op(inp_ub, const * neg_mask)
         ub = op(inp_ub, const * pos_mask) + op(inp_lb, const * neg_mask)
-        return lb, ub
+        return Interval(lb, ub)
 
     def interval_propagate(self, x, y):
         if self.is_linear_op:
@@ -396,31 +418,39 @@ class BoundMul(BoundOptimizableActivation):
             else:
                 assert False, "When is_linear_op is True, at least one input should be constant."
         else:
-            lower, upper = self.interval_propagate_both_perturbed(x, y)
+            result = self.interval_propagate_both_perturbed(x, y)
+            lower, upper = result.lower, result.upper
             if self._is_softmax():
+                # Endpoint multiplication may contain 0 * inf. Use the known
+                # softmax range instead of letting NaNs discard the IBP bound.
+                lower = torch.where(torch.isnan(lower), 0., lower)
+                upper = torch.where(torch.isnan(upper), 1., upper)
                 lower = lower.clamp(min=0)
                 upper = upper.clamp(max=1)
-            return lower, upper
+            return Interval(lower, upper)
 
     @staticmethod
     def interval_propagate_both_perturbed(*v):
         x, y = v[0], v[1]
         if x is y:
             # A shortcut for x * x.
-            h_L, h_U = v[0]
+            h_L, h_U = v[0].lower, v[0].upper
             r0 = h_L * h_L
             r1 = h_U * h_U
             # When h_L < 0, h_U > 0, lower bound is 0.
             # When h_L < 0, h_U < 0, lower bound is h_U * h_U.
             # When h_L > 0, h_U > 0, lower bound is h_L * h_L.
             l = F.relu(h_L) - F.relu(-h_U)
-            return l * l, torch.max(r0, r1)
+            return Interval(l * l, torch.max(r0, r1))
 
-        r0, r1, r2, r3 = x[0] * y[0], x[0] * y[1], x[1] * y[0], x[1] * y[1]
+        r0 = x.lower * y.lower
+        r1 = x.lower * y.upper
+        r2 = x.upper * y.lower
+        r3 = x.upper * y.upper
         lower = torch.min(torch.min(r0, r1), torch.min(r2, r3))
         upper = torch.max(torch.max(r0, r1), torch.max(r2, r3))
 
-        return lower, upper
+        return Interval(lower, upper)
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         if isinstance(v[0], Tensor):
@@ -430,7 +460,8 @@ class BoundMul(BoundOptimizableActivation):
         gvar_array = gvar_array * v[1].cpu().numpy()
         self.solver_vars = gvar_array.tolist()
 
-    def update_requires_input_bounds(self):
+    def update_input_perturbation_state(self):
+        self.splittable = all(node.perturbed for node in self.inputs)
         self.is_linear_op = False
         for inp in self.inputs:
             if not inp.perturbed:
@@ -439,12 +470,9 @@ class BoundMul(BoundOptimizableActivation):
         if self.is_linear_op:
             # One input is constant; no bounds required.
             self.requires_input_bounds = []
-            self.splittable = False
         else:
             # Both inputs are perturbed. Need relaxation.
             self.requires_input_bounds = [0, 1]
-            if not self.force_not_splittable:
-                self.splittable = True
         
     def build_gradient_node(self, grad_upstream):
         grad_node_0 = MulGrad(self.inputs[0].output_shape if self.inputs[0].batch_dim != -1 else

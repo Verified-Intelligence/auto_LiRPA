@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """ Cut operators"""
@@ -80,6 +80,7 @@ class CutModule():
         return general_beta
 
     def general_beta_coeffs_mm(self, unstable_spec_beta, coeffs, A, current_layer_shape):
+        coeffs = coeffs.to(unstable_spec_beta)
         if type(A) is Patches:
             # lA, uA are patches, we have to unfold beta and coeffs to match lA and uA
             # coeffs: (num_constrs, current_c, current_h, current_w)
@@ -119,10 +120,12 @@ class CutModule():
             # lA_patches: (unstable, batch, in_c, H, W)
             if lA is not None:
                 lA = Patches(lA.patches - beta_mm_coeffs[0], A.stride, A.padding, \
-                             A.patches.shape, unstable_idx=A.unstable_idx, output_shape=A.output_shape)
+                             A.patches.shape, unstable_idx=A.unstable_idx, output_shape=A.output_shape,
+                             padding_pos_masked=A.padding_pos_masked)
             if uA is not None:
                 uA = Patches(uA.patches + beta_mm_coeffs[1], A.stride, A.padding, \
-                             A.patches.shape, unstable_idx=A.unstable_idx, output_shape=A.output_shape)
+                             A.patches.shape, unstable_idx=A.unstable_idx, output_shape=A.output_shape,
+                             padding_pos_masked=A.padding_pos_masked)
         else:
             # dense layers
             if lA is not None:
@@ -525,6 +528,8 @@ class CutModule():
         beta_bias = torch.einsum('sihj,j->shi', general_beta.to(lb.dtype), bias_coeffs.to(lb.dtype))
         lb = lb + beta_bias[0] if lb is not None else None
         ub = ub - beta_bias[1] if ub is not None else None
+        start_node.check_bound_invariants(
+            lb, ub, context='cut bias propagation')
         return lb, ub
 
 
@@ -568,7 +573,10 @@ def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg, start_node, patch_size):
                 else:
                     # Regular patches.
                     patch_size[start_node.name] = A_prod.size()
-            return Patches(A_prod, last_A.stride, last_A.padding, A_prod.shape, unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape), bias
+            return Patches(
+                A_prod, last_A.stride, last_A.padding, A_prod.shape,
+                unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape,
+                padding_pos_masked=last_A.padding_pos_masked), bias
 
 
 # In patches mode, we need to unfold lower and upper slopes. In matrix mode we simply return.

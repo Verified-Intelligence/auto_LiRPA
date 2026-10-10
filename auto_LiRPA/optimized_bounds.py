@@ -11,23 +11,21 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import time
 import os
 from collections import OrderedDict
-from contextlib import ExitStack
+from contextlib import contextmanager, ExitStack
 
 import torch
 from torch import optim, Tensor
+from typing import TYPE_CHECKING, Dict, Literal, Optional, Tuple, Union
 from .beta_crown import print_optimized_beta
-from .cuda_utils import double2float
 from .utils import reduction_sum, multi_spec_keep_func_all, clone_sub_A_dict
 from .opt_pruner import OptPruner
 from .perturbations import PerturbationLpNorm
-
-from typing import TYPE_CHECKING, Union, Tuple, Optional, Dict
 if TYPE_CHECKING:
     from .bound_general import BoundedModule
 
@@ -47,7 +45,7 @@ default_optimize_bound_args = {
     'iteration': 20,  # Number of alpha/beta optimization iterations.
     # Share some alpha variables to save memory at the cost of slightly
     # looser bounds.
-    'use_shared_alpha': False,
+    'use_shared_alpha': False,  # 'network': also share across start nodes and sides.
     # Optimizer used for alpha and beta optimization.
     'optimizer': 'adam',
     # Save best results of alpha/beta/bounds during optimization.
@@ -78,8 +76,6 @@ default_optimize_bound_args = {
     # Start to save optimized best bounds
     # when current_iteration > int(iteration*start_save_best)
     'start_save_best': 0.5,
-    # Use double fp (float64) at the last iteration in alpha/beta CROWN.
-    'use_float64_in_last_iteration': False,
     # Prune verified domain within iteration.
     'pruning_in_iteration': False,
     # Percentage of the minimum domains that can apply pruning.
@@ -89,9 +85,22 @@ default_optimize_bound_args = {
     'multi_spec_keep_func': multi_spec_keep_func_all,
     # Use the newly fixed loss function. By default, it is set to False
     # for compatibility with existing use cases.
-    # Try to ensure that the parameters always match with the optimized bounds.
-    'deterministic': False,
+    # Ensure that returned optimization parameters reproduce returned bounds.
+    'reproduce_alpha_bounds': False,
     'max_time': 1e9,
+
+    # Precision ('fp16', 'bf16', 'tf32', 'fp16+tf32', 'bf16+tf32', or None)
+    # for the intermediate optimization iterations, while the first and last
+    # iterations always run in full precision.
+    'mixed_precision_dtype': None,
+    # Prune domains during low-precision iterations too, as speculative
+    # prunes that are rolled back and re-proved in full precision before
+    # each full-precision iteration.
+    'low_precision_prune_in_iter': True,
+    # Only speculatively prune a domain if its low-precision bound clears
+    # the decision threshold by this absolute margin (default suits TF32
+    # bound error).
+    'low_precision_prune_margin_abs': 0.01,
 }
 
 
@@ -149,49 +158,6 @@ def _save_ret_first_time(bounds, best_ret):
         best_ret.append(None)
 
 
-def _to_float64(self: 'BoundedModule', C, x, aux_reference_bounds, interm_bounds):
-    """
-    Transfer variables to float64 only in the last iteration to help alleviate
-    floating point error.
-    """
-    self.to(torch.float64)
-    C = C.to(torch.float64)
-    x = self._to(x, torch.float64)
-    # best_intermediate_bounds is linked to aux_reference_bounds!
-    # we only need call .to() for one of them
-    self._to(aux_reference_bounds, torch.float64, inplace=True)
-    interm_bounds = self._to(
-        interm_bounds, torch.float64)
-
-    return C, x, interm_bounds
-
-
-def _to_default_dtype(self: 'BoundedModule', x, total_loss, full_ret, ret,
-                      best_intermediate_bounds, return_A):
-    """
-    Switch back to default precision from float64 typically to adapt to
-    afterwards operations.
-    """
-    total_loss = total_loss.to(torch.get_default_dtype())
-    self.to(torch.get_default_dtype())
-    x[0].to(torch.get_default_dtype())
-    full_ret = list(full_ret)
-    if isinstance(ret[0], torch.Tensor):
-        # round down lower bound
-        full_ret[0] = double2float(full_ret[0], 'down')
-    if isinstance(ret[1], torch.Tensor):
-        # round up upper bound
-        full_ret[1] = double2float(full_ret[1], 'up')
-    for _k, _v in best_intermediate_bounds.items():
-        _v[0] = double2float(_v[0], 'down')
-        _v[1] = double2float(_v[1], 'up')
-        best_intermediate_bounds[_k] = _v
-    if return_A:
-        full_ret[2] = self._to(full_ret[2], torch.get_default_dtype())
-
-    return total_loss, x, full_ret
-
-
 def _get_idx_mask(idx: int, full_ret_bound: Tensor, best_ret_bound: Tensor, loss_reduction_func
                   ) -> Tuple[Tensor, Optional[Tensor]]:
     """
@@ -216,15 +182,39 @@ def _get_idx_mask(idx: int, full_ret_bound: Tensor, best_ret_bound: Tensor, loss
     improved_idx = idx_mask.nonzero(as_tuple=True)[0] if idx_mask.any() else None
     return idx_mask, improved_idx
 
+def _determine_improve(
+    full_ret: Dict[str, Dict[str, Dict[str, Union[Tensor, 'Patches', Tuple]]]],
+    best_ret: Dict[str, Dict[str, Dict[str, Union[Tensor, 'Patches', Tuple]]]],
+    loss_reduction_func,
+    idx: int,
+):
+    """
+    Determine whether there is any improvement in the bounds by comparing with new results.
+    :param full_ret:                The full return from the 'compute_bounds' method.
+    :param best_ret:                The best return during optimization in the same format as
+                                    'full_ret'
+    :param loss_reduction_func:     Loss reduction function that reduces the losses to just the
+
+    :return
+            improved:          A boolean indicating whether there is any improvement in the bounds.
+    """
+    assert idx in (0, 1), 'idx must be 0 (lower bound) or 1 (upper bound)'
+
+    reduced_full = loss_reduction_func(full_ret[idx])
+    reduced_best = loss_reduction_func(best_ret[idx])
+    return torch.any(
+        (reduced_full > reduced_best) if idx == 0 else (reduced_full < reduced_best)
+    ).item()
+
 
 def _update_best_ret(
     full_ret: Dict[str, Dict[str, Dict[str, Union[Tensor, 'Patches', Tuple]]]],
     best_ret: Dict[str, Dict[str, Dict[str, Union[Tensor, 'Patches', Tuple]]]],
     loss_reduction_func,
     idx: int,
-    deterministic: bool = False,
+    reproduce_alpha_bounds: bool = False,
     best_out_in_A_dict: Optional[Dict[str, Union[Tensor, 'Patches', Tuple]]] = None,
-    out_in_keys: Optional[Tuple[str, str]] = None
+    out_in_keys: Optional[Tuple[str, str]] = None,
 ):
     """
     Update best_ret_bound and best_ret by comparing with new results.
@@ -234,12 +224,12 @@ def _update_best_ret(
     :param loss_reduction_func:     Loss reduction function that reduces the losses to just the
                                     batch dimension.
     :param idx:                     0 := updating the lower bound, 1 := updating the upper bound
-    :param deterministic:           If true, problems that have seen loss improvement will have
+    :param reproduce_alpha_bounds:  If true, problems that have seen loss improvement will have
                                     their bounds directly saved as the new best bound. Otherwise,
                                     the current bounds will be compared to the current best bounds
-                                    and the comparison result is saved as the new best bound. In
-                                    other words, deterministic is true if an improvement in the
-                                    loss function is a sufficient condition for bound improvement.
+                                    and the comparison result is saved as the new best bound. This
+                                    keeps saved optimization parameters aligned with the bounds
+                                    returned for the same iteration.
     :param best_out_in_A_dict:      If given, this is the A_dict entry corresponding to the output
     :param out_in_keys:             If given, this is a tuple whose first element is the first index
                                     into the A_dict and whose second element is the second index
@@ -270,7 +260,7 @@ def _update_best_ret(
     compare_fn = torch.max if idx == 0 else torch.min
     # Update detailed return tensors (if present)
     if full_ret[idx] is not None:
-        if deterministic:
+        if reproduce_alpha_bounds:
             best_ret[idx][improved_idx] = full_ret[idx][improved_idx]
             if out_in_keys is not None:
                 _update_A_dict(
@@ -336,7 +326,8 @@ def _update_A_dict(best_A, full_A, improved_idx, c_mask: Optional[Tensor] = None
 def _update_optimizable_activations(
         optimizable_activations, interm_bounds,
         fix_interm_bounds, best_intermediate_bounds,
-        reference_idx, idx, alpha, best_alphas, deterministic):
+        reference_idx, idx, alpha, best_alphas, reproduce_alpha_bounds,
+        skip_interm_bounds_update):
     """
     Update bounds and alpha of optimizable_activations.
     """
@@ -348,8 +339,8 @@ def _update_optimizable_activations(
             continue
         if (interm_bounds is None
                 or node.inputs[0].name not in interm_bounds
-                or not fix_interm_bounds):
-            if deterministic:
+                or not fix_interm_bounds) and not skip_interm_bounds_update:
+            if reproduce_alpha_bounds:
                 best_intermediate_bounds[node.name][0][idx] = node.inputs[0].lower[reference_idx]
                 best_intermediate_bounds[node.name][1][idx] = node.inputs[0].upper[reference_idx]
             else:
@@ -373,8 +364,10 @@ def update_best_beta(self: 'BoundedModule', enable_opt_interm_bounds, betas,
     Update best beta by given idx.
     """
     if enable_opt_interm_bounds and betas:
-        for node in self.splittable_activations:
+        for node in self.get_splittable_activations():
             for node_input in node.inputs:
+                if not node_input.perturbed:
+                    continue
                 for key in node_input.sparse_betas.keys():
                     best_betas[node_input.name][key] = (
                         node_input.sparse_betas[key].val.detach().clone())
@@ -392,13 +385,96 @@ def update_best_beta(self: 'BoundedModule', enable_opt_interm_bounds, betas,
                 best_betas['cut'][cut_beta_idx][:, :, idx,
                     :] = betas[regular_beta_length + cut_beta_idx][:, :, idx, :]
 
+@contextmanager
+def tf32_ctx(enabled: bool):
+    """Temporarily set TF32 policy for matmul and cuDNN."""
+    old_mm  = torch.backends.cuda.matmul.allow_tf32
+    old_dnn = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    torch.backends.cudnn.allow_tf32       = enabled
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old_mm
+        torch.backends.cudnn.allow_tf32       = old_dnn
+
+
+def parse_mixed_precision_dtype(spec):
+    """Parse a mixed precision spec ('fp16', 'bf16', 'fp32', 'tf32',
+    'fp16+tf32', 'bf16+tf32', or None for disabled) into
+    (autocast_dtype, enable_tf32). 'fp32' runs autocast with torch.float32
+    directly (like fp16/bf16), rather than disabling mixed precision.
+    """
+    if spec is None:
+        return None, False
+    parts = set(str(spec).split('+'))
+    enable_tf32 = 'tf32' in parts
+    parts.discard('tf32')
+    if not parts:
+        autocast_dtype = None
+    elif parts == {'fp16'}:
+        autocast_dtype = torch.float16
+    elif parts == {'bf16'}:
+        autocast_dtype = torch.bfloat16
+    elif parts == {'fp32'}:
+        autocast_dtype = torch.float32
+    else:
+        raise ValueError(f'Unsupported mixed precision dtype: {spec!r}')
+    return autocast_dtype, enable_tf32
+
+
+@contextmanager
+def mixed_precision_ctx(autocast_dtype, enable_tf32: bool, enabled: bool):
+    """Run a low-precision iteration under CUDA autocast (autocast_dtype,
+    skipped when None to avoid per-op dispatch overhead and implicit
+    upcasts in TF32-only mode) and/or the TF32 matmul/cuDNN policy
+    (enable_tf32), or as a no-op when not enabled.
+    """
+    if not enabled or (autocast_dtype is None and not enable_tf32):
+        yield
+        return
+    with tf32_ctx(True) if enable_tf32 else ExitStack():
+        if autocast_dtype is None:
+            yield
+        else:
+            with torch.autocast(device_type='cuda', enabled=True,
+                                dtype=autocast_dtype, cache_enabled=False):
+                yield
+
+
+def _validate_default_return_A_query(
+        self, final_node_name, needed_A_dict):
+    """Require a default query whose A entry follows optimized bounds.
+
+    Optimization may select the best bound from different iterations for
+    different batch and specification entries. The corresponding selection
+    mask is applied only to the primary-output-to-primary-input A entry. A
+    newly synthesized default query must therefore resolve to exactly that
+    entry. Explicit queries may contain other entries, whose coefficients are
+    taken from the final optimization iteration.
+    """
+    output_name, input_name = self.output_name[0], self.input_name[0]
+    final_node_name = final_node_name or output_name
+    requested_inputs = needed_A_dict.get(output_name, ())
+    supported_query = (
+        final_node_name == output_name
+        and set(needed_A_dict) == {output_name}
+        and isinstance(requested_inputs, (dict, list, set, tuple))
+        and set(requested_inputs) == {input_name}
+        and self[input_name].perturbation is not None)
+    if not supported_query:
+        raise NotImplementedError(
+            'The default optimized return_A query supports only the primary '
+            'model output with respect to its perturbed primary model input')
+
 
 def _get_optimized_bounds(
         self: 'BoundedModule', x=None, aux=None, C=None, IBP=False,
         forward=False, method='backward', bound_side='lower',
         reuse_ibp=False, return_A=False, average_A=False, final_node_name=None,
         interm_bounds=None, reference_bounds=None,
-        aux_reference_bounds=None, needed_A_dict=None, cutter=None,
+        aux_reference_bounds=None, needed_A_dict=None,
+        default_A_query=False, cutter=None,
         decision_thresh=None, epsilon_over_decision_thresh=1e-4):
     """
     Optimize CROWN lower/upper bounds by alpha and/or beta.
@@ -406,6 +482,8 @@ def _get_optimized_bounds(
 
     opts = self.bound_opts['optimize_bound_args']
     iteration = opts['iteration']
+    if iteration < 1:
+        raise ValueError('Optimized bounds require at least one iteration.')
     max_time = opts['max_time']
     beta = opts['enable_beta_crown']
     alpha = opts['enable_alpha_crown']
@@ -415,11 +493,14 @@ def _get_optimized_bounds(
     fix_interm_bounds = opts['fix_interm_bounds']
     loss_reduction_func = opts['loss_reduction_func']
     stop_criterion_func = opts['stop_criterion_func']
-    use_float64_in_last_iteration = opts['use_float64_in_last_iteration']
     early_stop_patience = opts['early_stop_patience']
     start_save_best = opts['start_save_best']
     multi_spec_keep_func = opts['multi_spec_keep_func']
-    deterministic = opts['deterministic']
+    mixed_precision_dtype = opts['mixed_precision_dtype']
+    mp_autocast_dtype, mp_enable_tf32 = parse_mixed_precision_dtype(
+        mixed_precision_dtype)
+    low_precision_prune_in_iter = opts.get('low_precision_prune_in_iter', True)
+    reproduce_alpha_bounds = opts['reproduce_alpha_bounds']
     enable_opt_interm_bounds = self.bound_opts.get(
         'enable_opt_interm_bounds', False)
     sparse_intermediate_bounds = self.bound_opts.get(
@@ -431,6 +512,10 @@ def _get_optimized_bounds(
     bound_lower = bound_side == 'lower'
     bound_upper = bound_side == 'upper'
 
+    if default_A_query:
+        _validate_default_return_A_query(
+            self, final_node_name, needed_A_dict)
+
     assert alpha or beta, (
         'nothing to optimize, use compute bound instead!')
 
@@ -440,7 +525,8 @@ def _get_optimized_bounds(
     if opts['init_alpha']:
         # TODO: this should set up aux_reference_bounds.
         self.init_alpha(x, share_alphas=opts['use_shared_alpha'],
-                        method=method, c=C, final_node_name=final_node_name)
+                        method=method, c=C, final_node_name=final_node_name,
+                        interm_bounds=interm_bounds if fix_interm_bounds else None)
 
     optimizable_activations = self.get_enabled_opt_act()
 
@@ -474,19 +560,23 @@ def _get_optimized_bounds(
                 'Please fix or discard this optimization by setting '
                 '--disable_pruning_in_iteration '
                 'or bab: pruning_in_iteration: false')
+        if mixed_precision_dtype and verbosity > 1:
+            print('Mixed precision + pruning-in-iteration: prunes from '
+                  'low-precision iterations are speculative and rolled back '
+                  'before each full-precision iteration.')
         pruner = OptPruner(
             x, threshold=opts['pruning_in_iteration_threshold'],
             multi_spec_keep_func=multi_spec_keep_func,
             loss_reduction_func=loss_reduction_func,
             decision_thresh=decision_thresh,
             epsilon_over_decision_thresh=epsilon_over_decision_thresh,
-            fix_interm_bounds=fix_interm_bounds)
+            fix_interm_bounds=fix_interm_bounds,
+            low_precision_prune_margin_abs=opts.get(
+                'low_precision_prune_margin_abs', 0.01))
     else:
         pruner = None
 
-    if opt_choice == 'adam-autolr':
-        opt = AdamElementLR(parameters)
-    elif opt_choice == 'adam':
+    if opt_choice == 'adam':
         opt = optim.Adam(parameters)
     elif opt_choice == 'sgd':
         opt = optim.SGD(parameters, momentum=0.9)
@@ -494,7 +584,8 @@ def _get_optimized_bounds(
         raise NotImplementedError(opt_choice)
 
     # Create a weight vector to scale learning rate.
-    loss_weight = torch.ones(size=(x[0].size(0),), device=x[0].device)
+    loss_weight = torch.ones(
+        size=(x[0].size(0),), dtype=x[0].dtype, device=x[0].device)
     scheduler = optim.lr_scheduler.ExponentialLR(opt, opts['lr_decay'])
 
     # best_intermediate_bounds is linked to aux_reference_bounds!
@@ -521,13 +612,11 @@ def _get_optimized_bounds(
             apply_output_constraints_to
         )
 
-    if (return_A and self.output_name[0] in needed_A_dict.keys()
+    if (return_A and self.output_name[0] in needed_A_dict
             and self.input_name[0] in needed_A_dict[self.output_name[0]]):
-        # If the A dict will be returned, and we expect to retrieve the hyperplanes relating the
-        # output layer to the input layer, then we store these keys and pass them to the
-        # '_update_best_ret' method so that these entries may be updated during the optimization
-        # process. Only these output/input layer entries will be updated, and if other entries need
-        # to be updated, '_update_best_ret' is not the correct method to update them.
+        # _update_best_ret applies the best-bound selection mask only to the
+        # primary-output-to-primary-input entry. Other requested entries come
+        # from the final optimization iteration.
         out_in_keys = (self.output_name[0], self.input_name[0])
     else:
         out_in_keys = None
@@ -535,6 +624,14 @@ def _get_optimized_bounds(
     need_grad = True
     patience = 0
     ret_0 = None
+    best_ret = [None, None]
+    best_out_in_A_dict = None
+
+    need_full_precision_round = False
+    last_round_precision: Literal['mixed', 'full', 'none'] = 'mixed'
+
+    _prune_curve = []  # [prune-curve] per-iter (i, precision, n_domains_computed)
+
     for i in range(iteration):
         if i == 0:
             # If we are at the first iteration, we need to
@@ -546,6 +643,15 @@ def _get_optimized_bounds(
             self.cut_module = cutter.cut_module
 
         if self.constraints_optimized is not None:
+            if self.bound_opts.get('clip_in_alpha_crown', False):
+                assert self.bound_opts.get(
+                    'clip_in_alpha_crown_disjuncts_separated', False), (
+                    'clip_in_alpha_crown requires disjunctive specifications '
+                    'to be batched separately before applying optimized '
+                    'constraints. Set optimize_disjuncts_separately=True; if '
+                    'this causes OOM, reduce build_batch_size to a smaller '
+                    'value.'
+                )
             for root in self.roots():
                 if ( hasattr(root, 'perturbation')
                     and root.perturbation is not None
@@ -570,14 +676,32 @@ def _get_optimized_bounds(
                 reference_bounds.update(interm_bounds)
             interm_bounds = {}
 
+        # The precision of this round is decided up here because a
+        # full-precision round must roll back speculatively pruned domains
+        # before any tensor is sliced or converted below.
+        mixed_pre_condition = (
+                i > 0
+                and i < iteration - 1
+                and (not need_full_precision_round)
+                and need_grad
+                and mixed_precision_dtype is not None
+                and 'cuda' in str(self.device)
+        )
+        last_round_precision = 'mixed' if mixed_pre_condition else 'full'
+
+        if pruner and not mixed_pre_condition:
+            # Bring speculatively pruned domains back so this
+            # full-precision round re-proves them before any prune commits.
+            x, C = pruner.roll_back_speculative(
+                x, C, interm_bounds, aux_reference_bounds, reference_bounds)
+            # This full-precision round consumes any forced-full request (set
+            # when a speculative prune emptied the batch); allow subsequent
+            # rounds to use low precision again.
+            need_full_precision_round = False
+
         if i == iteration - 1:
             # No grad update needed for the last iteration
             need_grad = False
-            if (self.device == 'cuda'
-                    and torch.get_default_dtype() == torch.float32
-                    and use_float64_in_last_iteration):
-                C, x, interm_bounds = self._to_float64(
-                    C, x, aux_reference_bounds, interm_bounds)
 
         if pruner:
             # we will use last update preserve mask in caller functions to recover
@@ -599,27 +723,31 @@ def _get_optimized_bounds(
                     root.perturbation.x_U = root.perturbation.x_U.detach()
 
         with torch.no_grad() if not need_grad else ExitStack():
-            # ret is lb, ub or lb, ub, A_dict (if return_A is set to true)
-            ret = self.compute_bounds(
-                x, aux, C, method=method, IBP=IBP, forward=forward,
-                bound_lower=bound_lower, bound_upper=bound_upper,
-                reuse_ibp=reuse_ibp, return_A=return_A,
-                final_node_name=final_node_name, average_A=average_A,
-                # When intermediate bounds are recomputed, we must set it
-                # to None
-                interm_bounds=interm_bounds if fix_interm_bounds else None,
-                # This is the currently tightest interval, which will be used to
-                # pass split constraints when intermediate betas are used.
-                reference_bounds=reference_bounds,
-                # This is the interval used for checking for unstable neurons.
-                aux_reference_bounds=aux_reference_bounds if sparse_intermediate_bounds else None,
-                # These are intermediate layer beta variables and their
-                # corresponding A matrices and biases.
-                intermediate_constr=intermediate_constr,
-                needed_A_dict=needed_A_dict,
-                update_mask=pruner.preserve_mask if pruner else None,
-                cache_bounds=len(apply_output_constraints_to) > 0,
-            )
+            with mixed_precision_ctx(mp_autocast_dtype, mp_enable_tf32,
+                                     enabled=mixed_pre_condition):
+                # ret is lb, ub or lb, ub, A_dict (if return_A is set to true)
+                ret = self.compute_bounds(
+                    x, aux, C, method=method, IBP=IBP, forward=forward,
+                    bound_lower=bound_lower, bound_upper=bound_upper,
+                    reuse_ibp=reuse_ibp, return_A=return_A,
+                    final_node_name=final_node_name, average_A=average_A,
+                    # When intermediate bounds are recomputed, we must set it
+                    # to None
+                    interm_bounds=interm_bounds if fix_interm_bounds else None,
+                    # This is the currently tightest interval, which will be used to
+                    # pass split constraints when intermediate betas are used.
+                    reference_bounds=reference_bounds,
+                    # This is the interval used for checking for unstable neurons.
+                    aux_reference_bounds=(
+                        aux_reference_bounds if sparse_intermediate_bounds else None
+                    ),
+                    # These are intermediate layer beta variables and their
+                    # corresponding A matrices and biases.
+                    intermediate_constr=intermediate_constr,
+                    needed_A_dict=needed_A_dict,
+                    update_mask=pruner.get_update_mask() if pruner else None,
+                    cache_bounds=len(apply_output_constraints_to) > 0,
+                )
         # If output constraints are used, it's possible that no inputs satisfy them.
         # If one of the layer that uses output constraints realizes this, it sets
         # self.infeasible_bounds = True for this element in the batch.
@@ -644,6 +772,12 @@ def _get_optimized_bounds(
                 )
         ret_l, ret_u = ret[0], ret[1]
 
+        # [prune-curve] save how many domains were actually computed this iteration
+        _prune_curve.append(
+            (i, last_round_precision,
+             int(ret_l.shape[0]) if ret_l is not None else
+             (int(ret_u.shape[0]) if ret_u is not None else -1)))
+
         if pruner:
             pruner.recover_full_sized_alpha(optimizable_activations)
 
@@ -652,12 +786,12 @@ def _get_optimized_bounds(
             # betas[-1]: (2(0 lower, 1 upper), spec, batch, num_constrs)
             if ret_l is not None:
                 print(i, 'lb beta sum:',
-                      f'{self.cut_beta_params[-1][0].sum() / ret_l.size(0)},',
-                      f'worst {ret_l.min()}')
+                    f'{self.cut_beta_params[-1][0].sum() / ret_l.size(0)},',
+                    f'worst {ret_l.min()}')
             if ret_u is not None:
                 print(i, 'lb beta sum:',
-                      f'{self.cut_beta_params[-1][1].sum() / ret_u.size(0)},',
-                      f'worst {ret_u.min()}')
+                    f'{self.cut_beta_params[-1][1].sum() / ret_u.size(0)},',
+                    f'worst {ret_u.min()}')
 
         if i == 0:
             # save results at the first iteration
@@ -695,13 +829,24 @@ def _get_optimized_bounds(
 
         if pruner:
             (x, C, full_l, full_ret_l, full_ret_u,
-             full_ret, stop_criterion) = pruner.prune(
+            full_ret, stop_criterion) = pruner.prune(
                 x, C, ret_l, ret_u, ret, full_l, full_ret_l, full_ret_u,
                 full_ret, interm_bounds, aux_reference_bounds, reference_bounds,
-                stop_criterion_func, bound_lower)
+                stop_criterion_func, bound_lower,
+                # Prunes based on low-precision bounds are speculative and
+                # will be rolled back before the next full-precision round.
+                is_low_precision_bound=(last_round_precision == 'mixed'),
+                # Optionally do not prune at all during low-precision rounds.
+                allow_prune=(low_precision_prune_in_iter
+                             or last_round_precision == 'full'))
+            # If pruning removed every domain (e.g. an aggressive speculative
+            # prune in a low-precision round), force a full-precision round so
+            # roll_back_speculative restores the full batch and re-proves it.
+            if x[0].shape[0] == 0 and last_round_precision == 'mixed':
+                need_full_precision_round = True
         else:
             stop_criterion = (stop_criterion_func(full_ret_l) if bound_lower
-                              else stop_criterion_func(-full_ret_u))
+                            else stop_criterion_func(-full_ret_u))
 
         loss_ = l if bound_lower else -u
         total_loss = -1 * loss_
@@ -719,26 +864,23 @@ def _get_optimized_bounds(
             loss = (total_loss * stop_criterion.logical_not()).sum()
 
         stop_criterion_final = isinstance(
-            stop_criterion, torch.Tensor) and stop_criterion.all()
-
-        if i == iteration - 1:
-            best_ret = list(best_ret)
-            if best_ret[0] is not None:
-                best_ret[0] = best_ret[0].to(torch.get_default_dtype())
-            if best_ret[1] is not None:
-                best_ret[1] = best_ret[1].to(torch.get_default_dtype())
-
-        if (i == iteration - 1 and self.device == 'cuda'
-                and torch.get_default_dtype() == torch.float32
-                and use_float64_in_last_iteration):
-            total_loss, x, full_ret = self._to_default_dtype(
-                x, total_loss, full_ret, ret, best_intermediate_bounds, return_A)
+            stop_criterion, torch.Tensor) and stop_criterion.all().item()
 
         with torch.no_grad():
             # for lb and ub, we update them in every iteration since updating them is cheap
             need_update = False
             improved_idx = None
-            if keep_best:
+            idx_mask = None
+            if last_round_precision == 'mixed':
+            # only determine need_update
+                need_update = (
+                    _determine_improve(full_ret, best_ret, loss_reduction_func, idx=0)
+                    if best_ret[0] is not None else False
+                ) or (
+                    _determine_improve(full_ret, best_ret, loss_reduction_func, idx=1)
+                    if best_ret[1] is not None else False
+                )
+            elif keep_best:
                 if best_ret[0] is not None:
                     (
                         best_ret, best_out_in_A_dict,
@@ -747,7 +889,7 @@ def _get_optimized_bounds(
                         full_ret, best_ret,
                         loss_reduction_func,
                         idx=0,
-                        deterministic=deterministic,
+                        reproduce_alpha_bounds=reproduce_alpha_bounds,
                         best_out_in_A_dict=best_out_in_A_dict,
                         out_in_keys=out_in_keys,
                     )
@@ -759,7 +901,7 @@ def _get_optimized_bounds(
                         full_ret, best_ret,
                         loss_reduction_func,
                         idx=1,
-                        deterministic=deterministic,
+                        reproduce_alpha_bounds=reproduce_alpha_bounds,
                         best_out_in_A_dict=best_out_in_A_dict,
                         out_in_keys=out_in_keys,
                     )
@@ -773,9 +915,7 @@ def _get_optimized_bounds(
             if return_A:
                 best_ret = [best_ret[0], best_ret[1], full_ret[2]]
                 if out_in_keys is not None:
-                    # Update A_dict entry for output/input layer
-                    # This entry corresponds to the best bounds.
-                    # Other A_dict entries may not, as they are copied from the last iteration.
+                    # Update the output/input A entry to match the best bounds.
                     best_ret[2][out_in_keys[0]][out_in_keys[1]] = best_out_in_A_dict
 
             patience = 0 if need_update else patience + 1
@@ -785,28 +925,27 @@ def _get_optimized_bounds(
             # To save computational cost, we only check keep_best at the first
             # (in case divergence) and second half iterations
             # or before early stop by either stop_criterion or
-            # early_stop_patience reached
-            if (
+            # early_stop_patience reached.
+            # Skip if during mixed precision rounds.
+            if last_round_precision != 'mixed' and (
                 i < 1
                 or i > int(iteration * start_save_best)
-                or deterministic
+                or reproduce_alpha_bounds
                 or stop_criterion_final
                 or patience == early_stop_patience
                 or time_spent > max_time
             ):
                 # compare with the first iteration results and get improved indexes
                 if bound_lower:
-                    if deterministic:
-                        idx_mask, idx = improved_idx, None
+                    if reproduce_alpha_bounds:
+                        idx = improved_idx
                     else:
                         idx_mask, idx = _get_idx_mask(0, full_ret_l, ret_0, loss_reduction_func)
-                    ret_0[idx] = full_ret_l[idx]
                 else:
-                    if deterministic:
-                        idx_mask, idx = improved_idx, None
+                    if reproduce_alpha_bounds:
+                        idx = improved_idx
                     else:
                         idx_mask, idx = _get_idx_mask(1, full_ret_u, ret_0, loss_reduction_func)
-                    ret_0[idx] = full_ret_u[idx]
 
                 if idx is not None:
                     # for update propose, we condition the idx to update only
@@ -815,41 +954,60 @@ def _get_optimized_bounds(
                         reference_idx, idx = pruner.prune_idx(idx_mask, idx, x)
                     else:
                         reference_idx = idx
+                    # Update the improvement reference only at preserved
+                    # cells: pruned cells hold filler values
+                    # (threshold + eps), and a speculatively pruned domain
+                    # that is later restored would otherwise compare against
+                    # the filler and never register as improved again.
+                    ret_0[idx] = (full_ret_l if bound_lower else full_ret_u)[idx]
 
                     _update_optimizable_activations(
                         optimizable_activations, interm_bounds,
                         fix_interm_bounds, best_intermediate_bounds,
-                        reference_idx, idx, alpha, best_alphas, deterministic)
+                        reference_idx, idx, alpha, best_alphas,
+                        reproduce_alpha_bounds,
+                        skip_interm_bounds_update=(last_round_precision == 'mixed'),
+                    )
 
                     if beta:
                         self.update_best_beta(enable_opt_interm_bounds, betas,
-                                              best_betas, idx)
+                                            best_betas, idx)
 
         if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
+            learning_rate = opt.param_groups[0]['lr']
             print(f'****** iter [{i}]',
-                  f'loss: {loss.item()}, lr: {opt.param_groups[0]["lr"]}',
-                  (' pruning_in_iteration open status: '
-                     f'{pruner.pruning_in_iteration}') if pruner else '')
+                f'loss: {loss.item()}, lr: {learning_rate}',
+                (' pruning_in_iteration open status: '
+                    f'{pruner.pruning_in_iteration}') if pruner else '')
 
         if stop_criterion_final:
             print(f'\nall verified at {i}th iter')
-            break
+            if last_round_precision != 'mixed':
+                break
+            else:
+                need_full_precision_round = True
 
         if patience > early_stop_patience:
             print(f'Early stop at {i}th iter due to {early_stop_patience}'
-                  ' iterations no improvement!')
-            break
+                ' iterations no improvement!')
+            if last_round_precision != 'mixed':
+                break
+            else:
+                need_full_precision_round = True
 
         if time_spent > max_time:
             print(f'Early stop at {i}th iter due to exceeding the time limit '
-                  f'for the optimization (time spent: {time_spent})')
-            break
+                f'for the optimization (time spent: {time_spent})')
+            if last_round_precision != 'mixed':
+                break
+            else:
+                need_full_precision_round = True
 
-        if i != iteration - 1 and not loss.requires_grad:
+        if i != iteration - 1 and not loss.requires_grad and not need_full_precision_round:
             assert i == 0, (i, iteration)
             print('[WARNING] No optimizable parameters found. Will skip optimiziation. '
-                  'This happens e.g. if all optimizable layers are freezed or the '
-                  'network has no optimizable layers.')
+                'This happens e.g. if all optimizable layers are freezed or the '
+                'network has no optimizable layers.')
             break
 
         opt.zero_grad(set_to_none=True)
@@ -857,8 +1015,8 @@ def _get_optimized_bounds(
         if verbosity > 2:
             current_lr = [param_group['lr'] for param_group in opt.param_groups]
             print(f'*** iter [{i}]\n', f'loss: {loss.item()}',
-                  total_loss.squeeze().detach().cpu().numpy(), 'lr: ',
-                  current_lr)
+                total_loss.squeeze().detach().cpu().numpy(), 'lr: ',
+                current_lr)
             if beta:
                 print_optimized_beta(optimizable_activations)
             if beta and i == 0 and verbosity > 2:
@@ -867,16 +1025,29 @@ def _get_optimized_bounds(
         if i != iteration - 1:
             # we do not need to update parameters in the last step since the
             # best result already obtained
-            loss.backward()
-
-            # All intermediate variables are not needed at this point.
-            self._clear_and_set_new(
-                None,
-                cache_bounds=len(apply_output_constraints_to) > 0,
-            )
-            if opt_choice == 'adam-autolr':
-                opt.step(lr_scale=[loss_weight, loss_weight])
-            else:
+            # No autocast here: backward replays the dtypes recorded in the
+            # forward pass; only the TF32 policy needs to match.
+            with tf32_ctx(True) if (mixed_pre_condition and mp_enable_tf32) \
+                    else ExitStack():
+                loss.backward()
+                # All intermediate variables are not needed at this point.
+                self._clear_and_set_new(
+                    None,
+                    cache_bounds=len(apply_output_constraints_to) > 0,
+                )
+                if pruner and pruner.has_uncommitted_speculation():
+                    # Zero the Adam momentum of zero-gradient entries while
+                    # speculative prunes are outstanding, since pruned
+                    # domains receive no gradient and stale momentum would
+                    # otherwise drift their parameters until they fail the
+                    # full-precision re-proof.
+                    with torch.no_grad():
+                        for group in opt.param_groups:
+                            for p in group['params']:
+                                state = opt.state.get(p, None)
+                                if (p.grad is not None and state is not None
+                                        and 'exp_avg' in state):
+                                    state['exp_avg'][p.grad == 0] = 0
                 opt.step()
 
         if beta:
@@ -885,7 +1056,8 @@ def _get_optimized_bounds(
             for dmi in range(len(dense_coeffs_mask)):
                 # apply dense mask to the dense split coeffs matrix
                 coeffs[dmi].data = (
-                    dense_coeffs_mask[dmi].float() * coeffs[dmi].data)
+                    dense_coeffs_mask[dmi].to(dtype=coeffs[dmi].dtype)
+                    * coeffs[dmi].data)
 
 
         if alpha:
@@ -900,7 +1072,7 @@ def _get_optimized_bounds(
         if pruner:
             pruner.next_iter()
 
-    if pruner:
+    if pruner and last_round_precision != 'mixed':
         best_ret = pruner.update_best(full_ret_l, full_ret_u, best_ret)
 
     if verbosity > 3:
@@ -964,6 +1136,16 @@ def _get_optimized_bounds(
     if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
         print()
 
+    assert last_round_precision == 'full'
+
+    if os.environ.get('AUTOLIRPA_PRUNE_CURVE'):
+        _dt = mixed_precision_dtype if mixed_precision_dtype else 'none'
+        _init = _prune_curve[0][2] if _prune_curve else -1
+        _counts = ','.join(str(n) for _, _, n in _prune_curve)
+        _prec = ''.join('m' if p == 'mixed' else 'f' for _, p, _ in _prune_curve)
+        print(f'[prune-curve] dtype={_dt} init={_init} niter={len(_prune_curve)} '
+              f'prec={_prec} counts={_counts}', flush=True)
+
     return best_ret
 
 
@@ -974,7 +1156,7 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
     self(*x) # Do a forward pass to set perturbed nodes
     final = (self.final_node() if final_node_name is None
              else self[final_node_name])
-    self._set_used_nodes(final)
+    self._update_bound_ancestors(final)
 
     optimizable_activations = self.get_enabled_opt_act()
     for node in optimizable_activations:
@@ -1027,6 +1209,7 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
     final_node_name = final_node_name or self.final_name
 
     init_intermediate_bounds = {}
+    splittable_activations = set(self.get_splittable_activations())
     for node in optimizable_activations:
         start_nodes = []
         if method in ['forward', 'forward+backward']:
@@ -1045,9 +1228,8 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
 
         else:
             node.init_opt_parameters(start_nodes)
-        if node in self.splittable_activations:
-            for i in node.requires_input_bounds:
-                input_node = node.inputs[i]
+        if node in splittable_activations:
+            for i, input_node in enumerate(node.inputs):
                 if (not input_node.perturbed
                         or node.inputs[i].lower is None
                         and node.inputs[i].upper is None):
@@ -1077,7 +1259,14 @@ def init_alpha(self: 'BoundedModule', x, share_alphas=False, method='backward',
                 'output constraint'
             )
         for node in self.nodes():
-            node.init_gammas(num_gammas)
+            if not node.are_output_constraints_activated_for_layer(
+                    apply_output_constraints_to):
+                continue
+            node.init_gammas(
+                num_gammas,
+                dtype=self.get_output_dtype(node),
+                device=self.device,
+            )
 
     if self.bound_opts['verbosity'] >= 1:
         print('Optimizable variables initialized.')

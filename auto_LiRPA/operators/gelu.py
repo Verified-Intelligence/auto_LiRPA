@@ -11,34 +11,58 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .s_shaped import BoundTanh
-from .base import logger
+from .s_shaped import BoundSShaped
+from .base import Interval, logger
 
 
-# FIXME resolve duplicate code with BoundTanh
-class BoundGelu(BoundTanh):
-    sqrt_2 = math.sqrt(2)
+SQRT_2 = math.sqrt(2)
+SQRT_2PI = math.sqrt(2 * math.pi)
+
+
+def _gelu_derivative(x):
+    return (0.5 * (1 + torch.erf(x / SQRT_2))
+            + x * torch.exp(-0.5 * x ** 2) / SQRT_2PI)
+
+
+def _gelu_second_derivative(x):
+    return (2 - x ** 2) * torch.exp(-0.5 * x ** 2) / SQRT_2PI
+
+
+class BoundGelu(BoundSShaped):
+    sqrt_2 = SQRT_2
 
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options, precompute=False)
+        super().__init__(
+            attr, inputs, output_index, options,
+            activation=('gelu', F.gelu, _gelu_derivative))
         self.ibp_intermediate = False
-        self.act_func = F.gelu
-        def d_act_func(x):
-            return (0.5 * (1 + torch.erf(x / self.sqrt_2))
-                    + x * torch.exp(-0.5 * x ** 2) / math.sqrt(2 * torch.pi))
-        self.d_act_func = d_act_func
-        def d2_act_func(x):
-            return (2 * torch.exp(-0.5 * x ** 2) / math.sqrt(2 * torch.pi)
-                    - x ** 2 * torch.exp(-0.5 * x ** 2) / math.sqrt(2 * torch.pi))
-        self.d2_act_func = d2_act_func
-        self.precompute_relaxation(self.act_func, self.d_act_func)
+        self.d2_act_func = _gelu_second_derivative
+        self._precomputed_table_key = None
+        self.d_lower_right = None
+        self.d_upper_right = None
+        self.d_lower_left = None
+        self.d_upper_left = None
+
+    def _ensure_precomputed(self, reference):
+        """Create GeLU tangent tables for this node's graph state."""
+        key = (reference.dtype, reference.device)
+        tables = (
+            self.d_lower_right, self.d_upper_right,
+            self.d_lower_left, self.d_upper_left,
+        )
+        if key == self._precomputed_table_key and all(
+                table is not None for table in tables):
+            return
+        self.precompute_relaxation(
+            self.act_func, self.d_act_func, reference=reference)
+        self._precomputed_table_key = key
 
     def _init_masks(self, x):
         lower = x.lower
@@ -64,10 +88,16 @@ class BoundGelu(BoundTanh):
                     torch.logical_or(self.mask_left_3, self.mask_right_3)))
 
     @torch.no_grad()
-    def precompute_relaxation(self, func, dfunc, x_limit=1000):
+    def precompute_relaxation(
+            self, func, dfunc, x_limit=1000, *, reference):
         """
-        This function precomputes the tangent lines that will be used as
-        lower/upper bounds for S-shapes functions.
+        Populate the four d_lower/upper_left/right tangent tables for GeLU.
+
+        Args:
+            func: GeLU activation.
+            dfunc: Derivative of func.
+            x_limit: Lookup range magnitude.
+            reference (Tensor): Supplies only dtype and device, not values or shape.
         """
         self.x_limit = x_limit
         self.step_pre = 0.01
@@ -94,7 +124,8 @@ class BoundGelu(BoundTanh):
         # Given an upper bound point (>=0), find a line that is guaranteed to
         # be a lower bound of this function.
         upper = self.step_pre * torch.arange(
-            0, self.num_points_pre + 5, device=self.device) + self.sqrt_2
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device) + self.sqrt_2
         r = torch.ones_like(upper)
         # Initial guess, the tangent line is at -1.
         l = -torch.ones_like(upper)
@@ -122,7 +153,8 @@ class BoundGelu(BoundTanh):
         # be an upper bound of this function.
         lower = (
             -self.step_pre * torch.arange(
-                0, self.num_points_pre + 5, device=self.device
+                0, self.num_points_pre + 5,
+                dtype=reference.dtype, device=reference.device
             ) + self.sqrt_2).clamp(min=0.01)
         l = torch.zeros_like(upper) + self.sqrt_2
         r = torch.zeros_like(upper) + x_limit
@@ -139,7 +171,8 @@ class BoundGelu(BoundTanh):
         self.d_upper_right = r.clone()
 
         upper = -self.step_pre * torch.arange(
-            0, self.num_points_pre + 5, device=self.device) - self.sqrt_2
+            0, self.num_points_pre + 5,
+            dtype=reference.dtype, device=reference.device) - self.sqrt_2
         r = torch.zeros_like(upper) - 0.7517916
         # Initial guess, the tangent line is at -1.
         l = torch.zeros_like(upper) - self.sqrt_2
@@ -165,7 +198,8 @@ class BoundGelu(BoundTanh):
         # be an upper bound of this function.
         lower = (
             self.step_pre * torch.arange(
-                0, self.num_points_pre + 5, device=self.device
+                0, self.num_points_pre + 5,
+                dtype=reference.dtype, device=reference.device
             ) - self.sqrt_2).clamp(max=0)
         l = torch.zeros_like(upper) - x_limit
         r = torch.zeros_like(upper) - self.sqrt_2
@@ -195,7 +229,8 @@ class BoundGelu(BoundTanh):
         """Implementation of init_opt_parameters for each start_node."""
         l, u = self.inputs[0].lower, self.inputs[0].upper
         shape = [size_spec] + list(l.shape)
-        alpha = torch.empty(14, *shape, device=l.device)
+        alpha = torch.empty(
+            14, *shape, dtype=l.dtype, device=l.device)
         alpha.data[:4] = ((l + u) / 2).unsqueeze(0).expand(4, *shape)
         alpha.data[4:6] = self.tp_right_lower_init[name_start].expand(2, *shape)
         alpha.data[6:8] = self.tp_right_upper_init[name_start].expand(2, *shape)
@@ -383,16 +418,18 @@ class BoundGelu(BoundTanh):
                 k=dfunc(d_upper_left), x0=d_upper_left)
 
     def bound_relax(self, x, init=False, dim_opt=None):
+        self.require_finite_relaxation_bounds(x.lower, x.upper, operator='gelu')
+        self._ensure_precomputed(x.lower)
         if init:
             self.init_linear_relaxation(x, dim_opt)
         self.bound_relax_impl(x, self.act_func, self.d_act_func)
 
     def interval_propagate(self, *v):
-        pl, pu = self.forward(v[0][0]), self.forward(v[0][1])
+        pl, pu = self.forward(v[0].lower), self.forward(v[0].upper)
         pl, pu = torch.min(pl, pu), torch.max(pl, pu)
-        min_global = self.forward(torch.tensor(-0.7517916))
+        min_global = self.forward(v[0].lower.new_tensor(-0.7517916))
         pl, pu = torch.min(min_global, torch.min(pl, pu)), torch.max(pl, pu)
-        return pl, pu
+        return Interval(pl, pu)
 
 
 class GELUOp(torch.autograd.Function):

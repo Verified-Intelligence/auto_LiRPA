@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -19,7 +19,9 @@ import warnings
 from .bound_ops import *
 from .utils import *
 from .linear_bound import LinearBound
-from .perturbations import PerturbationLpNorm
+from .perturbations import PerturbationL0Norm, PerturbationLpNorm
+from .dynamic_forward_bound import (
+    _require_box_perturbation, _substitute_input_box)
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -29,31 +31,118 @@ import sys
 sys.setrecursionlimit(1000000)
 
 
-def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize=False,
-                    offset=0, from_node=False):
+def _save_forward_A(self: 'BoundedModule', node, lw, uw, lower, upper):
+    """Save target-node forward affine bounds for perturbed model inputs.
+
+    Forward coefficients use the concatenated perturbation coordinates of all
+    roots. Each returned entry is mapped back to one model input. Its bias
+    includes the concretized contributions of all other perturbed roots, as in
+    the backward return_A contract. ``lw`` and ``uw`` have shape
+    ``[batch, perturbation_dim, *target_shape]``; returned coefficients have
+    shape ``[batch, specification, *input_shape]``.
+    """
+    roots = self.roots()
+    lw_flat = lw.reshape(self.batch_size, self.dim_in, -1)
+    uw_flat = uw.reshape(self.batch_size, self.dim_in, -1)
+    lower = lower.reshape(self.batch_size, -1)
+    upper = upper.reshape(self.batch_size, -1)
+    entries = {}
+    requested_inputs = set(self.needed_A_dict.get(node.name, ()))
+    offset = 0
+    for root in roots:
+        if root.perturbation is None:
+            continue
+        next_offset = offset + root.dim
+        if type(root) is not BoundInput or root.name not in requested_inputs:
+            offset = next_offset
+            continue
+        # Lp and L0 initialize forward variables as input coordinates or a
+        # selected subset, so multiplying by this map produces input-space A.
+        if not isinstance(
+                root.perturbation, (PerturbationL0Norm, PerturbationLpNorm)):
+            raise NotImplementedError(
+                'forward return_A supports Lp and L0 input perturbations, got '
+                f'{type(root.perturbation).__name__}')
+        if root.lb is None or root.ub is None:
+            raise RuntimeError(
+                f'Missing forward contribution for root {root.name}')
+
+        input_lw = root.linear.lw[:, offset:next_offset].reshape(
+            self.batch_size, root.dim, -1)
+        input_uw = root.linear.uw[:, offset:next_offset].reshape(
+            self.batch_size, root.dim, -1)
+        coordinate_lA = lw_flat[:, offset:next_offset].transpose(1, 2)
+        coordinate_uA = uw_flat[:, offset:next_offset].transpose(1, 2)
+        # BMM requires one dtype; retain the precision of every coefficient
+        # tensor participating in the coordinate transformation.
+        calculation_dtype = torch.promote_types(
+            torch.promote_types(coordinate_lA.dtype, coordinate_uA.dtype),
+            torch.promote_types(input_lw.dtype, input_uw.dtype))
+        # Expand identity/selector coordinates into model-input coordinates.
+        lA = coordinate_lA.to(dtype=calculation_dtype).bmm(
+            input_lw.to(dtype=calculation_dtype))
+        uA = coordinate_uA.to(dtype=calculation_dtype).bmm(
+            input_uw.to(dtype=calculation_dtype))
+        input_shape = self.get_forward_value(root).shape[1:]
+        # forward_concretize temporarily records this root's contribution.
+        # Removing it leaves a bias that independently concretizes all other
+        # roots and the affine constant term.
+        lbias = lower - root.lb.reshape(self.batch_size, -1)
+        ubias = upper - root.ub.reshape(self.batch_size, -1)
+        entries[root.name] = {
+            'lA': lA.reshape(self.batch_size, -1, *input_shape).detach(),
+            'uA': uA.reshape(self.batch_size, -1, *input_shape).detach(),
+            'lbias': lbias.detach(),
+            'ubias': ubias.detach(),
+            'unstable_idx': None,
+        }
+        offset = next_offset
+    self.A_dict[node.name] = entries
+
+
+def forward_general(
+        self: 'BoundedModule', C=None, node:'Bound'=None, concretize=False,
+        offset=0, from_node=False, return_A=False):
+    """Propagate forward affine bounds and optionally save input-space A."""
 
     if self.dynamic:
-        return self.forward_general_dynamic(C=C, node=node, concretize=concretize, offset=offset)
+        return self.forward_general_dynamic(C=C, node=node)
     if C is None:
         if (hasattr(node, 'linear') and
-            node.linear.lower is not None and node.linear.upper is not None):
+                node.linear.lower is not None
+                and node.linear.upper is not None
+                and not return_A):
             return node.linear.lower, node.linear.upper
-        if not node.from_input:
-            node.linear = LinearBound(None, node.value, None, node.value, node.value, node.value)
-            return node.value, node.value
+        # Exactness follows the active perturbations, including parameters.
         if not node.perturbed:
-            node.lower = node.upper = self.get_forward_value(node)
-        if node.is_lower_bound_current():
+            value = self.get_forward_value(node)
+            node.lower = node.upper = value
+            if node.batch_dim == -1:
+                node.linear = LinearBound(
+                    None, value, None, value, value, value)
+                return value, value
+            # Batch-shaped fixed branches propagate zero coefficients for
+            # return_A, preserving the batch and variable axes when merged.
+        if node.is_lower_bound_current() and not return_A:
             node.linear = LinearBound(None, node.lower, None, node.upper, node.lower, node.upper)
             return node.lower, node.upper
 
     for l_pre in node.inputs:
         if not hasattr(l_pre, 'linear'):
-            self.forward_general(node=l_pre, offset=offset, from_node=from_node)
+            self.forward_general(
+                node=l_pre, offset=offset, from_node=from_node,
+                return_A=return_A)
+        elif (return_A and l_pre.perturbed
+              and (getattr(l_pre.linear, 'lw', None) is None
+                   or getattr(l_pre.linear, 'uw', None) is None)):
+            self.forward_general(
+                node=l_pre, offset=offset, from_node=from_node,
+                return_A=True)
     inp = [l_pre.linear for l_pre in node.inputs]
     node._start = '_forward'
     if (C is not None and type(node) is BoundLinear and
-            not node.is_input_perturbed(1) and not node.is_input_perturbed(2)):
+            not node.is_input_perturbed(1)
+            and not node.is_input_perturbed(2)):
         linear = node.bound_forward(self.dim_in, *inp, C=C)
         C_merged = True
     else:
@@ -85,23 +174,40 @@ def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize
     logger.debug(f'Forward bounds to {node}')
 
     if concretize:
-        if lw is not None or uw is not None:
-            lower, upper = self.concretize_bounds(
-                node=node,
-                lower=lower,
-                upper=upper,
-                concretize_mode='forward',
-                lw=lw,
-                uw=uw,
-                clip_neuron_selection_value=self.clip_neuron_selection_value,
-                clip_neuron_selection_type=self.clip_neuron_selection_type
-            )
+        # return_A exposes temporary per-root concretization contributions;
+        # clear them even if input-coordinate mapping raises an exception.
+        try:
+            if lw is not None or uw is not None:
+                lower, upper = self.concretize_bounds(
+                    node=node,
+                    lower=lower,
+                    upper=upper,
+                    concretize_mode='forward',
+                    lw=lw,
+                    uw=uw,
+                    return_A=return_A,
+                    clip_neuron_selection_value=self.clip_neuron_selection_value,
+                    clip_neuron_selection_type=self.clip_neuron_selection_type
+                )
 
-        linear.lower, linear.upper = lower, upper
+            linear.lower, linear.upper = lower, upper
 
-        if C is None:
-            node.linear = linear
-            node.lower, node.upper = lower, upper
+            if C is None:
+                node.linear = linear
+                node.lower, node.upper = lower, upper
+
+            if return_A:
+                requested_inputs = self.needed_A_dict.get(node.name, ())
+                if requested_inputs and (lw is None or uw is None):
+                    raise RuntimeError(
+                        f'Forward bounds for {node.name} do not contain both '
+                        'lower and upper affine coefficients')
+                if requested_inputs:
+                    _save_forward_A(self, node, lw, uw, lower, upper)
+        finally:
+            if return_A:
+                for root in self.roots():
+                    root.lb = root.ub = None
 
         if self.bound_opts['forward_refinement']:
             need_refinement = False
@@ -114,128 +220,6 @@ def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize
             if need_refinement:
                 self.forward_refinement(node)
         return lower, upper
-
-
-def forward_general_dynamic(self: 'BoundedModule', C=None, node:'Bound'=None,
-                            concretize=False, offset=0):
-    max_dim = self.bound_opts['forward_max_dim']
-
-    if C is None:
-        if hasattr(node, 'linear'):
-            assert not concretize
-
-            linear = node.linear
-            if offset == 0:
-                if linear.lw is None:
-                    return linear
-                elif linear.lw.shape[1] <= max_dim:
-                    return linear
-            if linear.lw is not None:
-                lw = linear.lw[:, offset:offset+max_dim]
-                x_L = linear.x_L[:, offset:offset+max_dim]
-                x_U = linear.x_U[:, offset:offset+max_dim]
-                tot_dim = linear.tot_dim
-                if offset == 0:
-                    lb = linear.lb
-                else:
-                    lb = torch.zeros_like(linear.lb)
-            else:
-                lw = x_L = x_U = None
-                tot_dim = 0
-                lb = linear.lb
-            return LinearBound(
-                lw, lb, lw, lb, x_L=x_L, x_U=x_U,
-                offset=offset, tot_dim=tot_dim,
-            )
-
-        # These cases have no coefficient tensor
-        if not node.from_input:
-            if concretize:
-                return node.value, node.value
-            else:
-                node.linear = LinearBound(
-                    None, node.value, None, node.value, node.value, node.value)
-                return node.linear
-        if not node.perturbed:
-            if not node.is_lower_bound_current():
-                node.lower = node.upper = self.get_forward_value(node)
-            if concretize:
-                return node.lower, node.upper
-            else:
-                if offset > 0:
-                    lb = torch.zeros_like(node.lower)
-                else:
-                    lb = node.lower
-                node.linear = LinearBound(None, lb, None, lb, node.lower, node.upper)
-                return node.linear
-
-    if offset == 0:
-        logger.debug(f'forward_general_dynamic: node={node}')
-
-    inp = []
-    for l_pre in node.inputs:
-        linear_inp = self.forward_general_dynamic(node=l_pre, offset=offset)
-        linear_inp.lower = l_pre.lower
-        linear_inp.upper = l_pre.upper
-        inp.append(linear_inp)
-    node._start = '_forward'
-    if (C is not None and isinstance(node, BoundLinear) and
-            not node.is_input_perturbed(1) and not node.is_input_perturbed(2)):
-        linear = node.bound_dynamic_forward(
-            *inp, C=C, max_dim=max_dim, offset=offset)
-        C_merged = True
-    else:
-        linear = node.bound_dynamic_forward(
-            *inp, max_dim=max_dim, offset=offset)
-        C_merged = False
-    if offset > 0:
-        linear.lb = linear.ub = torch.zeros_like(linear.lb)
-
-    lw, lb, tot_dim = linear.lw, linear.lb, linear.tot_dim
-    #logger.debug(f'forward_general_dynamic: node={node}, w_size={lw.shape[1]}, tot_dim={tot_dim}')
-
-    if C is not None and not C_merged:
-        # FIXME use bound_forward of BoundLinear
-        lw = torch.matmul(lw, C.transpose(-1, -2))
-        lb = torch.matmul(lb.unsqueeze(1), C.transpose(-1, -2)).squeeze(1)
-
-    if concretize:
-        lower = upper = lb
-        if lw is not None:
-            batch_size = lw.shape[0]
-            assert (lw.ndim > 1)
-            if lw.shape[1] > 0:
-                A = lw.reshape(batch_size, lw.shape[1], -1).transpose(1, 2)
-                ptb = PerturbationLpNorm(x_L=linear.x_L, x_U=linear.x_U)
-                lower = lower + ptb.concretize(x=None, A=A, sign=-1).view(lb.shape)
-                upper = upper + ptb.concretize(x=None, A=A, sign=1).view(lb.shape)
-            offset_next = offset + max_dim
-            more = offset_next < tot_dim
-        else:
-            more = False
-
-        if C is None and offset == 0 and not more:
-            node.linear = linear
-
-        if more:
-            if lw is not None and lw.shape[1] > 0:
-                del A
-                del ptb
-                del lw
-                del linear
-            del inp
-            # TODO make it non-recursive
-            lower_next, upper_next = self.forward_general_dynamic(
-                C, node, concretize=True, offset=offset_next)
-            lower = lower + lower_next
-            upper = upper + upper_next
-
-        if C is None:
-            node.lower, node.upper = lower, upper
-
-        return lower, upper
-    else:
-        return linear
 
 
 def clean_memory(self: 'BoundedModule', node):
@@ -278,9 +262,17 @@ def forward_refinement(self: 'BoundedModule', node):
 def init_forward(self: 'BoundedModule', roots, dim_in):
     if dim_in == 0:
         raise ValueError("At least one node should have a specified perturbation")
+    if self.dynamic:
+        # The variable layout below is rebuilt here, so linear bounds laid out
+        # over the previous one have to go. compute_bounds(x=...) already
+        # cleared them; compute_bounds(x=None) reuses the input and does not.
+        root_names = {root.name for root in roots}
+        for node in self.nodes():
+            if node.name not in root_names and hasattr(node, 'linear'):
+                delattr(node, 'linear')
     prev_dim_in = 0
     # Assumption: roots[0] is the input node which implies batch_size
-    batch_size = roots[0].value.shape[0]
+    batch_size = self.get_forward_value(roots[0]).shape[0]
     for i in range(len(roots)):
         if hasattr(roots[i], 'perturbation') and roots[i].perturbation is not None:
             shape = roots[i].linear.lw.shape
@@ -288,16 +280,13 @@ def init_forward(self: 'BoundedModule', roots, dim_in):
                 if shape[1] != dim_in:
                     raise NotImplementedError('Dynamic forward bound is not supported yet when there are multiple perturbed inputs.')
                 ptb = roots[i].perturbation
-                if (type(ptb) != PerturbationLpNorm or ptb.norm < np.inf
-                        or ptb.x_L is None or ptb.x_U is None):
-                    raise NotImplementedError(
-                        'For dynamic forward bounds, only Linf (box) perturbations are supported, and x_L and x_U must be explicitly provided.')
-                roots[i].linear.x_L = (
-                    ptb.x_L_sparse.view(batch_size, -1) if ptb.sparse
-                    else ptb.x_L.view(batch_size, -1))
-                roots[i].linear.x_U = (
-                    ptb.x_U_sparse.view(batch_size, -1) if ptb.sparse
-                    else ptb.x_U.view(batch_size, -1))
+                _require_box_perturbation(ptb)
+                _substitute_input_box(roots[i].linear, ptb)
+                # Which node owns which coefficient columns, seeded with the
+                # input's own range so a node takes its range after it. One
+                # layout serves one propagation.
+                roots[i].linear.dynamic_variable_ranges = {
+                    roots[i].name: (0, dim_in)}
             else:
                 lw = torch.zeros(shape[0], dim_in, *shape[2:]).to(roots[i].linear.lw)
                 lw[:, prev_dim_in:(prev_dim_in+shape[1])] = roots[i].linear.lw
@@ -315,8 +304,10 @@ def init_forward(self: 'BoundedModule', roots, dim_in):
         else:
             b = fv = roots[i].forward_value
             shape = fv.shape
-            if roots[i].from_input:
-                w = torch.zeros(shape[0], dim_in, *shape[1:], device=self.device)
+            if roots[i].batch_dim != -1:
+                w = torch.zeros(
+                    shape[0], dim_in, *shape[1:], dtype=fv.dtype,
+                    device=self.device)
                 warnings.warn(f'Creating a LinearBound with zero weights with shape {w.shape}')
             else:
                 w = None

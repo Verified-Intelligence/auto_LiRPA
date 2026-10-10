@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -26,7 +26,8 @@ from .bounded_tensor import BoundedTensor, BoundedParameter
 from .utils import logger, unpack_inputs
 
 Node = namedtuple('Node', (
-    'name', 'ori_name', 'inputs', 'attr', 'op', 'param', 'input_index',
+    'name', 'ori_name', 'inputs', 'attr', 'op', 'param',
+    'model_input_index',
     'bound_node', 'output_index', 'perturbation'), defaults=(None,) * 10)
 
 def get_node_name(node):
@@ -150,9 +151,12 @@ def parse_graph(graph, inputs, params):
     assert len(list(graph.inputs())) == len(inputs_unpacked) + len(params)
     inputs = [inputs_unpacked[i] for i in range(len(inputs_unpacked)) if used_by_index[i]]
     # index of the used inputs among all the inputs
-    input_index = [i for i in range(len(inputs_unpacked)) if used_by_index[i]]
+    model_input_indices = [
+        i for i in range(len(inputs_unpacked)) if used_by_index[i]]
     # Add a name to all inputs
-    inputs = list(zip(["input_{}".format(input_index[i]) for i in range(len(inputs))], inputs))
+    inputs = list(zip([
+        "input_{}".format(model_input_indices[i])
+        for i in range(len(inputs))], inputs))
     # filter out params that are actually used
     params = [params[i] for i in range(len(params)) if used_by_index[i + len(inputs_unpacked)]]
     inputs_and_params = inputs + params
@@ -182,7 +186,8 @@ def parse_graph(graph, inputs, params):
             'attr': str(n.type()),
             'param': inputs_and_params[i][1] if i >= len(inputs) else None,
             # index among all the inputs including unused ones
-            'input_index': input_index[i] if i < len(inputs) else None,
+            'model_input_index': (
+                model_input_indices[i] if i < len(inputs) else None),
             # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
             'perturbation': perturbation,
         })

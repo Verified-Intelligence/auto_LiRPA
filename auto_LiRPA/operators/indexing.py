@@ -11,7 +11,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from .base import *
@@ -45,7 +45,7 @@ class BoundGather(Bound):
                          f'axis {self.axis}')
 
     def bound_backward(self, last_lA, last_uA, *args, **kwargs):
-        assert self.from_input
+        assert self.batch_dim != -1
 
         def _expand_A_with_zeros(A, axis, idx, max_axis_size):
             # Need to recreate A with three parts: before the gathered element, gathered element, and after gathered element.
@@ -56,14 +56,16 @@ class BoundGather(Bound):
                 shape_pre = list(A.shape)
                 shape_pre[axis] *= idx
                 # Create the same shape as A, except for the dimension to be gathered.
-                tensors.append(torch.zeros(shape_pre, device=A.device))
+                tensors.append(torch.zeros(
+                    shape_pre, dtype=A.dtype, device=A.device))
             # The gathered element itself, in the middle.
             tensors.append(A)
             if max_axis_size - idx - 1 > 0:
                 shape_next = list(A.shape)
                 shape_next[axis] *= max_axis_size - idx - 1
                 # Create the rest part of A.
-                tensors.append(torch.zeros(shape_next, device=A.device))
+                tensors.append(torch.zeros(
+                    shape_next, dtype=A.dtype, device=A.device))
             # Concatenate all three parts together.
             return torch.cat(tensors, dim=axis)
 
@@ -78,7 +80,9 @@ class BoundGather(Bound):
                     return _expand_A_with_zeros(A, self.axis + 1, idx, self.input_shape[self.axis])
                 else:
                     shape = list(A.shape)
-                    final_A = torch.zeros(*shape[:self.axis + 1], self.input_shape[self.axis], *shape[self.axis + 2:], device=A.device)
+                    final_A = torch.zeros(
+                        *shape[:self.axis + 1], self.input_shape[self.axis],
+                        *shape[self.axis + 2:], dtype=A.dtype, device=A.device)
                     idx = self.indices.view([*[1]*(self.axis+1), -1, *[1]*len(shape[self.axis + 2:])])
                     idx = idx.repeat([*A.shape[:self.axis+1], 1, *A.shape[self.axis+2:]])
                     final_A.scatter_add_(dim=self.axis+1, index=idx, src=A)
@@ -100,18 +104,24 @@ class BoundGather(Bound):
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
     def bound_forward(self, dim_in, x, indices):
-        assert self.indices.numel() == 1 and self.indices.ndim <= 1 and (self.indices >= 0).all()
+        assert self.indices.ndim <= 1 and (self.indices >= 0).all()
+        select_indices = self.indices.reshape(-1)
         if isinstance(x, torch.Size):
-            lw = uw = torch.zeros(dim_in, device=self.device)
             lb = ub = torch.index_select(
                 torch.tensor(x, device=self.device),
-                dim=self.axis, index=self.indices).squeeze(self.axis)
+                dim=self.axis, index=select_indices)
+            if self.indices.ndim == 0:
+                lb = ub = lb.squeeze(self.axis)
+            lw = uw = torch.zeros(
+                dim_in, *lb.shape, device=self.device)
         else:
+            # x.lw/x.uw have an extra leading dimension for forward-mode
+            # coefficients, so the concrete gather axis is shifted by one.
             axis = self.axis + 1
-            lw = torch.index_select(x.lw, dim=self.axis + 1, index=self.indices)
-            uw = torch.index_select(x.uw, dim=self.axis + 1, index=self.indices)
-            lb = torch.index_select(x.lb, dim=self.axis, index=self.indices)
-            ub = torch.index_select(x.ub, dim=self.axis, index=self.indices)
+            lw = torch.index_select(x.lw, dim=axis, index=select_indices)
+            uw = torch.index_select(x.uw, dim=axis, index=select_indices)
+            lb = torch.index_select(x.lb, dim=self.axis, index=select_indices)
+            ub = torch.index_select(x.ub, dim=self.axis, index=select_indices)
             if self.indices.ndim == 0:
                 lw = lw.squeeze(axis)
                 uw = uw.squeeze(axis)
@@ -121,7 +131,9 @@ class BoundGather(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-        return self.forward(v[0][0], v[1][0]), self.forward(v[0][1], v[1][0])
+        return Interval(
+            self.forward(v[0].lower, v[1].lower),
+            self.forward(v[0].upper, v[1].lower))
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
         self.solver_vars = self.forward(v[0], v[1])
@@ -223,7 +235,7 @@ class BoundGatherElements(Bound):
         return torch.gather(x, dim=self.axis, index=index)
 
     def bound_backward(self, last_lA, last_uA, x, index, **kwargs):
-        assert self.from_input
+        assert self.batch_dim != -1
 
         dim = self._get_dim()
 
@@ -231,7 +243,8 @@ class BoundGatherElements(Bound):
             if last_A is None:
                 return None
             A = torch.zeros(
-                last_A.shape[0], last_A.shape[1], *x.output_shape[1:], device=last_A.device)
+                last_A.shape[0], last_A.shape[1], *x.output_shape[1:],
+                dtype=last_A.dtype, device=last_A.device)
             A.scatter_(
                 dim=dim + 1,
                 index=self.index.unsqueeze(0).repeat(A.shape[0], *([1] * (A.ndim - 1))),
@@ -242,8 +255,9 @@ class BoundGatherElements(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-        return self.forward(v[0][0], v[1][0]), \
-               self.forward(v[0][1], v[1][1])
+        return Interval(
+            self.forward(v[0].lower, v[1].lower),
+            self.forward(v[0].upper, v[1].upper))
 
     def bound_forward(self, dim_in, x, index):
         assert self.axis != 0

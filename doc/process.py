@@ -5,8 +5,9 @@ import shutil
 from pygit2 import Repository
 
 repo = 'https://github.com/Verified-Intelligence/auto_LiRPA'
-branch = Repository('.').head.shorthand
-repo_file_path = os.path.join(repo, 'tree', branch)
+revision = str(Repository(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))).head.target)
+repo_file_path = os.path.join(repo, 'tree', revision)
 
 # Parse README.md into sections which can be reused
 heading = ''
@@ -57,7 +58,7 @@ for folder in ['src', 'sections']:
                 if folder == 'sections':
                     link_new = os.path.join(repo_file_path, link)
                 else:
-                    link_new = os.path.join(repo_file_path, 'docs/src', link)
+                    link_new = os.path.join(repo_file_path, 'doc/src', link)
                 print(f'Fix link {link} -> {link_new}')
             source_new += f'({link_new})'
             ptr += len(link_raw)
