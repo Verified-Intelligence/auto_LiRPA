@@ -114,6 +114,13 @@ class BoundConv(Bound):
                 # Here we build and propagate a Patch object with (patches, stride, padding)
                 assert self.conv_dim == 2, 'Patches mode not supports conv1d so far.'
                 assert type(last_A) == Patches
+                # Patches carry no dilation, so a dilated kernel would be
+                # propagated as the undilated one and give unsound bounds.
+                # Raise rather than assert so the check survives python -O.
+                if any(d != 1 for d in self.dilation):
+                    raise NotImplementedError(
+                        f'Dilated convolution (dilation={list(self.dilation)}) is not '
+                        'supported in patches mode; use bound_opts={"conv_mode": "matrix"}.')
                 if last_A.identity == 0:
                     if last_A.padding_pos_masked:
                         patches = last_A.patches
