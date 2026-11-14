@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -199,6 +200,50 @@ def test_sparse_patches_activation_matches_dense_spec(monkeypatch):
         torch.testing.assert_close(
             sparse_bound, dense_bound, rtol=0, atol=1e-9)
 
+
+class DilatedConvSum(nn.Module):
+    """A conv, ReLU, a dilated conv, ReLU and a sum. The sum keeps the backward
+    pass in Patches form, and the first conv makes the dilated conv's input
+    perturbed through a bounded layer, so its bounds go through patches."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            2, 2, 3, padding=1, dtype=DEFAULT_DTYPE, device=DEFAULT_DEVICE)
+        self.conv2 = nn.Conv2d(
+            2, 4, 3, padding=2, dilation=2,
+            dtype=DEFAULT_DTYPE, device=DEFAULT_DEVICE)
+
+    def forward(self, x):
+        x = torch.relu(self.conv1(x))
+        return torch.relu(self.conv2(x)).flatten(1).sum(dim=-1, keepdim=True)
+
+
+def test_dilated_conv_patches_mode_is_rejected():
+    """Patches carry no dilation, so a dilated conv must not be bounded in
+    patches mode (it would be bounded as the undilated conv and be unsound).
+    Matrix mode handles dilation and stays sound."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = DilatedConvSum()
+        x0 = torch.rand(1, 2, 6, 6, dtype=DEFAULT_DTYPE, device=DEFAULT_DEVICE)
+        samples = x0 + 0.05 * (2 * torch.rand(
+            512, 2, 6, 6, dtype=DEFAULT_DTYPE, device=DEFAULT_DEVICE) - 1)
+    x = BoundedTensor(x0, PerturbationLpNorm(x_L=x0 - 0.05, x_U=x0 + 0.05))
+
+    bounded_model = BoundedModule(
+        model, torch.zeros_like(x0), bound_opts={'conv_mode': 'patches'},
+        device=DEFAULT_DEVICE)
+    with pytest.raises(NotImplementedError, match='Dilated convolution'):
+        bounded_model.compute_bounds(x=(x,), method='CROWN')
+
+    bounded_model = BoundedModule(
+        model, torch.zeros_like(x0), bound_opts={'conv_mode': 'matrix'},
+        device=DEFAULT_DEVICE)
+    lb, ub = bounded_model.compute_bounds(x=(x,), method='CROWN')
+    with torch.no_grad():
+        y = model(samples)
+    assert (y >= lb - 1e-5).all() and (y <= ub + 1e-5).all()
 
 if __name__ == '__main__':
     testcase = TestConv()
