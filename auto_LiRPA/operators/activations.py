@@ -112,9 +112,16 @@ class BoundATenHeaviside(BoundOptimizableActivation):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-        return Interval(
-            self.forward(v[0].lower, v[1].lower),
-            self.forward(v[0].upper, v[1].lower))
+        at_lower = self.forward(v[0].lower, v[1].lower)
+        at_upper = self.forward(v[0].upper, v[1].lower)
+        # heaviside is monotone only when the value at zero is in [0, 1], so take
+        # both endpoints and, where 0 is in the input interval, the value at zero.
+        lower = torch.minimum(at_lower, at_upper)
+        upper = torch.maximum(at_lower, at_upper)
+        has_zero = (v[0].lower <= 0) & (v[0].upper >= 0)
+        lower = torch.where(has_zero, torch.minimum(lower, v[1].lower), lower)
+        upper = torch.where(has_zero, torch.maximum(upper, v[1].lower), upper)
+        return Interval(lower, upper)
 
     def _init_opt_parameters_impl(self, size_spec, name_start):
         """Implementation of init_opt_parameters for each start_node."""
@@ -127,6 +134,8 @@ class BoundATenHeaviside(BoundOptimizableActivation):
 
     def bound_backward(self, last_lA, last_uA, *x, start_node=None,
                        start_shape=None, **kwargs):
+        # x[1]: the value of heaviside at 0 (not perturbed).
+        value_at_zero = x[1].forward_value
         x = x[0]
         if x is not None:
             lb_r = x.lower
@@ -146,9 +155,14 @@ class BoundATenHeaviside(BoundOptimizableActivation):
 
         upper_b = torch.ones_like(lb_r, device=lb_r.device, dtype=lb_r.dtype)
         lower_b = torch.zeros_like(lb_r, device=lb_r.device, dtype=lb_r.dtype)
-        # For stable neurons, set fixed slope and bias.
-        ub_mask = (ub_r <= 0).to(dtype=ub_r.dtype)
-        lb_mask = (lb_r >= 0).to(dtype=lb_r.dtype)
+        # The relaxation must also hold at 0, where heaviside equals value_at_zero.
+        value_at_zero = torch.as_tensor(value_at_zero).to(lb_r)
+        upper_b = torch.maximum(upper_b, value_at_zero)
+        lower_b = torch.minimum(lower_b, value_at_zero)
+        # For stable neurons, set fixed slope and bias. A bound that is exactly 0
+        # is stable only if value_at_zero equals the value on that side of 0.
+        ub_mask = ((ub_r < 0) | ((ub_r == 0) & (value_at_zero == 0))).to(dtype=ub_r.dtype)
+        lb_mask = ((lb_r > 0) | ((lb_r == 0) & (value_at_zero == 1))).to(dtype=lb_r.dtype)
         upper_b = upper_b - upper_b * ub_mask
         lower_b = lower_b * (1. - lb_mask) + lb_mask
         upper_d = upper_d - upper_d * ub_mask - upper_d * lb_mask
